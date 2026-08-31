@@ -1,0 +1,2379 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="An interactive, code-aligned visualization of the DDIM training, U-Net, and sampling flow." />
+  <title>DDIM — Architecture & Flow Explorer</title>
+  <style>
+    :root {
+      --paper: #f2eee5;
+      --surface: #fbfaf6;
+      --ink: #17191f;
+      --muted: #696d78;
+      --line: #d7d1c6;
+      --night: #17191f;
+      --night-2: #22252d;
+      --orange: #ff694a;
+      --orange-soft: #ffe3da;
+      --blue: #4f72ff;
+      --blue-soft: #e1e7ff;
+      --lime: #c6ee5b;
+      --lime-soft: #edf8ca;
+      --cyan: #67d9d0;
+      --shadow: 0 14px 35px rgba(23, 25, 31, 0.08);
+      --radius: 18px;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--sans);
+      line-height: 1.5;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      border-bottom: 1px solid rgba(23, 25, 31, 0.11);
+      background: rgba(242, 238, 229, 0.92);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      min-height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      font-weight: 760;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--night);
+      color: var(--lime);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      color: #555a65;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .nav-links a:hover,
+    .nav-links a:focus-visible {
+      color: var(--ink);
+    }
+
+    .repo-badge {
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .hero {
+      margin-top: 24px;
+      overflow: hidden;
+      border-radius: 26px;
+      background: var(--night);
+      color: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .hero-grid {
+      min-height: 580px;
+      display: grid;
+      grid-template-columns: 0.95fr 1.35fr;
+    }
+
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: clamp(32px, 5vw, 64px);
+      border-right: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--lime);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 24px;
+      height: 2px;
+      background: currentColor;
+    }
+
+    h1 {
+      max-width: 620px;
+      margin: 20px 0 22px;
+      font-size: clamp(48px, 6vw, 82px);
+      font-weight: 720;
+      line-height: 0.96;
+      letter-spacing: -0.065em;
+    }
+
+    .hero-copy p {
+      max-width: 490px;
+      margin: 0;
+      color: #b9bdc8;
+      font-size: 16px;
+    }
+
+    .hero-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      margin-top: 42px;
+      color: #aeb2bd;
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--orange);
+    }
+
+    .legend-dot.blue {
+      background: var(--blue);
+    }
+
+    .legend-dot.lime {
+      background: var(--lime);
+    }
+
+    .hero-viz {
+      position: relative;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: clamp(28px, 4vw, 54px);
+      background-image:
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+      background-size: 36px 36px;
+    }
+
+    .flow-window {
+      position: relative;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 18px;
+      background: rgba(17, 19, 24, 0.88);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.24);
+    }
+
+    .window-bar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      color: #8e94a2;
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .window-dots {
+      display: flex;
+      gap: 6px;
+    }
+
+    .window-dots i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #454a56;
+    }
+
+    .sampling-scene {
+      position: relative;
+      min-height: 350px;
+      display: grid;
+      grid-template-columns: 1fr 74px 1fr 74px 1fr;
+      align-items: center;
+      gap: 10px;
+      padding: 32px 24px 20px;
+    }
+
+    .sample-stage {
+      min-width: 0;
+      text-align: center;
+    }
+
+    .sample-canvas-wrap {
+      position: relative;
+      width: min(100%, 148px);
+      aspect-ratio: 1;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 16px;
+      background: #101116;
+    }
+
+    .sample-canvas-wrap canvas {
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+    }
+
+    .canvas-overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      opacity: 0;
+      transition: opacity .2s ease;
+    }
+
+    .sample-canvas-wrap:hover .canvas-overlay {
+      opacity: 1;
+    }
+
+    .canvas-overlay span {
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: rgba(12, 13, 17, .78);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .stage-label {
+      margin-top: 12px;
+      color: #c8cbd3;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .stage-label strong {
+      display: block;
+      margin-bottom: 2px;
+      color: #fff;
+      font-family: var(--sans);
+      font-size: 13px;
+    }
+
+    .flow-arrow {
+      color: var(--lime);
+      text-align: center;
+    }
+
+    .flow-arrow svg {
+      width: 100%;
+      height: 20px;
+      overflow: visible;
+    }
+
+    .flow-arrow path {
+      stroke: currentColor;
+      stroke-width: 1.5;
+      fill: none;
+      stroke-dasharray: 4 4;
+      animation: dash 1.2s linear infinite;
+    }
+
+    @keyframes dash {
+      to { stroke-dashoffset: -8; }
+    }
+
+    .flow-arrow span {
+      display: block;
+      margin-top: 5px;
+      color: #8e94a2;
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .step-control {
+      padding: 0 24px 24px;
+    }
+
+    .step-meta {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      color: #8e94a2;
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 4px;
+      margin: 0;
+      appearance: none;
+      border-radius: 10px;
+      outline: none;
+      background: #3a3e49;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      width: 18px;
+      height: 18px;
+      appearance: none;
+      border: 4px solid var(--night);
+      border-radius: 50%;
+      background: var(--lime);
+      box-shadow: 0 0 0 1px rgba(255,255,255,.35);
+      cursor: pointer;
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border: 4px solid var(--night);
+      border-radius: 50%;
+      background: var(--lime);
+      cursor: pointer;
+    }
+
+    .section {
+      padding: 92px 0 0;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(240px, .72fr) 1.28fr;
+      gap: 48px;
+      align-items: end;
+      margin-bottom: 34px;
+    }
+
+    .section-index {
+      color: var(--orange);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 10px 0 0;
+      font-size: clamp(34px, 4vw, 54px);
+      line-height: 1.02;
+      letter-spacing: -.045em;
+    }
+
+    .section-intro {
+      max-width: 660px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 8px 24px rgba(23, 25, 31, 0.04);
+    }
+
+    .mode-switch {
+      display: inline-grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #e9e4da;
+    }
+
+    .mode-switch button {
+      min-width: 124px;
+      padding: 9px 15px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 720;
+      cursor: pointer;
+    }
+
+    .mode-switch button.active {
+      background: var(--surface);
+      color: var(--ink);
+      box-shadow: 0 2px 8px rgba(23, 25, 31, .08);
+    }
+
+    .process-card {
+      overflow: hidden;
+    }
+
+    .process-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .process-toolbar-note {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .process-flow {
+      display: grid;
+      grid-template-columns: 1fr 74px 1fr 74px 1fr 74px 1fr;
+      align-items: stretch;
+      padding: 34px;
+    }
+
+    .process-node {
+      position: relative;
+      min-height: 182px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      transition: transform .2s ease, box-shadow .2s ease;
+    }
+
+    .process-node:hover {
+      transform: translateY(-3px);
+      box-shadow: var(--shadow);
+    }
+
+    .node-icon {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--orange-soft);
+      color: var(--orange);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .process-node:nth-of-type(3) .node-icon {
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .process-node:nth-of-type(5) .node-icon {
+      background: var(--lime-soft);
+      color: #688513;
+    }
+
+    .process-node:nth-of-type(7) .node-icon {
+      background: #ddf7f4;
+      color: #218d84;
+    }
+
+    .process-node h3 {
+      margin: 18px 0 6px;
+      font-size: 16px;
+      letter-spacing: -.02em;
+    }
+
+    .process-node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .process-connector {
+      position: relative;
+      display: grid;
+      place-items: center;
+      color: #8d918f;
+    }
+
+    .process-connector::before {
+      content: "";
+      width: calc(100% - 14px);
+      height: 1px;
+      background: currentColor;
+    }
+
+    .process-connector::after {
+      content: "";
+      position: absolute;
+      right: 8px;
+      width: 7px;
+      height: 7px;
+      border-top: 1px solid currentColor;
+      border-right: 1px solid currentColor;
+      transform: rotate(45deg);
+    }
+
+    .process-connector span {
+      position: absolute;
+      top: calc(50% + 12px);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .architecture {
+      overflow: hidden;
+    }
+
+    .arch-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: center;
+      padding: 17px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .arch-toolbar strong {
+      font-size: 13px;
+    }
+
+    .arch-toolbar span {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .arch-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      min-height: 565px;
+    }
+
+    .unet-map {
+      position: relative;
+      min-width: 0;
+      overflow-x: auto;
+      padding: 40px 28px 30px;
+      background-image:
+        linear-gradient(#ece8df 1px, transparent 1px),
+        linear-gradient(90deg, #ece8df 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+
+    .unet-canvas {
+      position: relative;
+      width: 710px;
+      height: 465px;
+      margin: 0 auto;
+    }
+
+    .unet-lines {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .main-path {
+      fill: none;
+      stroke: #8e929d;
+      stroke-width: 1.5;
+      marker-end: url(#arrowHead);
+    }
+
+    .skip-path {
+      fill: none;
+      stroke: var(--orange);
+      stroke-width: 1.5;
+      stroke-dasharray: 5 5;
+      marker-end: url(#orangeArrow);
+    }
+
+    .temb-path {
+      fill: none;
+      stroke: var(--blue);
+      stroke-width: 1.3;
+      stroke-dasharray: 3 4;
+    }
+
+    .unet-node {
+      position: absolute;
+      width: 118px;
+      min-height: 64px;
+      padding: 11px 12px;
+      border: 1px solid #c8c3ba;
+      border-radius: 11px;
+      background: #fff;
+      box-shadow: 0 5px 14px rgba(23, 25, 31, .05);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+    }
+
+    .unet-node:hover,
+    .unet-node.active {
+      z-index: 3;
+      border-color: var(--blue);
+      transform: translateY(-2px);
+      box-shadow: 0 10px 26px rgba(79, 114, 255, .16);
+    }
+
+    .unet-node .node-kicker {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .unet-node .node-name {
+      display: block;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .unet-node .node-shape {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .unet-node.input {
+      left: 0;
+      top: 24px;
+      border-color: #f0a18f;
+      background: var(--orange-soft);
+    }
+
+    .unet-node.down-1 { left: 154px; top: 24px; }
+    .unet-node.down-2 { left: 154px; top: 127px; }
+    .unet-node.down-3 { left: 154px; top: 230px; }
+    .unet-node.mid {
+      left: 296px;
+      top: 345px;
+      border-color: #a8b7ff;
+      background: var(--blue-soft);
+    }
+    .unet-node.up-3 { left: 438px; top: 230px; }
+    .unet-node.up-2 { left: 438px; top: 127px; }
+    .unet-node.up-1 { left: 438px; top: 24px; }
+    .unet-node.output {
+      left: 592px;
+      top: 24px;
+      border-color: #aaca48;
+      background: var(--lime-soft);
+    }
+
+    .time-embed {
+      position: absolute;
+      left: 286px;
+      top: 24px;
+      width: 142px;
+      min-height: 78px;
+      padding: 12px;
+      border: 1px solid #a8b7ff;
+      border-radius: 40px;
+      background: var(--blue-soft);
+      text-align: center;
+      cursor: pointer;
+    }
+
+    .time-embed .node-name {
+      font-size: 11px;
+      font-weight: 760;
+    }
+
+    .time-embed .node-shape {
+      display: block;
+      margin-top: 3px;
+      color: #566ab7;
+      font-family: var(--mono);
+      font-size: 8px;
+    }
+
+    .res-note {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .arch-detail {
+      padding: 28px 24px;
+      border-left: 1px solid var(--line);
+      background: #f8f6f0;
+    }
+
+    .detail-tag {
+      display: inline-block;
+      margin-bottom: 16px;
+      color: var(--blue);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .arch-detail h3 {
+      margin: 0 0 10px;
+      font-size: 25px;
+      letter-spacing: -.035em;
+    }
+
+    .arch-detail p {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .detail-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .detail-list li {
+      display: grid;
+      grid-template-columns: 82px 1fr;
+      gap: 10px;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+      font-size: 11px;
+    }
+
+    .detail-list span:first-child {
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+
+    .callout {
+      display: flex;
+      gap: 14px;
+      margin-top: 24px;
+      padding: 14px;
+      border-left: 3px solid var(--orange);
+      background: var(--orange-soft);
+      color: #734032;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .skip-legend {
+      display: flex;
+      gap: 18px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .skip-legend i {
+      display: inline-block;
+      width: 20px;
+      height: 1px;
+      margin: 0 6px 3px 0;
+      background: #8e929d;
+    }
+
+    .skip-legend i.orange {
+      height: 0;
+      border-top: 1px dashed var(--orange);
+      background: transparent;
+    }
+
+    .sampler-grid {
+      display: grid;
+      grid-template-columns: 1.18fr .82fr;
+      gap: 20px;
+    }
+
+    .equation-card {
+      overflow: hidden;
+    }
+
+    .equation-head,
+    .lab-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 17px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .equation-head strong,
+    .lab-head strong {
+      font-size: 13px;
+    }
+
+    .equation-head code {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .equation-flow {
+      padding: 26px;
+    }
+
+    .equation-step {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 14px;
+      position: relative;
+      padding-bottom: 26px;
+    }
+
+    .equation-step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 20px;
+      top: 42px;
+      bottom: 3px;
+      width: 1px;
+      background: var(--line);
+    }
+
+    .step-number {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      z-index: 1;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: #fff;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .equation-step.active .step-number {
+      border-color: var(--orange);
+      background: var(--orange);
+      color: #fff;
+    }
+
+    .step-copy h3 {
+      margin: 1px 0 4px;
+      font-size: 14px;
+    }
+
+    .step-copy p {
+      margin: 0 0 9px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .formula {
+      display: block;
+      overflow-x: auto;
+      padding: 10px 12px;
+      border: 1px solid #e4ded3;
+      border-radius: 8px;
+      background: #f3f0e9;
+      color: #333844;
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .formula .orange { color: #d94b2e; }
+    .formula .blue { color: #385ce3; }
+
+    .lab-card {
+      overflow: hidden;
+      background: var(--night);
+      color: #fff;
+      border-color: var(--night);
+    }
+
+    .lab-head {
+      border-color: rgba(255,255,255,.11);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: #aeb3be;
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .status::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--lime);
+      box-shadow: 0 0 0 4px rgba(198,238,91,.11);
+    }
+
+    .lab-body {
+      padding: 24px 22px 20px;
+    }
+
+    .control-group {
+      margin-bottom: 25px;
+    }
+
+    .control-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 11px;
+      color: #b5bac6;
+      font-size: 11px;
+    }
+
+    .control-label output {
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .eta-spectrum {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      margin-top: 9px;
+      color: #7f8592;
+      font-family: var(--mono);
+      font-size: 8px;
+    }
+
+    .eta-spectrum span:last-child {
+      text-align: right;
+    }
+
+    .trajectory {
+      position: relative;
+      margin: 22px 0 15px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: #111319;
+    }
+
+    .trajectory canvas {
+      display: block;
+      width: 100%;
+      height: 180px;
+    }
+
+    .trajectory-label {
+      position: absolute;
+      left: 12px;
+      top: 10px;
+      color: #707684;
+      font-family: var(--mono);
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .lab-result {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .metric {
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 10px;
+      background: var(--night-2);
+    }
+
+    .metric span {
+      display: block;
+      color: #828895;
+      font-family: var(--mono);
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 4px;
+      color: var(--lime);
+      font-size: 13px;
+    }
+
+    .timeline-card {
+      margin-top: 20px;
+      padding: 26px;
+    }
+
+    .timeline-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 22px;
+    }
+
+    .timeline-head h3 {
+      margin: 0 0 4px;
+      font-size: 18px;
+    }
+
+    .timeline-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .timeline-track {
+      position: relative;
+      min-height: 90px;
+      padding: 16px 12px 0;
+      overflow: hidden;
+    }
+
+    .timeline-line {
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      top: 29px;
+      height: 2px;
+      background: var(--line);
+    }
+
+    .timeline-points {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      min-width: 0;
+    }
+
+    .timeline-point {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 8px;
+    }
+
+    .timeline-point i {
+      width: 12px;
+      height: 12px;
+      border: 3px solid var(--surface);
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px var(--blue);
+    }
+
+    .timeline-point:first-child i {
+      background: var(--orange);
+      box-shadow: 0 0 0 1px var(--orange);
+    }
+
+    .timeline-point:last-child i {
+      background: #82a52a;
+      box-shadow: 0 0 0 1px #82a52a;
+    }
+
+    .schedule-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .chart-card {
+      padding: 20px;
+    }
+
+    .chart-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 15px;
+    }
+
+    .chart-head strong {
+      font-size: 13px;
+    }
+
+    .chart-head code {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .chart-wrap {
+      position: relative;
+      height: 230px;
+    }
+
+    .chart-wrap canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    .chart-caption {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .compare-card {
+      overflow: hidden;
+    }
+
+    .compare-row {
+      display: grid;
+      grid-template-columns: 150px 1fr 1fr;
+      border-top: 1px solid var(--line);
+    }
+
+    .compare-row:first-child {
+      border-top: 0;
+      background: #eeeae1;
+    }
+
+    .compare-row > div {
+      min-width: 0;
+      padding: 15px 18px;
+      border-left: 1px solid var(--line);
+      font-size: 12px;
+    }
+
+    .compare-row > div:first-child {
+      border-left: 0;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .compare-row:first-child > div {
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+    }
+
+    .compare-row code {
+      color: var(--blue);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .code-map {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+
+    .code-card {
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 20px;
+    }
+
+    .file-path {
+      color: var(--orange);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .code-card h3 {
+      margin: 18px 0 8px;
+      font-size: 16px;
+    }
+
+    .code-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+
+    .code-symbol {
+      margin-top: 24px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      color: #454a55;
+      font-family: var(--mono);
+      font-size: 9px;
+    }
+
+    .takeaway {
+      display: grid;
+      grid-template-columns: 1fr 1.3fr;
+      gap: 44px;
+      margin: 92px 0 34px;
+      padding: clamp(30px, 5vw, 60px);
+      border-radius: 24px;
+      background: var(--blue);
+      color: #fff;
+    }
+
+    .takeaway h2 {
+      margin: 0;
+      max-width: 420px;
+    }
+
+    .takeaway-copy {
+      display: grid;
+      gap: 12px;
+    }
+
+    .takeaway-item {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 13px;
+      padding: 14px 0;
+      border-top: 1px solid rgba(255,255,255,.2);
+    }
+
+    .takeaway-item:first-child {
+      border-top: 0;
+    }
+
+    .takeaway-item span:first-child {
+      color: var(--lime);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .takeaway-item strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .takeaway-item p {
+      margin: 0;
+      color: #dce2ff;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 30px;
+      padding: 28px 0 40px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    footer code {
+      font-family: var(--mono);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .section-head,
+      .takeaway {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-copy {
+        min-height: 470px;
+        border-right: 0;
+        border-bottom: 1px solid rgba(255,255,255,.12);
+      }
+
+      .process-flow {
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+
+      .process-connector {
+        min-height: 38px;
+      }
+
+      .process-connector::before {
+        width: 1px;
+        height: 30px;
+      }
+
+      .process-connector::after {
+        right: auto;
+        bottom: 5px;
+        transform: rotate(135deg);
+      }
+
+      .process-connector span {
+        top: auto;
+        left: calc(50% + 14px);
+      }
+
+      .arch-body {
+        grid-template-columns: 1fr;
+      }
+
+      .arch-detail {
+        border-top: 1px solid var(--line);
+        border-left: 0;
+      }
+
+      .sampler-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .code-map {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: min(100% - 20px, 1180px);
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .repo-badge {
+        display: none;
+      }
+
+      .hero {
+        margin-top: 10px;
+        border-radius: 18px;
+      }
+
+      .hero-copy {
+        min-height: 430px;
+        padding: 34px 24px;
+      }
+
+      h1 {
+        font-size: 52px;
+      }
+
+      .hero-viz {
+        padding: 22px 12px;
+      }
+
+      .sampling-scene {
+        min-height: 500px;
+        grid-template-columns: 1fr 34px 1fr;
+        grid-template-rows: auto auto;
+        padding: 25px 14px;
+      }
+
+      .sampling-scene .sample-stage:last-of-type {
+        grid-column: 3;
+        grid-row: 2;
+      }
+
+      .sampling-scene .flow-arrow:nth-of-type(4) {
+        grid-column: 2;
+        grid-row: 2;
+      }
+
+      .section {
+        padding-top: 68px;
+      }
+
+      .section-head {
+        gap: 22px;
+      }
+
+      .process-toolbar,
+      .arch-toolbar,
+      .timeline-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .process-flow {
+        padding: 20px;
+      }
+
+      .schedule-grid,
+      .code-map {
+        grid-template-columns: 1fr;
+      }
+
+      .compare-row {
+        grid-template-columns: 100px 1fr 1fr;
+      }
+
+      .compare-row > div {
+        padding: 12px 10px;
+      }
+
+      .takeaway {
+        gap: 22px;
+        margin-top: 68px;
+      }
+
+      footer {
+        flex-direction: column;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="#top" aria-label="DDIM Flow Explorer home">
+        <span class="brand-mark">εθ</span>
+        <span>DDIM Flow Explorer</span>
+      </a>
+      <nav class="nav-links" aria-label="Page sections">
+        <a href="#big-picture">Big picture</a>
+        <a href="#unet">U-Net</a>
+        <a href="#sampler">Sampler</a>
+        <a href="#code-map">Code map</a>
+      </nav>
+      <span class="repo-badge">ermongroup/ddim · code-aligned</span>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="shell hero" aria-labelledby="hero-title">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <div>
+            <span class="eyebrow">Interactive architecture map</span>
+            <h1 id="hero-title">From noise<br />to signal.</h1>
+            <p>
+              DDIM reuses a DDPM-trained noise-prediction U-Net, then follows a shorter,
+              optionally deterministic path back to an image.
+            </p>
+          </div>
+          <div class="hero-legend" aria-label="Color legend">
+            <span class="legend-item"><i class="legend-dot"></i> state / image</span>
+            <span class="legend-item"><i class="legend-dot blue"></i> learned network</span>
+            <span class="legend-item"><i class="legend-dot lime"></i> sampling rule</span>
+          </div>
+        </div>
+
+        <div class="hero-viz">
+          <div class="flow-window">
+            <div class="window-bar">
+              <div class="window-dots"><i></i><i></i><i></i></div>
+              <span>reverse_process.ddim</span>
+              <span id="hero-step-readout">t = 650</span>
+            </div>
+            <div class="sampling-scene">
+              <div class="sample-stage">
+                <div class="sample-canvas-wrap">
+                  <canvas id="noise-canvas" width="96" height="96" aria-label="Mostly noisy sample"></canvas>
+                  <div class="canvas-overlay"><span>x<sub>t</sub></span></div>
+                </div>
+                <div class="stage-label"><strong>Current state</strong>x<sub>t</sub></div>
+              </div>
+              <div class="flow-arrow" aria-hidden="true">
+                <svg viewBox="0 0 80 20"><path d="M2 10 H73 M67 4 L74 10 L67 16"></path></svg>
+                <span>ε<sub>θ</sub>(x<sub>t</sub>,t)</span>
+              </div>
+              <div class="sample-stage">
+                <div class="sample-canvas-wrap">
+                  <canvas id="estimate-canvas" width="96" height="96" aria-label="Estimated clean sample"></canvas>
+                  <div class="canvas-overlay"><span>x̂<sub>0</sub></span></div>
+                </div>
+                <div class="stage-label"><strong>Clean estimate</strong>x̂<sub>0</sub></div>
+              </div>
+              <div class="flow-arrow" aria-hidden="true">
+                <svg viewBox="0 0 80 20"><path d="M2 10 H73 M67 4 L74 10 L67 16"></path></svg>
+                <span>DDIM update</span>
+              </div>
+              <div class="sample-stage">
+                <div class="sample-canvas-wrap">
+                  <canvas id="next-canvas" width="96" height="96" aria-label="Less noisy next sample"></canvas>
+                  <div class="canvas-overlay"><span>x<sub>t−Δ</sub></span></div>
+                </div>
+                <div class="stage-label"><strong>Next state</strong>x<sub>t−Δ</sub></div>
+              </div>
+            </div>
+            <div class="step-control">
+              <div class="step-meta">
+                <span>clean image · t = 0</span>
+                <span>drag through the trajectory</span>
+                <span>noise · t = 999</span>
+              </div>
+              <label class="sr-only" for="hero-step">Diffusion timestep</label>
+              <input id="hero-step" type="range" min="0" max="999" value="650" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="big-picture" class="shell section" aria-labelledby="big-picture-title">
+      <div class="section-head">
+        <div>
+          <span class="section-index">01 · Big picture</span>
+          <h2 id="big-picture-title">One network.<br />Two processes.</h2>
+        </div>
+        <p class="section-intro">
+          Training teaches the U-Net to identify noise at arbitrary timesteps. Sampling
+          repeatedly calls that same network, but DDIM chooses a new reverse transition
+          that can skip most of the original 1,000 steps.
+        </p>
+      </div>
+
+      <div class="card process-card">
+        <div class="process-toolbar">
+          <div class="mode-switch" role="tablist" aria-label="Process mode">
+            <button id="training-tab" class="active" role="tab" aria-selected="true">Training</button>
+            <button id="sampling-tab" role="tab" aria-selected="false">Sampling</button>
+          </div>
+          <span id="process-note" class="process-toolbar-note">functions/losses.py · noise_estimation_loss()</span>
+        </div>
+        <div id="process-flow" class="process-flow" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="unet" class="shell section" aria-labelledby="unet-title">
+      <div class="section-head">
+        <div>
+          <span class="section-index">02 · Noise predictor</span>
+          <h2 id="unet-title">Inside ε<sub>θ</sub></h2>
+        </div>
+        <p class="section-intro">
+          The model is a time-conditioned U-Net. The encoder compresses spatial detail,
+          the bottleneck mixes global context, and the decoder reconstructs a full-resolution
+          noise field using skip connections.
+        </p>
+      </div>
+
+      <div class="card architecture">
+        <div class="arch-toolbar">
+          <strong>U-Net architecture · CIFAR-10 configuration</strong>
+          <span>click a block to inspect it</span>
+        </div>
+        <div class="arch-body">
+          <div class="unet-map">
+            <div class="unet-canvas">
+              <svg class="unet-lines" viewBox="0 0 710 465" aria-hidden="true">
+                <defs>
+                  <marker id="arrowHead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                    <path d="M0 0 L8 4 L0 8 Z" fill="#8e929d"></path>
+                  </marker>
+                  <marker id="orangeArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                    <path d="M0 0 L8 4 L0 8 Z" fill="#ff694a"></path>
+                  </marker>
+                </defs>
+                <path class="main-path" d="M118 56 H148"></path>
+                <path class="main-path" d="M213 89 V120"></path>
+                <path class="main-path" d="M213 192 V223"></path>
+                <path class="main-path" d="M213 295 C213 360 248 377 290 377"></path>
+                <path class="main-path" d="M414 377 C456 377 497 330 497 301"></path>
+                <path class="main-path" d="M497 230 V199"></path>
+                <path class="main-path" d="M497 127 V96"></path>
+                <path class="main-path" d="M556 56 H586"></path>
+                <path class="skip-path" d="M272 53 C342 118 368 118 438 53"></path>
+                <path class="skip-path" d="M272 159 H432"></path>
+                <path class="skip-path" d="M272 262 H432"></path>
+                <path class="temb-path" d="M357 102 V332"></path>
+                <path class="temb-path" d="M286 63 H276"></path>
+                <path class="temb-path" d="M286 74 C260 96 254 119 254 127"></path>
+                <path class="temb-path" d="M428 63 H438"></path>
+                <path class="temb-path" d="M428 74 C454 96 456 119 456 127"></path>
+              </svg>
+
+              <button class="unet-node input" data-node="input">
+                <span class="node-kicker">Input</span>
+                <span class="node-name">Noisy image x<sub>t</sub></span>
+                <span class="node-shape">3 × 32 × 32</span>
+              </button>
+              <button class="unet-node down-1 active" data-node="down1">
+                <span class="node-kicker">Encoder · L1</span>
+                <span class="node-name">2× ResBlock</span>
+                <span class="node-shape">128 × 32 × 32</span>
+              </button>
+              <button class="unet-node down-2" data-node="down2">
+                <span class="node-kicker">Encoder · L2</span>
+                <span class="node-name">Res + Attention</span>
+                <span class="node-shape">256 × 16 × 16</span>
+              </button>
+              <button class="unet-node down-3" data-node="down3">
+                <span class="node-kicker">Encoder · L3/4</span>
+                <span class="node-name">Deep features</span>
+                <span class="node-shape">256 × 8 × 8 → 4 × 4</span>
+              </button>
+              <button class="unet-node mid" data-node="mid">
+                <span class="node-kicker">Bottleneck</span>
+                <span class="node-name">Res · Attn · Res</span>
+                <span class="node-shape">256 × 4 × 4</span>
+              </button>
+              <button class="unet-node up-3" data-node="up3">
+                <span class="node-kicker">Decoder · L3/4</span>
+                <span class="node-name">Concat + Res</span>
+                <span class="node-shape">4 × 4 → 8 × 8</span>
+              </button>
+              <button class="unet-node up-2" data-node="up2">
+                <span class="node-kicker">Decoder · L2</span>
+                <span class="node-name">Concat + Attn</span>
+                <span class="node-shape">256 × 16 × 16</span>
+              </button>
+              <button class="unet-node up-1" data-node="up1">
+                <span class="node-kicker">Decoder · L1</span>
+                <span class="node-name">Full resolution</span>
+                <span class="node-shape">128 × 32 × 32</span>
+              </button>
+              <button class="unet-node output" data-node="output">
+                <span class="node-kicker">Output</span>
+                <span class="node-name">Predicted noise ε</span>
+                <span class="node-shape">3 × 32 × 32</span>
+              </button>
+              <button class="time-embed" data-node="temb">
+                <span class="node-name">t → sinusoid → MLP</span>
+                <span class="node-shape">128 → 512 → 512</span>
+              </button>
+              <span class="res-note">channels follow configs/cifar10.yml · attention at 16×16</span>
+            </div>
+            <div class="skip-legend">
+              <span><i></i> feature flow</span>
+              <span><i class="orange"></i> skip concatenation</span>
+              <span style="color:var(--blue)">⋯ timestep conditioning</span>
+            </div>
+          </div>
+          <aside class="arch-detail" aria-live="polite">
+            <span id="detail-tag" class="detail-tag">Encoder stage</span>
+            <h3 id="detail-title">Down level 1</h3>
+            <p id="detail-copy">
+              Two residual blocks process the full-resolution feature map. Each block
+              receives the projected timestep embedding, so the same weights behave
+              differently at every noise level.
+            </p>
+            <ul class="detail-list">
+              <li><span>operation</span><strong id="detail-op">ResBlock × 2</strong></li>
+              <li><span>resolution</span><strong id="detail-res">32 × 32</strong></li>
+              <li><span>channels</span><strong id="detail-ch">128</strong></li>
+              <li><span>source</span><strong id="detail-source">models/diffusion.py</strong></li>
+            </ul>
+            <div class="callout">
+              <span>→</span>
+              <span id="detail-callout">Every intermediate feature is saved in <code>hs</code> for a matching decoder skip connection.</span>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="sampler" class="shell section" aria-labelledby="sampler-title">
+      <div class="section-head">
+        <div>
+          <span class="section-index">03 · Reverse step</span>
+          <h2 id="sampler-title">One DDIM update</h2>
+        </div>
+        <p class="section-intro">
+          At every selected timestep, the U-Net predicts noise. The sampler converts that
+          prediction into a clean-image estimate and blends it into the next, less noisy state.
+          η decides whether fresh randomness is added.
+        </p>
+      </div>
+
+      <div class="sampler-grid">
+        <article class="card equation-card">
+          <div class="equation-head">
+            <strong>generalized_steps()</strong>
+            <code>functions/denoising.py</code>
+          </div>
+          <div class="equation-flow">
+            <div class="equation-step active">
+              <span class="step-number">01</span>
+              <div class="step-copy">
+                <h3>Predict the noise</h3>
+                <p>The learned U-Net is the only neural-network call in the step.</p>
+                <code class="formula"><span class="blue">ε<sub>t</sub></span> = ε<sub>θ</sub>(x<sub>t</sub>, t)</code>
+              </div>
+            </div>
+            <div class="equation-step">
+              <span class="step-number">02</span>
+              <div class="step-copy">
+                <h3>Recover a clean estimate</h3>
+                <p>Remove predicted noise and undo the signal scaling at timestep t.</p>
+                <code class="formula">x̂<sub>0</sub> = (x<sub>t</sub> − √(1−ᾱ<sub>t</sub>) <span class="blue">ε<sub>t</sub></span>) / √ᾱ<sub>t</sub></code>
+              </div>
+            </div>
+            <div class="equation-step">
+              <span class="step-number">03</span>
+              <div class="step-copy">
+                <h3>Set the stochasticity</h3>
+                <p>η = 0 removes this fresh-noise term; η = 1 approaches a DDPM-like variance.</p>
+                <code class="formula"><span class="orange">σ<sub>t</sub></span> = η √((1−ᾱ<sub>t</sub>/ᾱ<sub>next</sub>)(1−ᾱ<sub>next</sub>)/(1−ᾱ<sub>t</sub>))</code>
+              </div>
+            </div>
+            <div class="equation-step">
+              <span class="step-number">04</span>
+              <div class="step-copy">
+                <h3>Move to the next state</h3>
+                <p>Combine predicted signal, the direction toward x<sub>t</sub>, and optional fresh noise.</p>
+                <code class="formula">x<sub>next</sub> = √ᾱ<sub>next</sub>x̂<sub>0</sub> + √(1−ᾱ<sub>next</sub>−<span class="orange">σ²<sub>t</sub></span>)ε<sub>t</sub> + <span class="orange">σ<sub>t</sub>z</span></code>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <aside class="card lab-card">
+          <div class="lab-head">
+            <strong>Sampler lab</strong>
+            <span class="status">live</span>
+          </div>
+          <div class="lab-body">
+            <div class="control-group">
+              <label class="control-label" for="eta-control">
+                <span>Stochasticity · η</span>
+                <output id="eta-output">0.00</output>
+              </label>
+              <input id="eta-control" type="range" min="0" max="1" step="0.01" value="0" />
+              <div class="eta-spectrum"><span>deterministic DDIM</span><span>DDPM-like</span></div>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label" for="steps-control">
+                <span>Sampling steps</span>
+                <output id="steps-output">50</output>
+              </label>
+              <input id="steps-control" type="range" min="10" max="100" step="10" value="50" />
+              <div class="eta-spectrum"><span>fast / coarse</span><span>slow / refined</span></div>
+            </div>
+
+            <div class="trajectory">
+              <span class="trajectory-label">conceptual reverse trajectories</span>
+              <canvas id="trajectory-canvas" width="360" height="180" aria-label="Conceptual DDIM trajectory plot"></canvas>
+            </div>
+
+            <div class="lab-result">
+              <div class="metric">
+                <span>Path</span>
+                <strong id="path-metric">Deterministic</strong>
+              </div>
+              <div class="metric">
+                <span>Network calls</span>
+                <strong id="call-metric">50</strong>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="card timeline-card">
+        <div class="timeline-head">
+          <div>
+            <h3>Subsequence, not retraining</h3>
+            <p>The 1,000-step training schedule stays fixed. Sampling selects a smaller sequence from it.</p>
+          </div>
+          <code id="timeline-code" class="process-toolbar-note">seq = range(0, 1000, 20)</code>
+        </div>
+        <div class="timeline-track">
+          <div class="timeline-line"></div>
+          <div id="timeline-points" class="timeline-points"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell section" aria-labelledby="schedule-title">
+      <div class="section-head">
+        <div>
+          <span class="section-index">04 · Schedule</span>
+          <h2 id="schedule-title">Signal fades.<br />Noise takes over.</h2>
+        </div>
+        <p class="section-intro">
+          The linear β schedule controls how quickly clean signal is destroyed during training.
+          Its cumulative product ᾱ<sub>t</sub> is also the coordinate system used by every DDIM reverse update.
+        </p>
+      </div>
+
+      <div class="schedule-grid">
+        <div class="card chart-card">
+          <div class="chart-head">
+            <strong>Linear β schedule</strong>
+            <code>0.0001 → 0.02</code>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="schedule-canvas" width="540" height="230" aria-label="Alpha cumulative product and noise strength chart"></canvas>
+          </div>
+          <p class="chart-caption">CIFAR-10 config · 1,000 diffusion timesteps</p>
+        </div>
+
+        <div class="card compare-card" aria-label="DDIM and DDPM comparison">
+          <div class="compare-row">
+            <div>property</div>
+            <div>DDIM · η = 0</div>
+            <div>DDPM-style</div>
+          </div>
+          <div class="compare-row">
+            <div>training</div>
+            <div>same noise objective</div>
+            <div>same noise objective</div>
+          </div>
+          <div class="compare-row">
+            <div>network</div>
+            <div>same <code>εθ</code> U-Net</div>
+            <div>same <code>εθ</code> U-Net</div>
+          </div>
+          <div class="compare-row">
+            <div>reverse path</div>
+            <div>deterministic given x<sub>T</sub></div>
+            <div>fresh noise each step</div>
+          </div>
+          <div class="compare-row">
+            <div>step count</div>
+            <div>can skip aggressively</div>
+            <div>typically follows all steps</div>
+          </div>
+          <div class="compare-row">
+            <div>in this repo</div>
+            <div><code>generalized_steps</code></div>
+            <div><code>ddpm_steps</code></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="code-map" class="shell section" aria-labelledby="code-map-title">
+      <div class="section-head">
+        <div>
+          <span class="section-index">05 · Repository map</span>
+          <h2 id="code-map-title">Where each idea lives.</h2>
+        </div>
+        <p class="section-intro">
+          The architecture separates cleanly into orchestration, neural network, training
+          objective, and reverse-process math. These are the four files to read in order.
+        </p>
+      </div>
+
+      <div class="code-map">
+        <article class="card code-card">
+          <div>
+            <span class="file-path">runners/diffusion.py</span>
+            <h3>Orchestration</h3>
+            <p>Builds the β schedule, trains the network, selects sample timesteps, and dispatches to DDIM or DDPM sampling.</p>
+          </div>
+          <code class="code-symbol">Diffusion.sample_image()</code>
+        </article>
+        <article class="card code-card">
+          <div>
+            <span class="file-path">models/diffusion.py</span>
+            <h3>Noise U-Net</h3>
+            <p>Defines timestep embeddings, residual and attention blocks, downsampling, bottleneck, skip connections, and upsampling.</p>
+          </div>
+          <code class="code-symbol">Model.forward(x, t)</code>
+        </article>
+        <article class="card code-card">
+          <div>
+            <span class="file-path">functions/losses.py</span>
+            <h3>Training signal</h3>
+            <p>Constructs x<sub>t</sub> directly from x<sub>0</sub> and ε, then minimizes squared error between real and predicted noise.</p>
+          </div>
+          <code class="code-symbol">noise_estimation_loss()</code>
+        </article>
+        <article class="card code-card">
+          <div>
+            <span class="file-path">functions/denoising.py</span>
+            <h3>Reverse update</h3>
+            <p>Implements the generalized DDIM step, computes x̂<sub>0</sub>, and uses η to control the added variance.</p>
+          </div>
+          <code class="code-symbol">generalized_steps()</code>
+        </article>
+      </div>
+    </section>
+
+    <aside class="shell takeaway" aria-labelledby="takeaway-title">
+      <h2 id="takeaway-title">The mental model to keep.</h2>
+      <div class="takeaway-copy">
+        <div class="takeaway-item">
+          <span>01</span>
+          <div><strong>Training learns noise, not images directly.</strong><p>The U-Net sees a corrupted image and timestep, then predicts the exact noise used to corrupt it.</p></div>
+        </div>
+        <div class="takeaway-item">
+          <span>02</span>
+          <div><strong>DDIM is mainly a sampler.</strong><p>It changes how predictions are turned into the next state; the learned network and training loss stay the same.</p></div>
+        </div>
+        <div class="takeaway-item">
+          <span>03</span>
+          <div><strong>η and step count are separate controls.</strong><p>η controls randomness. The selected timestep subsequence controls compute and trajectory resolution.</p></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="shell">
+    <span>Built as a self-contained guide to this repository’s implementation.</span>
+    <code>DDIM · Denoising Diffusion Implicit Models</code>
+  </footer>
+
+  <script>
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+    function seededNoise(x, y, seed = 0) {
+      const v = Math.sin(x * 12.9898 + y * 78.233 + seed * 37.719) * 43758.5453;
+      return (v - Math.floor(v)) * 2 - 1;
+    }
+
+    function cleanSignal(x, y) {
+      const nx = x / 96;
+      const ny = y / 96;
+      const cx = nx - 0.5;
+      const cy = ny - 0.48;
+      const radial = Math.exp(-(cx * cx + cy * cy) * 13);
+      const ring = Math.exp(-Math.pow(Math.sqrt(cx * cx + cy * cy) - 0.27, 2) * 280);
+      const diagonal = Math.exp(-Math.pow(ny - (0.24 + nx * 0.52), 2) * 150);
+      const eye1 = Math.exp(-((nx - .39) ** 2 + (ny - .43) ** 2) * 800);
+      const eye2 = Math.exp(-((nx - .61) ** 2 + (ny - .43) ** 2) * 800);
+      return clamp(radial * .62 + ring * .22 + diagonal * .28 - (eye1 + eye2) * .34, 0, 1);
+    }
+
+    function drawSample(canvas, timestep, variant) {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const image = ctx.createImageData(w, h);
+      const t = clamp(timestep / 999, 0, 1);
+      let noiseMix = Math.pow(t, .58);
+      let cleanMix = 1 - Math.pow(t, .74);
+
+      if (variant === "estimate") {
+        noiseMix *= .18;
+        cleanMix = .94;
+      } else if (variant === "next") {
+        noiseMix *= .78;
+        cleanMix = clamp(cleanMix + .14, 0, 1);
+      }
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const n1 = seededNoise(x, y, 2);
+          const n2 = seededNoise(x * .71, y * .83, 7);
+          const signal = cleanSignal(x, y);
+          const edge = cleanSignal(x + 3, y) - cleanSignal(x - 3, y);
+          const base = clamp(.5 + signal * .46 + edge * .18, 0, 1);
+          const val = clamp(base * cleanMix + (.5 + n1 * .42 + n2 * .08) * noiseMix, 0, 1);
+          const i = (y * w + x) * 4;
+          image.data[i] = clamp(24 + val * 205 + signal * 24, 0, 255);
+          image.data[i + 1] = clamp(28 + val * 185 + signal * 16, 0, 255);
+          image.data[i + 2] = clamp(36 + val * 170 + (1 - signal) * 22, 0, 255);
+          image.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(image, 0, 0);
+    }
+
+    const heroStep = document.getElementById("hero-step");
+    const heroReadout = document.getElementById("hero-step-readout");
+    const noiseCanvas = document.getElementById("noise-canvas");
+    const estimateCanvas = document.getElementById("estimate-canvas");
+    const nextCanvas = document.getElementById("next-canvas");
+
+    function updateHero() {
+      const t = Number(heroStep.value);
+      heroReadout.textContent = `t = ${t}`;
+      drawSample(noiseCanvas, t, "current");
+      drawSample(estimateCanvas, t, "estimate");
+      drawSample(nextCanvas, Math.max(0, t - 100), "next");
+    }
+    heroStep.addEventListener("input", updateHero);
+    updateHero();
+
+    const processData = {
+      training: [
+        { icon: "x₀", title: "Clean data", copy: "Sample an image from the training dataset." },
+        { connector: "random t, ε" },
+        { icon: "xₜ", title: "Add known noise", copy: "xₜ = √ᾱₜ x₀ + √(1−ᾱₜ) ε" },
+        { connector: "xₜ + t" },
+        { icon: "εθ", title: "Predict noise", copy: "The time-conditioned U-Net estimates ε." },
+        { connector: "MSE" },
+        { icon: "L", title: "Update weights", copy: "Minimize ‖ε − εθ(xₜ,t)‖²." }
+      ],
+      sampling: [
+        { icon: "xT", title: "Gaussian noise", copy: "Begin from xₜ ~ N(0, I) at the largest timestep." },
+        { connector: "selected t" },
+        { icon: "εθ", title: "Predict noise", copy: "Call the same trained U-Net at the current timestep." },
+        { connector: "derive x̂₀" },
+        { icon: "x̂₀", title: "Estimate signal", copy: "Rearrange the forward equation to recover a clean estimate." },
+        { connector: "DDIM update" },
+        { icon: "xnext", title: "Step backward", copy: "Mix signal, direction, and η-scaled noise; repeat." }
+      ]
+    };
+
+    const processFlow = document.getElementById("process-flow");
+    const trainingTab = document.getElementById("training-tab");
+    const samplingTab = document.getElementById("sampling-tab");
+    const processNote = document.getElementById("process-note");
+
+    function renderProcess(mode) {
+      processFlow.innerHTML = processData[mode].map(item => {
+        if (item.connector) {
+          return `<div class="process-connector" aria-hidden="true"><span>${item.connector}</span></div>`;
+        }
+        return `<article class="process-node"><span class="node-icon">${item.icon}</span><div><h3>${item.title}</h3><p>${item.copy}</p></div></article>`;
+      }).join("");
+      const training = mode === "training";
+      trainingTab.classList.toggle("active", training);
+      samplingTab.classList.toggle("active", !training);
+      trainingTab.setAttribute("aria-selected", String(training));
+      samplingTab.setAttribute("aria-selected", String(!training));
+      processNote.textContent = training
+        ? "functions/losses.py · noise_estimation_loss()"
+        : "functions/denoising.py · generalized_steps()";
+    }
+    trainingTab.addEventListener("click", () => renderProcess("training"));
+    samplingTab.addEventListener("click", () => renderProcess("sampling"));
+    renderProcess("training");
+
+    const nodeDetails = {
+      input: {
+        tag: "Model input",
+        title: "Noisy state xₜ",
+        copy: "The U-Net receives the current image-shaped latent and a scalar timestep for each batch element. A 3×3 convolution lifts RGB into 128 feature channels.",
+        op: "Conv 3×3",
+        res: "32 × 32",
+        ch: "3 → 128",
+        source: "Model.forward(x, t)",
+        callout: "The network predicts a tensor with the same shape as the input image: one noise value per pixel and channel."
+      },
+      down1: {
+        tag: "Encoder stage",
+        title: "Down level 1",
+        copy: "Two residual blocks process the full-resolution feature map. Each block receives the projected timestep embedding, so the same weights behave differently at every noise level.",
+        op: "ResBlock × 2",
+        res: "32 × 32",
+        ch: "128",
+        source: "models/diffusion.py",
+        callout: "Every intermediate feature is saved in hs for a matching decoder skip connection."
+      },
+      down2: {
+        tag: "Encoder + attention",
+        title: "Down level 2",
+        copy: "After stride-2 downsampling, the network doubles to 256 channels. Because the resolution is 16×16, each residual block is followed by spatial self-attention.",
+        op: "ResBlock + Attn × 2",
+        res: "16 × 16",
+        ch: "256",
+        source: "AttnBlock.forward()",
+        callout: "Attention lets any spatial location exchange information with every other location at the configured 16×16 resolution."
+      },
+      down3: {
+        tag: "Deep encoder",
+        title: "Low-resolution features",
+        copy: "Further levels compress spatial resolution while keeping 256 channels. Residual processing expands the receptive field before the bottleneck.",
+        op: "ResBlock + Downsample",
+        res: "8 × 8 → 4 × 4",
+        ch: "256",
+        source: "self.down",
+        callout: "Downsampling uses a padded 3×3 stride-2 convolution when resamp_with_conv is enabled."
+      },
+      mid: {
+        tag: "Bottleneck",
+        title: "Global mixing",
+        copy: "At the smallest spatial scale, a residual block, attention block, and second residual block transform the deepest representation.",
+        op: "Res · Attn · Res",
+        res: "4 × 4",
+        ch: "256",
+        source: "self.mid",
+        callout: "This is the U-Net’s semantic center: maximum receptive field, minimum spatial cost."
+      },
+      up3: {
+        tag: "Decoder stage",
+        title: "Begin reconstruction",
+        copy: "The decoder concatenates each saved encoder feature with the current tensor, then applies one more residual block per level than the encoder.",
+        op: "Concat + ResBlock × 3",
+        res: "4 × 4 → 8 × 8",
+        ch: "256",
+        source: "self.up",
+        callout: "Concatenation preserves fine encoder detail that would otherwise be lost in the bottleneck."
+      },
+      up2: {
+        tag: "Decoder + attention",
+        title: "Attentive reconstruction",
+        copy: "At 16×16, concatenated skip features are refined with residual blocks and spatial attention before the next upsample.",
+        op: "Concat + Res + Attn",
+        res: "16 × 16",
+        ch: "256",
+        source: "self.up[i_level]",
+        callout: "The attention resolution mirrors the encoder, keeping context mixing symmetric."
+      },
+      up1: {
+        tag: "Final decoder",
+        title: "Return to full resolution",
+        copy: "The final decoder level combines the earliest high-resolution features and converts them back to 128 channels.",
+        op: "Concat + ResBlock × 3",
+        res: "32 × 32",
+        ch: "128",
+        source: "Model.forward()",
+        callout: "The last stage does not upsample; it is already at the input resolution."
+      },
+      output: {
+        tag: "Model output",
+        title: "Predicted noise εθ",
+        copy: "Group normalization, Swish, and a final 3×3 convolution project the feature map back to the image channel count.",
+        op: "Norm · Swish · Conv",
+        res: "32 × 32",
+        ch: "128 → 3",
+        source: "self.conv_out",
+        callout: "This is a noise field, not a clean image. The sampler uses it to derive x̂₀."
+      },
+      temb: {
+        tag: "Conditioning path",
+        title: "Timestep embedding",
+        copy: "A sinusoidal encoding converts scalar t into 128 features. Two dense layers expand it to 512, and every residual block receives a learned projection.",
+        op: "Sinusoid + MLP",
+        res: "global vector",
+        ch: "128 → 512 → 512",
+        source: "get_timestep_embedding()",
+        callout: "Time conditioning tells a single shared U-Net how much noise it should expect at each step."
+      }
+    };
+
+    const detailEls = {
+      tag: document.getElementById("detail-tag"),
+      title: document.getElementById("detail-title"),
+      copy: document.getElementById("detail-copy"),
+      op: document.getElementById("detail-op"),
+      res: document.getElementById("detail-res"),
+      ch: document.getElementById("detail-ch"),
+      source: document.getElementById("detail-source"),
+      callout: document.getElementById("detail-callout")
+    };
+
+    document.querySelectorAll("[data-node]").forEach(button => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-node]").forEach(n => n.classList.remove("active"));
+        button.classList.add("active");
+        const detail = nodeDetails[button.dataset.node];
+        Object.keys(detailEls).forEach(key => detailEls[key].textContent = detail[key]);
+      });
+    });
+
+    const etaControl = document.getElementById("eta-control");
+    const stepsControl = document.getElementById("steps-control");
+    const etaOutput = document.getElementById("eta-output");
+    const stepsOutput = document.getElementById("steps-output");
+    const pathMetric = document.getElementById("path-metric");
+    const callMetric = document.getElementById("call-metric");
+    const trajectoryCanvas = document.getElementById("trajectory-canvas");
+
+    function drawTrajectory() {
+      const ctx = trajectoryCanvas.getContext("2d");
+      const w = trajectoryCanvas.width;
+      const h = trajectoryCanvas.height;
+      const eta = Number(etaControl.value);
+      const steps = Number(stepsControl.value);
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.strokeStyle = "rgba(255,255,255,.07)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= w; x += 36) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      for (let y = 0; y <= h; y += 30) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      const colors = ["#c6ee5b", "#67d9d0", "#ff694a"];
+      for (let pathIndex = 0; pathIndex < 3; pathIndex++) {
+        ctx.beginPath();
+        for (let i = 0; i <= steps; i++) {
+          const p = i / steps;
+          const x = 18 + p * (w - 36);
+          const convergence = (1 - p);
+          const baseY = h * .5 + Math.sin(p * Math.PI * 2 + pathIndex * 1.7) * 23 * convergence;
+          const jitter = seededNoise(i, pathIndex, 11) * eta * 34 * convergence;
+          const startOffset = (pathIndex - 1) * 38 * convergence;
+          const y = baseY + jitter + startOffset;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = colors[pathIndex];
+        ctx.globalAlpha = pathIndex === 0 ? 1 : .56;
+        ctx.lineWidth = pathIndex === 0 ? 2.2 : 1.2;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = "#ff694a";
+      ctx.beginPath(); ctx.arc(18, h / 2 - 38, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#c6ee5b";
+      ctx.beginPath(); ctx.arc(w - 18, h / 2, 5, 0, Math.PI * 2); ctx.fill();
+
+      etaOutput.textContent = eta.toFixed(2);
+      stepsOutput.textContent = String(steps);
+      pathMetric.textContent = eta === 0 ? "Deterministic" : eta < .45 ? "Light noise" : eta < .8 ? "Stochastic" : "DDPM-like";
+      callMetric.textContent = String(steps);
+      renderTimeline(steps);
+    }
+
+    function renderTimeline(steps) {
+      const points = document.getElementById("timeline-points");
+      const displayCount = Math.min(11, Math.max(6, Math.round(steps / 10) + 5));
+      const values = Array.from({ length: displayCount }, (_, i) =>
+        Math.round(999 - (999 * i / (displayCount - 1)))
+      );
+      points.innerHTML = values.map((value, i) =>
+        `<span class="timeline-point"><i></i><span>${i === values.length - 1 ? "0" : value}</span></span>`
+      ).join("");
+      const skip = Math.floor(1000 / steps);
+      document.getElementById("timeline-code").textContent = `seq = range(0, 1000, ${skip})`;
+    }
+
+    etaControl.addEventListener("input", drawTrajectory);
+    stepsControl.addEventListener("input", drawTrajectory);
+    drawTrajectory();
+
+    function drawSchedule() {
+      const canvas = document.getElementById("schedule-canvas");
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const pad = { l: 42, r: 18, t: 20, b: 30 };
+      ctx.clearRect(0, 0, w, h);
+      ctx.font = "9px SFMono-Regular, Consolas, monospace";
+
+      ctx.strokeStyle = "#e3ded4";
+      ctx.fillStyle = "#8a8e97";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.t + (h - pad.t - pad.b) * i / 4;
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        ctx.fillText((1 - i / 4).toFixed(2), 8, y + 3);
+      }
+      [0, 250, 500, 750, 999].forEach((label, i) => {
+        const x = pad.l + (w - pad.l - pad.r) * i / 4;
+        ctx.fillText(String(label), x - (i === 0 ? 0 : 10), h - 8);
+      });
+
+      let alphaBar = 1;
+      const signal = [];
+      const noise = [];
+      for (let t = 0; t < 1000; t++) {
+        const beta = .0001 + (.02 - .0001) * t / 999;
+        alphaBar *= (1 - beta);
+        signal.push(Math.sqrt(alphaBar));
+        noise.push(Math.sqrt(1 - alphaBar));
+      }
+
+      const plot = (values, color) => {
+        ctx.beginPath();
+        values.forEach((v, i) => {
+          const x = pad.l + i / 999 * (w - pad.l - pad.r);
+          const y = pad.t + (1 - v) * (h - pad.t - pad.b);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      };
+      plot(signal, "#4f72ff");
+      plot(noise, "#ff694a");
+
+      ctx.fillStyle = "#4f72ff";
+      ctx.fillRect(w - 154, 16, 12, 2);
+      ctx.fillStyle = "#555a64";
+      ctx.fillText("signal √ᾱₜ", w - 136, 20);
+      ctx.fillStyle = "#ff694a";
+      ctx.fillRect(w - 154, 34, 12, 2);
+      ctx.fillStyle = "#555a64";
+      ctx.fillText("noise √(1−ᾱₜ)", w - 136, 38);
+    }
+    drawSchedule();
+  </script>
+</body>
+</html>

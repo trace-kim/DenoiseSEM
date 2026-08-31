@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "denoise-sem"
+version = "0.1.0"
+description = "SEM image denoising research: the original DDIM flow, burst-averaging diffusion, a noising pipeline, and the flow-agnostic runctl orchestrator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "lmdb>=1.4,<3",
+    "numpy>=1.26,<3",
+    "Pillow>=10,<13",
+    "pydantic>=2.10,<3",
+    "PyYAML>=6,<7",
+    "requests>=2.31,<3",
+    "rich>=13,<16",
+    "tensorboard>=2.14,<3",
+    "torch>=2.2,<3",
+    "torchvision>=0.17,<1",
+    "tqdm>=4.66,<5",
+    "typer>=0.20,<1",
+    "tzdata>=2025.1; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+tracking = [
+    "mlflow>=3,<4",
+    "nvidia-ml-py>=12",
+    "psutil>=5.9",
+]
+dev = [
+    "pytest>=8,<10",
+]
+
+[project.scripts]
+runctl = "runctl.cli:app"
+burst-diffusion = "burst_diffusion.cli:app"
+
+# Flow plugins discovered by runctl.registry.  A new pipeline registers itself
+# here instead of being hard-coded into the orchestrator.
+[project.entry-points."runctl.flows"]
+ddim = "ddim.flow"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["burst_diffusion*", "ddim*", "noising_pipeline*", "runctl*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+ddim = ["configs/*.yml"]
+burst_diffusion = ["configs/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

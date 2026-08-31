@@ -1,0 +1,57 @@
+data:
+    dataset: "SEM"
+    data_dir: "E:/PythonProjects/SEMImageAI/data/datasets/paired_miic_v0/train/target_sem"
+    image_size: 32
+    channels: 1
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: false
+    rescaled: true
+    num_workers: 0
+    cache_in_memory: true
+    recursive: false
+    validation_split: 0.1
+    split_seed: 2019
+    extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"]
+
+model:
+    type: "simple"
+    in_channels: 1
+    out_ch: 1
+    ch: 64
+    ch_mult: [1, 2, 2, 2]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    var_type: fixedlarge
+    ema_rate: 0.999
+    ema: true
+    resamp_with_conv: true
+
+diffusion:
+    beta_schedule: linear
+    beta_start: 0.001
+    beta_end: 0.2
+    num_diffusion_timesteps: 100
+
+training:
+    batch_size: 7
+    n_epochs: 1
+    n_iters: 135
+    snapshot_freq: 135
+    validation_freq: 135
+
+sampling:
+    batch_size: 8
+    last_only: true
+    ckpt_id: 135
+
+optim:
+    weight_decay: 0.0
+    optimizer: "Adam"
+    lr: 0.0002
+    beta1: 0.9
+    amsgrad: false
+    eps: 0.00000001
+    grad_clip: 1.0

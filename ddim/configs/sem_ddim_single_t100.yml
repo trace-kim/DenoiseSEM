@@ -1,0 +1,51 @@
+data:
+    dataset: "FFHQ"
+    image_size: 64
+    channels: 1
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: false
+    rescaled: true
+    num_workers: 0
+
+model:
+    type: "simple"
+    in_channels: 1
+    out_ch: 1
+    ch: 32
+    ch_mult: [1, 2, 2, 4]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    var_type: fixedlarge
+    ema_rate: 0.999
+    ema: true
+    resamp_with_conv: true
+
+diffusion:
+    beta_schedule: linear
+    beta_start: 0.001
+    beta_end: 0.2
+    num_diffusion_timesteps: 100
+
+training:
+    batch_size: 7
+    n_epochs: 100000
+    n_iters: 100000
+    snapshot_freq: 2500
+    validation_freq: 2500
+
+sampling:
+    batch_size: 8
+    last_only: true
+    ckpt_id: 20000
+
+optim:
+    weight_decay: 0.0
+    optimizer: "Adam"
+    lr: 0.0002
+    beta1: 0.9
+    amsgrad: false
+    eps: 0.00000001
+    grad_clip: 1.0
