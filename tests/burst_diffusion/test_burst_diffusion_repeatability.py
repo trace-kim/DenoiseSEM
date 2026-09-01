@@ -11,6 +11,7 @@ from PIL import Image
 
 from burst_diffusion.config import Config
 from burst_diffusion.repeatability import (
+    RealizationProvider,
     _c4,
     _pooled_sigma,
     estimate_shift,
@@ -338,3 +339,101 @@ def test_single_realization_methods_report_no_precision(tmp_path: Path) -> None:
     # Accuracy and bias are still reported from the single realization.
     assert lonely["accuracy"]["psnr_mean"] is not None
     assert lonely["cd"]["bias_mean_px"] is not None
+
+
+# ---------------------------------------------------------------------------
+# extra realization providers (the seam other pipelines plug into)
+
+
+def _identity_provider(names: tuple[str, ...] = ("denoise",)) -> "RealizationProvider":
+    return RealizationProvider(
+        method_names=names,
+        generate=lambda seeds01: {name: [seed.copy() for seed in seeds01] for name in names},
+    )
+
+
+def test_provider_only_run_reports_provider_methods(tmp_path: Path) -> None:
+    dataset = _write_bar_burst(tmp_path / "data")
+    config = _config(dataset, tmp_path / "run")
+    results = repeatability(
+        config,
+        {},
+        out_dir=tmp_path / "rep",
+        num_seeds=2,
+        avg_counts=(2,),
+        edge_tolerance=3.0,
+        extra_providers={"ext": _identity_provider()},
+    )
+    assert "denoise@ext" in results["methods"]
+    assert results["provider_arms"] == ["ext"]
+    # The identity provider passes seeds through, so its rows must equal the
+    # single_frame rows exactly.
+    assert results["methods"]["denoise@ext"]["accuracy"]["psnr_mean"] == pytest.approx(
+        results["methods"]["single_frame"]["accuracy"]["psnr_mean"]
+    )
+    summary = (tmp_path / "rep" / "summary.md").read_text(encoding="utf-8")
+    assert "denoise@ext" in summary
+
+
+def test_checkpoint_and_provider_arms_coexist(tmp_path: Path) -> None:
+    dataset = _write_bar_burst(tmp_path / "data")
+    config = _config(dataset, tmp_path / "run")
+    checkpoint = _write_checkpoint(tmp_path / "ckpt.pt", config)
+    with pytest.warns(UserWarning, match="no EMA state"):
+        results = repeatability(
+            config,
+            {"model": checkpoint},
+            out_dir=tmp_path / "rep",
+            num_seeds=2,
+            avg_counts=(2,),
+            edge_tolerance=3.0,
+            extra_providers={"ext": _identity_provider()},
+        )
+    assert "one_shot@model" in results["methods"]
+    assert "denoise@ext" in results["methods"]
+
+
+def test_arm_name_collisions_and_empty_runs_are_rejected(tmp_path: Path) -> None:
+    dataset = _write_bar_burst(tmp_path / "data")
+    config = _config(dataset, tmp_path / "run")
+    checkpoint = _write_checkpoint(tmp_path / "ckpt.pt", config)
+    with pytest.raises(ValueError, match="both a checkpoint and an extra provider"):
+        repeatability(
+            config,
+            {"model": checkpoint},
+            out_dir=tmp_path / "rep",
+            extra_providers={"model": _identity_provider()},
+        )
+    with pytest.raises(ValueError, match="at least one checkpoint arm or extra provider"):
+        repeatability(config, {}, out_dir=tmp_path / "rep")
+
+
+def test_misbehaving_providers_are_rejected(tmp_path: Path) -> None:
+    dataset = _write_bar_burst(tmp_path / "data")
+    config = _config(dataset, tmp_path / "run")
+    wrong_keys = RealizationProvider(
+        method_names=("denoise",),
+        generate=lambda seeds01: {"other": [seed.copy() for seed in seeds01]},
+    )
+    with pytest.raises(ValueError, match="declared"):
+        repeatability(
+            config,
+            {},
+            out_dir=tmp_path / "rep",
+            num_seeds=2,
+            avg_counts=(2,),
+            extra_providers={"ext": wrong_keys},
+        )
+    wrong_count = RealizationProvider(
+        method_names=("denoise",),
+        generate=lambda seeds01: {"denoise": seeds01[:1]},
+    )
+    with pytest.raises(ValueError, match="realizations for"):
+        repeatability(
+            config,
+            {},
+            out_dir=tmp_path / "rep2",
+            num_seeds=2,
+            avg_counts=(2,),
+            extra_providers={"ext": wrong_count},
+        )

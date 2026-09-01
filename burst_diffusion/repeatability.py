@@ -44,7 +44,7 @@ import math
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -58,6 +58,25 @@ from .sample import Sampler
 from .schedule import min_replicas, sampling_schedule
 
 MODEL_METHOD_NAMES = ("one_shot", "iter_average", "iter_prediction")
+
+
+@dataclass(frozen=True)
+class RealizationProvider:
+    """A non-burst model plugged into the repeatability evaluation.
+
+    ``generate`` receives one source's seed frames (``[H, W, C]`` float
+    arrays in [0, 1], one per seed) and returns ``{method_name: [one output
+    per seed, same format]}`` with exactly the keys declared in
+    ``method_names``.  Rows appear as ``{method_name}@{arm}`` next to the
+    classical and burst rows, measured on identical sources, seeds, crops
+    and CD sites -- the point of the seam: other pipelines (edge_denoise)
+    join the SAME comparison table instead of growing a parallel one.
+    """
+
+    method_names: tuple[str, ...]
+    generate: Callable[[list[np.ndarray]], dict[str, list[np.ndarray]]]
+
+
 _SIGMA_MAP_FULL_SCALE = 0.2  # sigma (in [0,1] intensity) rendered as white
 _PROFILE_PERCENTILES = (10.0, 90.0)  # robust lo/hi for the 50% threshold
 
@@ -685,11 +704,15 @@ def repeatability(
     max_batch: int = 10,
     registration_gate_px: float = 0.5,
     progress_callback: Callable[[int, int], None] | None = None,
+    extra_providers: Mapping[str, RealizationProvider] | None = None,
 ) -> dict:
     """Run the repeatability evaluation; writes repeatability.json + summary.md.
 
-    ``checkpoints`` maps an arm label to a checkpoint path; model methods are
-    reported as ``{method}@{arm}``. Classical methods are computed once.
+    ``checkpoints`` maps an arm label to a burst checkpoint path; model methods
+    are reported as ``{method}@{arm}``. Classical methods are computed once.
+    ``extra_providers`` adds arms from OTHER pipelines (see
+    :class:`RealizationProvider`); arm names must not collide with checkpoint
+    arms, and a run may consist of extra providers alone.
 
     Registration statistics are gated per source: burst frames are pixel-
     aligned by the pipeline's premise, so the clean image registered against
@@ -702,8 +725,15 @@ def repeatability(
         raise ValueError(f"split must be 'val', 'train', or 'test', got {split!r}")
     if num_seeds < 1:
         raise ValueError(f"num_seeds must be >= 1, got {num_seeds}")
-    if not checkpoints:
-        raise ValueError("provide at least one checkpoint arm")
+    if not checkpoints and not extra_providers:
+        raise ValueError("provide at least one checkpoint arm or extra provider")
+    extra_providers = dict(extra_providers or {})
+    overlapping = set(checkpoints) & set(extra_providers)
+    if overlapping:
+        raise ValueError(
+            f"arm name(s) used for both a checkpoint and an extra provider: "
+            f"{sorted(overlapping)}"
+        )
 
     samplers: dict[str, Sampler] = {}
     for arm, path in checkpoints.items():
@@ -756,6 +786,8 @@ def repeatability(
     method_names = ["single_frame"] + [f"avg_of_{count}" for count in effective_avg_counts]
     for arm in samplers:
         method_names += [f"{name}@{arm}" for name in MODEL_METHOD_NAMES]
+    for arm, provider in extra_providers.items():
+        method_names += [f"{name}@{arm}" for name in provider.method_names]
 
     accumulators = {name: _new_accumulator() for name in method_names}
     sigma_maps: dict[str, list[tuple[int, np.ndarray]]] = {name: [] for name in method_names}
@@ -789,6 +821,20 @@ def repeatability(
             for name, outputs in _model_realizations(
                 sampler, seeds01, schedule, max_batch
             ).items():
+                realizations[f"{name}@{arm}"] = outputs
+        for arm, provider in extra_providers.items():
+            produced = provider.generate(seeds01)
+            if set(produced) != set(provider.method_names):
+                raise ValueError(
+                    f"provider {arm!r} returned methods {sorted(produced)} but "
+                    f"declared {sorted(provider.method_names)}"
+                )
+            for name, outputs in produced.items():
+                if len(outputs) != len(seeds01):
+                    raise ValueError(
+                        f"provider {arm!r} method {name!r} returned "
+                        f"{len(outputs)} realizations for {len(seeds01)} seeds"
+                    )
                 realizations[f"{name}@{arm}"] = outputs
 
         source_detail: dict = {
@@ -824,6 +870,7 @@ def repeatability(
         "avg_counts": effective_avg_counts,
         "sample_steps": len(schedule),
         "checkpoints": {arm: str(path) for arm, path in checkpoints.items()},
+        "provider_arms": sorted(extra_providers),
         "cd_sites_total": sites_total,
         "sources_without_sites": sources_without_sites,
         "registration_sources": registration_sources,
