@@ -1,0 +1,47 @@
+# PILOT ARM A (primary): hybrid representation on the deduplicated MIIC SEM
+# dataset. Input [y, sobel(y)], output the denoised image, Noise2Noise target
+# (a fresh frame -- no clean image in the loss), loss = image MSE + 4x Sobel
+# MSE. Everything shared with the burst/N2N arms is bit-identical: same U-Net
+# capacity (only conv_in widens to 3 channels), same dataset, same
+# content-group split, batch size, LR, EMA, seed, and 30,000 steps -- so the
+# ONLY difference vs miic_p10_dedup_n2n (burst config) is the objective.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_hybrid.yml
+#
+# Expected training-loss floor (target noise, model space):
+# 0.154 * (1 + 4 * 12/64) ~ 0.27. Watch val/psnr and val/consistency_sigma.
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: hybrid
+  target: noisy
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_hybrid
+  batch_size: 8
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000

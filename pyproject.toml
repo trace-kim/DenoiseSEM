@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "denoise-sem"
 version = "0.1.0"
-description = "SEM image denoising research: the original DDIM flow, burst-averaging diffusion, a noising pipeline, and the flow-agnostic runctl orchestrator"
+description = "SEM image denoising research: the original DDIM flow, burst-averaging diffusion, edge-preserving metrology denoisers, a noising pipeline, and the flow-agnostic runctl orchestrator"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -38,6 +38,7 @@ dev = [
 [project.scripts]
 runctl = "runctl.cli:app"
 burst-diffusion = "burst_diffusion.cli:app"
+edge-denoise = "edge_denoise.cli:app"
 
 # Flow plugins discovered by runctl.registry.  A new pipeline registers itself
 # here instead of being hard-coded into the orchestrator.
@@ -46,12 +47,13 @@ ddim = "ddim.flow"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["burst_diffusion*", "ddim*", "noising_pipeline*", "runctl*"]
+include = ["burst_diffusion*", "ddim*", "edge_denoise*", "noising_pipeline*", "runctl*"]
 namespaces = true
 
 [tool.setuptools.package-data]
 ddim = ["configs/*.yml"]
 burst_diffusion = ["configs/*.yml"]
+edge_denoise = ["configs/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

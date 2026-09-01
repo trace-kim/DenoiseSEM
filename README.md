@@ -8,7 +8,7 @@ environment and run every workflow from this directory.
 
 ## Layout
 
-Four independent pieces of work, separated by ownership rather than sharing one
+Five independent pieces of work, separated by ownership rather than sharing one
 folder:
 
 ```
@@ -22,6 +22,10 @@ ddim/                 Original DDIM (Song, Meng & Ermon), namespaced as a packag
 burst_diffusion/      Burst-averaging diffusion denoiser (own U-Net + CLI)
   configs/            Experiment recipes
   docs/               Method, guide, report, audit handoff, research idea
+
+edge_denoise/         Edge-preserving deterministic denoisers for metrology (own CLI)
+  configs/            Experiment recipes (N2N, gradient, hybrid arms)
+  docs/               Feasibility study & method derivations, experiment report
 
 noising_pipeline/     Standalone paired clean/noisy image generator
 
@@ -38,7 +42,7 @@ docs/workflows.md     How to run everything
 Dependencies point one way only:
 
 ```
-noising_pipeline  <-  burst_diffusion
+noising_pipeline  <-  burst_diffusion  <-  edge_denoise
 
 runctl  <-  ddim/flow.py  (loaded lazily, via a `runctl.flows` entry point)
 ```
@@ -46,13 +50,14 @@ runctl  <-  ddim/flow.py  (loaded lazily, via a `runctl.flows` entry point)
 `ddim` imports nothing else in this repository. `runctl` imports no model code
 until you ask it for a flow, so `runctl --help` never imports PyTorch.
 
-## The three ways to train
+## The four ways to train
 
 | | Command | Use it for |
 |---|---|---|
 | Reproducible | `runctl train wizard --machine <id> --flow ddim` | New DDIM work: immutable run bundles, executors, resume, tracking |
 | Legacy | `python -m ddim.main --config <name>.yml --exp ... --doc ... --ni` | Sampling, FID, interpolation, upstream compatibility |
 | Burst | `python -m burst_diffusion train --config burst_diffusion/configs/<name>.yml` | The burst-averaging pipeline |
+| Edge | `python -m edge_denoise train --config edge_denoise/configs/<name>.yml` | Metrology-precision denoisers (N2N / gradient / hybrid) |
 
 ## Quick start
 

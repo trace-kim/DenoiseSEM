@@ -1,6 +1,6 @@
 # Running every workflow from this repository root
 
-This repository holds four independent pieces of work that used to share one
+This repository holds five independent pieces of work that used to share one
 folder. They are now separated by ownership, and **every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).
 
@@ -9,6 +9,7 @@ from the repository root** (`E:\PythonProjects\DenoiseSEM`).
 | `ddim/` | The original DDIM implementation (Song, Meng & Ermon), namespaced as a package | nothing in this repo |
 | `noising_pipeline/` | Standalone generator of paired clean/noisy microscopy images | nothing in this repo |
 | `burst_diffusion/` | Burst-averaging diffusion denoiser (own U-Net, trainer, sampler, CLI) | `noising_pipeline` |
+| `edge_denoise/` | Edge-preserving deterministic denoisers for metrology precision (N2N, gradient, hybrid) | `burst_diffusion` |
 | `runctl/` | Flow-agnostic reproducible-run orchestrator (bundles, executors, tracking) | a *flow* plugin, loaded lazily |
 
 The dependency arrows only ever point one way. `ddim` does not import
@@ -181,6 +182,52 @@ Docs: [user guide](../burst_diffusion/docs/burst_diffusion_guide.md) ·
 
 ---
 
+## 4b. Workflow B2 — `edge_denoise`: edge-preserving metrology denoisers
+
+Deterministic single-pass denoisers aimed at metrology *precision* (CD and
+registration repeatability), not just PSNR: plain Noise2Noise (`image`), the
+pure Sobel-gradient-domain variant (`gradient`, with exact FFT least-squares
+image recovery), and the hybrid (image + Sobel input channels, image output,
+gradient-weighted loss). Trains on the burst datasets from Workflow B —
+generate data there; the U-Net capacity and the content-group split are shared
+with `burst_diffusion`, so cross-pipeline comparisons are exact.
+
+```powershell
+# CPU smoke (reuses the burst smoke dataset from Workflow B)
+python -m edge_denoise train --config edge_denoise/configs/smoke.yml
+
+# Real arms on the deduplicated MIIC SEM dataset
+python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_hybrid.yml
+python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_grad.yml
+python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_n2n.yml
+
+# Denoise one measurement (single deterministic forward pass)
+python -m edge_denoise denoise `
+  --checkpoint runs/edge_denoise/miic_p10_dedup_hybrid/ckpt_latest.pt `
+  --dataset data/MIIC-burst-p10-dedup --source-index 0 --out tmp/denoise
+
+# Accuracy vs classical baselines (means AND medians)
+python -m edge_denoise evaluate --config edge_denoise/configs/miic_p10_dedup_hybrid.yml `
+  --checkpoint runs/edge_denoise/miic_p10_dedup_hybrid/ckpt_latest.pt --out tmp/eval
+
+# ONE metrology-precision table: classical ladder + edge arms + burst/N2N arms
+python -m edge_denoise repeatability --config edge_denoise/configs/miic_p10_dedup_hybrid.yml `
+  --checkpoint hybrid=runs/edge_denoise/miic_p10_dedup_hybrid/ckpt_latest.pt `
+  --checkpoint grad=runs/edge_denoise/miic_p10_dedup_grad/ckpt_latest.pt `
+  --burst-checkpoint n2n=runs/burst_diffusion/miic_p10_dedup_n2n/ckpt_latest.pt `
+  --out tmp/repeat --split val
+```
+
+Training writes `provenance.json` automatically at completion; `--resume`
+continues from the run directory's latest checkpoint. All burst arms passed to
+one `repeatability` call must share one `schedule.num_steps` — run arms with
+different schedules separately.
+
+Docs: [method & feasibility study](../edge_denoise/docs/edge_denoise_method.md) ·
+[experiment report](../edge_denoise/docs/edge_denoise_report.md)
+
+---
+
 ## 5. Workflow C — `ddim`: the original DDIM entry point
 
 Legacy, retained for sampling and compatibility. It prints a deprecation
@@ -340,6 +387,7 @@ quick start EN/KR: [`runctl/docs/training_guide.md`](../runctl/docs/training_gui
 ```powershell
 python tools/benchmark_sem_loader.py --config sem_directory_benchmark.yml
 python tools/probe_burst_predictions.py --help
+python tools/edge_denoise_report_figures.py --help   # regenerate the edge_denoise report figures
 ```
 
 ---

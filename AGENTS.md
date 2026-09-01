@@ -2,16 +2,19 @@
 
 ## Project Structure & Module Organization
 
-Four independently owned packages. `ddim/` is the original DDIM implementation
+Five independently owned packages. `ddim/` is the original DDIM implementation
 (models, runners, functions, datasets, configs, legacy `main.py`) namespaced as a
 package; it imports nothing else here. `runctl/` is the flow-agnostic
 orchestrator — schemas, run bundles, executors, checkpoints, tracking, and the
 flow registry — and knows nothing about any model. `burst_diffusion/` is the
 self-contained burst-averaging denoiser, depending only on `noising_pipeline/`,
-the standalone paired clean/noisy image generator. YAML recipes live inside the
-package that owns them (`ddim/configs/`, `burst_diffusion/configs/`), and docs
-likewise (`ddim/docs/`, `runctl/docs/`, `burst_diffusion/docs/`), with
-`docs/workflows.md` at the root as the cross-cutting how-to-run guide. Tests
+the standalone paired clean/noisy image generator. `edge_denoise/` holds the
+deterministic metrology-precision denoisers (N2N, gradient, hybrid) and imports
+`burst_diffusion` for the dataset cache, U-Net backbone, and evaluation
+harness. YAML recipes live inside the package that owns them (`ddim/configs/`,
+`burst_diffusion/configs/`, `edge_denoise/configs/`), and docs likewise
+(`ddim/docs/`, `runctl/docs/`, `burst_diffusion/docs/`, `edge_denoise/docs/`),
+with `docs/workflows.md` at the root as the cross-cutting how-to-run guide. Tests
 mirror the split under `tests/<package>/`; utilities are in `tools/`. Treat
 `runs/`, `experiments/`, `output/`, `data/`, `tmp/`, and checkpoints as generated
 artifacts.
@@ -29,6 +32,8 @@ artifacts.
   writes nothing.
 - `python -m burst_diffusion train --config burst_diffusion/configs/<name>.yml`
   runs the burst pipeline.
+- `python -m edge_denoise train --config edge_denoise/configs/<name>.yml` runs
+  the edge/metrology pipeline (same burst datasets).
 - `python -m ddim.main ...` is retained only for legacy compatibility and
   sampling.
 

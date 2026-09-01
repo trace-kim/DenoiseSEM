@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-Four independently owned packages, separated so that the original DDIM research
+Five independently owned packages, separated so that the original DDIM research
 code and the add-ons built on top of it do not share a namespace:
 
 1. **`ddim/`** — the original Song/Meng/Ermon DDIM implementation, namespaced as
@@ -17,7 +17,13 @@ code and the add-ons built on top of it do not share a namespace:
    nothing about any model.
 3. **`burst_diffusion/`** — the burst-averaging diffusion denoiser. Own U-Net,
    EMA, trainer, sampler, and CLI. Depends only on `noising_pipeline`.
-4. **`noising_pipeline/`** — standalone paired clean/noisy image generator.
+4. **`edge_denoise/`** — deterministic single-pass denoisers aimed at metrology
+   *precision* (Noise2Noise, pure Sobel-gradient domain, hybrid). Deliberately
+   imports `burst_diffusion` for the audited `BurstCache` content-group split,
+   the U-Net backbone (equal-capacity comparisons), metrics, and the
+   repeatability harness; never imports `ddim` or `runctl`. Math and
+   feasibility study: `edge_denoise/docs/edge_denoise_method.md`.
+5. **`noising_pipeline/`** — standalone paired clean/noisy image generator.
    Depends on nothing in this repo.
 
 `docs/workflows.md` is the entry point for running anything.
@@ -42,6 +48,8 @@ runctl run status|logs|stop|resume <run_dir>
 runctl track serve | track publish <run_dir>
 
 python -m burst_diffusion train --config burst_diffusion/configs/<name>.yml
+python -m edge_denoise train --config edge_denoise/configs/<name>.yml
+python -m edge_denoise repeatability --config <cfg> --checkpoint a=<pt> --burst-checkpoint b=<pt> ...
 python -m ddim.main --config <name>.yml --exp <path> --doc <name> --ni
 ```
 
@@ -109,6 +117,18 @@ orchestration around it.
 
 `resolve_config_path` looks in `ddim/configs/` first, so `--config sem.yml` works
 from any working directory; absolute and cwd-relative paths still win.
+
+## Architecture: cross-pipeline evaluation
+
+`burst_diffusion/repeatability.py` owns the CD/registration precision harness.
+Other pipelines join its comparison table through
+`RealizationProvider` (`extra_providers=` on `repeatability()`) instead of
+growing parallel evaluators — `edge_denoise/provider.py` is the worked example,
+and `python -m edge_denoise repeatability` produces one table holding classical,
+burst, and edge arms measured on identical sources, seeds, crops, and CD sites.
+All burst arms in one call must share `schedule.num_steps`. The dev split for
+MIIC experiments is `val`; the `test` split is locked (report once, only for a
+frozen method).
 
 ## Gotchas
 

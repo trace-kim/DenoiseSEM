@@ -65,6 +65,8 @@ events.out.tfevents.*
 # Generated images and documents
 *.[pP][nN][gG]
 *.[pP][dD][fF]
+# ... except figures embedded in committed docs
+!edge_denoise/docs/images/*.png
 
 # Temporary and backup files
 *.tmp
