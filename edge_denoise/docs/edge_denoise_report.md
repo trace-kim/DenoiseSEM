@@ -186,6 +186,13 @@ individually significant at n = 10 scenes.
    traded against the bias it must introduce (method doc §6).
 3. Only after a winner exists at seed-replication scale: **one confirmatory
    run on the locked test split.**
+
+   *Update 2026-09-02*: step 2 ran, inside a five-arm gradient-target ladder
+   (oracle / LOO-average / teacher-distillation targets + λ_c) — see
+   [`target_ladder_report.md`](target_ladder_report.md). λ_c = 1 is the
+   first p < 0.05 precision result (CD 3σ scene 0.406 px, 10/10 scenes vs
+   both N2N and sobloss) at a measured accuracy cost; the λ_c sweep is now
+   the decisive study, replacing the plain λ_g sweep of step 1.
 4. Optional diagnostics available in `repeatability_val_pilot/`:
    `sigma_maps.png` (fixed-scale variant of §2.2), per-site JSON for
    site-stratified analysis. The figures embedded above regenerate from the
