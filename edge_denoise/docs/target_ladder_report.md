@@ -238,22 +238,25 @@ set by the config keys `objective.lambda_image` / `lambda_gradient` /
 `lambda_consistency` (abbreviated $\lambda_i$, $\lambda_g$, $\lambda_c$ in
 the table).
 
-At a glance — the *init* and *steps* columns are the phase structure (phase 1
-= the n2n row; every `ft_*` loss is a phase-2 objective applied on top of its
-weights); the per-arm blocks below spell the same thing out phase by phase:
+At a glance — **one column per phase**, so a row reads left to right exactly
+as the training ran. The network input is $y_i$ everywhere except where a
+cell says otherwise; ft_consist's phase 2 additionally feeds $y_k$:
 
-| arm | init (phase 1) | steps | network input | training loss |
-|---|---|---|---|---|
-| single_frame / avg_of_m | — | — | — | none: the estimate is $y_1$ or $\tfrac1m\sum_{m'} y_{m'}$ directly |
-| n2n | scratch | 30k | $y_i$ | $d(f(y_i),\,y_j)$ — this row *is* phase 1 |
-| sobloss | scratch | 30k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j)$ (single phase) |
-| ft_noisy | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j)$ |
-| ft_oracle | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S x)$ |
-| ft_avg | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S \bar y_{-i})$, $\;\bar y_{-i} = \tfrac1{15}\sum_{m\neq i} y_m$ |
-| ft_distill | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S T)$, $\;T$ frozen (below) |
-| ft_consist | n2n EMA | 10k | $y_i$ and $y_k$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j) + \lambda_c\, d(f(y_i),\,f(y_k))$ |
-| hybrid (pilot) | scratch | 30k | $[y_i,\,S y_i]$ | as sobloss |
-| grad (pilot) | scratch | 30k | $S y_i$ | $\lambda_g\, d(\hat g,\,S y_j)$ with $\lambda_i = 0$; FFT least-squares inverse at inference |
+| arm | phase 1 — 30k, from scratch | phase 2 — 10k, continuing from phase-1's weights |
+|---|---|---|
+| single_frame / avg_of_m | no training: the estimate is $y_1$ or $\tfrac1m\sum_{m'} y_{m'}$ | — |
+| n2n | $d\big(f(y_i),\,y_j\big)$ | — (its EMA weights are every ft arm's starting point) |
+| sobloss | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S y_j\big)$ — single phase | — |
+| hybrid (pilot) | as sobloss, input $[y_i,\,S y_i]$ — single phase | — |
+| grad (pilot) | $\lambda_g\, d\big(\hat g,\,S y_j\big)$ with $\lambda_i = 0$, input $S y_i$ — single phase | — |
+| ft_noisy | $d\big(f(y_i),\,y_j\big)$ (= n2n) | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S y_j\big)$ |
+| ft_oracle | $d\big(f(y_i),\,y_j\big)$ (= n2n) | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S x\big)$ |
+| ft_avg | $d\big(f(y_i),\,y_j\big)$ (= n2n) | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S \bar y_{-i}\big)$ |
+| ft_distill | $d\big(f(y_i),\,y_j\big)$ (= n2n), then build frozen $T$ | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S T\big)$ |
+| ft_consist | $d\big(f(y_i),\,y_j\big)$ (= n2n) | $\lambda_i\, d\big(f(y_i),y_j\big) + \lambda_g\, d\big(S f(y_i),\,S y_j\big) + \lambda_c\, d\big(f(y_i),\,f(y_k)\big)$ |
+
+with $\bar y_{-i} = \tfrac1{15}\sum_{m\neq i} y_m$ and $T$ the frozen
+per-scene teacher average (construction under ft_distill below).
 
 **Classical rows** (`single_frame`, `avg_of_m`) — no training, no phases:
 the estimate is $y_1$ or $\tfrac1m\sum_{m'} y_{m'}$ directly.
