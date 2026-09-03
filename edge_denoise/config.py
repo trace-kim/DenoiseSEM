@@ -64,10 +64,23 @@ class ObjectiveConfig(_StrictModel):
     realization repeatability penalty ``|f(y_a) - f(y_b)|^2`` -- the direct
     precision lever; it needs a second independent frame per sample and trades
     bias for variance, so it defaults to off.
+
+    ``gradient_target`` lets the GRADIENT term chase a different reference than
+    the image term (the target-ladder experiment; the image term always keeps
+    ``target``).  ``"target"`` is the historical behavior (same tensor for both
+    terms); ``"clean"`` is the supervised oracle; ``"noisy_mean"`` is the
+    leave-one-out average of every OTHER replica -- unbiased like a fresh frame
+    but with ~1/(N-1) of its variance (the input replica must be excluded or
+    the N2N cross-term argument breaks and the loss pulls toward identity);
+    ``"file"`` reads a precomputed per-source image (float32 ``.npy`` in
+    [0, 1]) from ``gradient_target_dir`` -- the distillation arm, produced by
+    ``python -m edge_denoise distill-targets``.
     """
 
     representation: Literal["image", "gradient", "hybrid"] = "hybrid"
     target: Literal["clean", "noisy"] = "noisy"
+    gradient_target: Literal["target", "clean", "noisy_mean", "file"] = "target"
+    gradient_target_dir: Path | None = None
     lambda_image: float = Field(default=1.0, ge=0.0)
     lambda_gradient: float = Field(default=4.0, ge=0.0)
     lambda_consistency: float = Field(default=0.0, ge=0.0)
@@ -91,6 +104,21 @@ class ObjectiveConfig(_StrictModel):
                 "at least one of objective.lambda_image / lambda_gradient must be > 0 "
                 "(lambda_consistency alone is minimized by any constant output)"
             )
+        if self.gradient_target != "target" and self.lambda_gradient <= 0.0:
+            raise ValueError(
+                "objective.gradient_target overrides the gradient term's reference, "
+                "so lambda_gradient must be > 0 for it to have any effect"
+            )
+        if self.gradient_target == "file" and self.gradient_target_dir is None:
+            raise ValueError(
+                "objective.gradient_target 'file' requires objective.gradient_target_dir "
+                "(a directory of per-source {source_index:05d}.npy targets)"
+            )
+        if self.gradient_target != "file" and self.gradient_target_dir is not None:
+            raise ValueError(
+                "objective.gradient_target_dir is only meaningful with "
+                "objective.gradient_target 'file'"
+            )
         return self
 
 
@@ -113,6 +141,12 @@ class ModelConfig(_StrictModel):
 
 class TrainingConfig(_StrictModel):
     run_dir: Path
+    # Weights-only warm start (the fine-tune protocol): model parameters are
+    # initialized from this checkpoint's EMA weights (falling back to the live
+    # weights) before step 0.  Accepts edge_denoise checkpoints and
+    # burst_diffusion checkpoints with a matching backbone.  Optimizer, EMA,
+    # RNG, and data-stream state all start fresh; incompatible with --resume.
+    init_checkpoint: Path | None = None
     batch_size: int = Field(default=8, ge=1)
     max_steps: int = Field(default=30000, ge=1)
     lr: float = Field(default=2.0e-4, gt=0.0)
@@ -157,6 +191,11 @@ class Config(_StrictModel):
             required += 1
         if self.objective.lambda_consistency > 0.0:
             required += 1
+        if self.objective.gradient_target == "noisy_mean":
+            # The leave-one-out average needs at least one replica besides the
+            # input; it may share replicas with the image-term target (each
+            # term's zero-cross-term argument holds separately).
+            required = max(required, 2)
         return required
 
     @model_validator(mode="after")

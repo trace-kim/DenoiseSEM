@@ -82,6 +82,36 @@ def test_unknown_keys_are_rejected_everywhere() -> None:
         Config.model_validate(_base(objective={"lambda_grad": 1.0}))  # typo
 
 
+def test_gradient_target_modes_validate() -> None:
+    default = Config.model_validate(_base())
+    assert default.objective.gradient_target == "target"
+    assert default.objective.gradient_target_dir is None
+    with pytest.raises(ValidationError, match="gradient_target_dir"):
+        Config.model_validate(_base(objective={"gradient_target": "file"}))
+    with pytest.raises(ValidationError, match="only meaningful"):
+        Config.model_validate(
+            _base(objective={"gradient_target": "clean", "gradient_target_dir": "runs/t"})
+        )
+    with pytest.raises(ValidationError, match="lambda_gradient must be > 0"):
+        Config.model_validate(
+            _base(objective={"gradient_target": "clean", "lambda_gradient": 0.0})
+        )
+
+
+def test_noisy_mean_gradient_target_needs_a_second_replica() -> None:
+    config = Config.model_validate(
+        _base(objective={"target": "clean", "gradient_target": "noisy_mean"})
+    )
+    assert config.min_replicas == 2  # clean target alone would need only 1
+
+
+def test_init_checkpoint_field_is_accepted() -> None:
+    config = Config.model_validate(
+        _base(training={"init_checkpoint": "runs/ft_ladder/teacher.pt"})
+    )
+    assert config.training.init_checkpoint == Path("runs/ft_ladder/teacher.pt")
+
+
 def test_structural_unet_checks_fire_at_load() -> None:
     with pytest.raises(ValidationError, match="divisible"):
         Config.model_validate(

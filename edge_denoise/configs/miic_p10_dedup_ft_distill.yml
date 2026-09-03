@@ -1,0 +1,54 @@
+# TARGET-LADDER ARM D (the user's two-phase proposal, literal): gradient term
+# chases the FROZEN per-scene average of the phase-1 N2N teacher's denoised
+# replicas (Sobel is linear, so matching the averaged image's Sobel IS
+# matching the averaged Sobel).  The image term keeps its fresh-noisy-frame
+# anchor -- the recommended safety term against per-scene memorization and
+# gradient-null-space drift.  This target carries the teacher's systematic
+# bias by construction; arms B/C price exactly that.
+# Identical to miic_p10_dedup_ft_noisy.yml except `gradient_target`.
+#
+# Targets are generated (not committed) by:
+#   python -m edge_denoise distill-targets \
+#     --config edge_denoise/configs/miic_p10_dedup_ft_distill.yml \
+#     --teacher runs/edge_denoise/ft_ladder/teacher_n2n.pt \
+#     --out runs/edge_denoise/ft_ladder/distill_targets_n2n
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_distill.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: file        # frozen averaged-denoised "answer sheet"
+  gradient_target_dir: runs/edge_denoise/ft_ladder/distill_targets_n2n
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_distill
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 8
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

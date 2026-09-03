@@ -96,3 +96,88 @@ def test_burst_checkpoints_are_rejected(tmp_path: Path) -> None:
     torch.save(payload, path)
     with pytest.raises(ValueError, match="edge_denoise"):
         load_checkpoint(path)
+
+
+def test_init_checkpoint_warm_starts_from_a_burst_payload(tmp_path: Path) -> None:
+    """A burst_diffusion checkpoint (bare U-Net keys, no 'kind') seeds both the
+    live weights AND the fresh EMA shadow with its EMA values."""
+    from edge_denoise.model import build_model
+
+    dataset = write_burst(tmp_path / "data")
+    config = make_config(dataset, tmp_path / "run", representation="image", max_steps=1)
+    donor = build_model(config)
+    live = {name: torch.randn_like(value) for name, value in donor.unet.state_dict().items()}
+    ema = {
+        name: torch.full_like(parameter, 0.5)
+        for name, parameter in donor.unet.named_parameters()
+    }
+    teacher = tmp_path / "teacher.pt"
+    torch.save({"format": 1, "step": 9, "config": {}, "model": live, "ema": ema}, teacher)
+
+    raw = config.model_dump(mode="json")
+    raw["training"]["init_checkpoint"] = str(teacher)
+    trainer = Trainer(Config.model_validate(raw))
+    for name, parameter in trainer.model.unet.named_parameters():
+        assert torch.equal(parameter.data, torch.full_like(parameter, 0.5)), name
+    assert trainer.ema is not None
+    for name, value in trainer.ema.shadow.items():
+        assert torch.equal(value, torch.full_like(value, 0.5)), name
+
+    hybrid_raw = make_config(dataset, tmp_path / "run_hybrid", max_steps=1).model_dump(
+        mode="json"
+    )
+    hybrid_raw["training"]["init_checkpoint"] = str(teacher)
+    with pytest.raises(ValueError, match="backbone"):
+        Trainer(Config.model_validate(hybrid_raw))  # 3-channel conv_in vs 1-channel donor
+
+
+def test_init_checkpoint_accepts_edge_checkpoints_and_rejects_resume(tmp_path: Path) -> None:
+    dataset = write_burst(tmp_path / "data")
+    first = make_config(dataset, tmp_path / "run_a", representation="image", max_steps=1)
+    checkpoint = Trainer(first).run()
+
+    raw = make_config(dataset, tmp_path / "run_b", representation="image", max_steps=1)
+    raw = raw.model_dump(mode="json")
+    raw["training"]["init_checkpoint"] = str(checkpoint)
+    warm_config = Config.model_validate(raw)
+    warm = Trainer(warm_config)
+    reference = load_checkpoint(checkpoint)
+    for name, parameter in warm.model.named_parameters():
+        assert torch.equal(parameter.data, reference["ema"][name]), name
+    with pytest.raises(ValueError, match="warm start"):
+        Trainer(warm_config, resume_from=checkpoint)
+
+
+def test_training_runs_with_each_gradient_target_mode(tmp_path: Path) -> None:
+    from burst_diffusion.data import BurstCache
+
+    dataset = write_burst(tmp_path / "data")
+    for mode in ("clean", "noisy_mean"):
+        raw = make_config(
+            dataset, tmp_path / f"run_{mode}", representation="image", max_steps=2
+        ).model_dump(mode="json")
+        raw["objective"]["gradient_target"] = mode
+        trainer = Trainer(Config.model_validate(raw))
+        trainer.run()
+        assert trainer.step == 2
+
+    cache = BurstCache(
+        dataset, channels=1, min_replicas=2, min_size=16, val_fraction=0.34, split_seed=7
+    )
+    targets_dir = tmp_path / "targets"
+    targets_dir.mkdir()
+    for source in list(cache.train_sources) + list(cache.val_sources):
+        import numpy as np
+
+        np.save(
+            targets_dir / f"{source.source_index:05d}.npy",
+            (source.clean.astype(np.float32) / 255.0),
+        )
+    raw = make_config(
+        dataset, tmp_path / "run_file", representation="image", max_steps=2
+    ).model_dump(mode="json")
+    raw["objective"]["gradient_target"] = "file"
+    raw["objective"]["gradient_target_dir"] = str(targets_dir)
+    trainer = Trainer(Config.model_validate(raw))
+    trainer.run()
+    assert trainer.step == 2

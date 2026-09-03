@@ -1,0 +1,46 @@
+# TARGET-LADDER ARM B (oracle gate): gradient term supervised by the CLEAN
+# image's Sobel field -- the ceiling of every pseudo-label scheme, runnable
+# only because this corpus is synthetic.  If even this arm does not move val
+# precision over arm A, no averaged answer sheet (arm C or D) ever will.
+# Identical to miic_p10_dedup_ft_noisy.yml except `gradient_target`.
+# The gradient term's target-noise floor drops to ~0 here; the image term's
+# ~0.154 floor is unchanged.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_oracle.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: clean       # supervised oracle for the gradient term only
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_oracle
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 8
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

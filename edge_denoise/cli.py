@@ -79,6 +79,47 @@ def train(
     typer.echo(f"provenance written to {provenance}")
 
 
+@app.command("distill-targets")
+def distill_targets(
+    config: Path = typer.Option(..., help="edge_denoise YAML config (dataset section drives the split)."),
+    teacher: Path = typer.Option(..., help="Phase-1 teacher checkpoint (burst_diffusion or edge_denoise)."),
+    out: Path = typer.Option(..., help="Output directory for per-source .npy targets + manifest."),
+    splits: str = typer.Option("train,val", help="Comma-separated splits to cover (train, val)."),
+    stride: int = typer.Option(48, min=1, help="Tile stride in pixels (tile size = data.image_size)."),
+    tile_batch: int = typer.Option(64, min=1, help="Tiles per forward pass."),
+    ema: bool = typer.Option(True, "--ema/--no-ema", help="Use the teacher's EMA weights."),
+    device: str = typer.Option("auto", help="auto | cpu | cuda"),
+) -> None:
+    """Precompute per-scene averaged-denoised images for ``gradient_target: file``.
+
+    Runs the frozen teacher over every replica of every covered source with
+    blended overlapping tiles, averages the outputs, and writes one float32
+    ``.npy`` per source -- the distillation arm's frozen "answer sheet".
+    """
+    import sys
+
+    from .config import load_config
+    from .distill import build_teacher, write_distill_targets
+
+    loaded = load_config(config)
+    denoise_fn, description = build_teacher(teacher, device=device, use_ema=ema)
+    typer.echo(f"teacher: {description}", err=True)
+    manifest = write_distill_targets(
+        loaded,
+        denoise_fn=denoise_fn,
+        out_dir=out,
+        splits=[part.strip() for part in splits.split(",") if part.strip()],
+        stride=stride,
+        tile_batch=tile_batch,
+        teacher_path=teacher,
+        teacher_description=description,
+        command=" ".join(sys.argv),
+        progress=lambda message: typer.echo(message, err=True),
+    )
+    total = sum(len(indices) for indices in manifest["splits"].values())
+    typer.echo(f"wrote {total} target(s) + manifest to {out}")
+
+
 @app.command()
 def denoise(
     checkpoint: Path = typer.Option(..., help="Checkpoint (.pt) to denoise with."),

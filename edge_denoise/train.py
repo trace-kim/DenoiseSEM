@@ -6,14 +6,17 @@ restore all RNG state for exact resume, no DataLoader) and differs only in the
 objective:
 
     L = lambda_image    * d(f(y1), target)                (image / hybrid)
-      + lambda_gradient * d(S f(y1), S target)            (S = sobel; for the
+      + lambda_gradient * d(S f(y1), S gtarget)           (S = sobel; for the
                                                            'gradient' representation
                                                            the output already lives
-                                                           there: d(f, S target))
+                                                           there: d(f, S gtarget))
       + lambda_consistency * |f(y1) - f(y2)|^2            (two independent frames)
 
 with d(.) mean-reduced L2 or L1 and target either the clean crop or a fresh
-noisy frame (Noise2Noise).
+noisy frame (Noise2Noise).  ``gtarget`` defaults to ``target`` and is
+overridden by ``objective.gradient_target`` (clean oracle, leave-one-out
+noisy mean, or a precomputed distillation image) -- the target-ladder
+experiment; see the data module for the statistics of each choice.
 
 Expectation setting for ``target: noisy`` -- the loss cannot fall below the
 target-noise floor, so a plateau is correct behavior, not divergence:
@@ -110,6 +113,29 @@ def load_checkpoint(path: str | Path, *, map_location: str | torch.device = "cpu
     return payload
 
 
+def load_init_weights(
+    path: str | Path, *, map_location: str | torch.device = "cpu"
+) -> dict[str, torch.Tensor]:
+    """Weights for ``training.init_checkpoint``: a warm start, not a resume.
+
+    Takes the EMA weights when present (they are what every evaluation runs)
+    overlaid on the live state dict (which also carries any buffers), from
+    either pipeline's checkpoint: an edge_denoise payload maps 1:1, while a
+    burst_diffusion payload stores the bare U-Net so its keys gain the
+    ``unet.`` prefix of :class:`~edge_denoise.model.EdgeDenoiser`.  A backbone
+    mismatch surfaces as a strict ``load_state_dict`` error at the caller.
+    """
+    payload = torch.load(Path(path), map_location=map_location, weights_only=True)
+    if not isinstance(payload, dict) or "model" not in payload:
+        raise ValueError(f"{path} is not a training checkpoint (no 'model' state)")
+    state = dict(payload["model"])
+    if payload.get("ema"):
+        state.update(payload["ema"])
+    if payload.get("kind") != CHECKPOINT_KIND:
+        state = {f"unet.{name}": value for name, value in state.items()}
+    return state
+
+
 class Trainer:
     def __init__(self, config: Config, *, resume_from: str | Path | None = None):
         self.config = config
@@ -149,9 +175,26 @@ class Trainer:
             batch_size=config.training.batch_size,
             target=objective.target,
             need_second=objective.lambda_consistency > 0.0,
+            gradient_target=objective.gradient_target,
+            gradient_target_dir=objective.gradient_target_dir,
             seed=config.training.seed,
         )
         self.model: EdgeDenoiser = build_model(config).to(self.device)
+        if config.training.init_checkpoint is not None:
+            if resume_from is not None:
+                raise ValueError(
+                    "training.init_checkpoint is a weights-only warm start and cannot "
+                    "be combined with resume (resume restores the full training state)"
+                )
+            state = load_init_weights(config.training.init_checkpoint, map_location=self.device)
+            try:
+                self.model.load_state_dict(state)
+            except RuntimeError as error:
+                raise ValueError(
+                    f"training.init_checkpoint {config.training.init_checkpoint} does not "
+                    f"match this config's backbone: {error}"
+                ) from error
+            logger.info("warm start: weights from %s", config.training.init_checkpoint)
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=config.training.lr,
@@ -230,9 +273,11 @@ class Trainer:
         prediction: torch.Tensor,
         targets: torch.Tensor,
         second: torch.Tensor | None,
+        gradient_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Per-term mean losses; keys are absent when their weight is zero."""
         objective = self.config.objective
+        reference = targets if gradient_targets is None else gradient_targets
 
         def distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             if objective.loss == "l1":
@@ -241,12 +286,12 @@ class Trainer:
 
         terms: dict[str, torch.Tensor] = {}
         if objective.representation == "gradient":
-            terms["gradient"] = distance(prediction, sobel(targets))
+            terms["gradient"] = distance(prediction, sobel(reference))
         else:
             if objective.lambda_image > 0.0:
                 terms["image"] = distance(prediction, targets)
             if objective.lambda_gradient > 0.0:
-                terms["gradient"] = distance(sobel(prediction), sobel(targets))
+                terms["gradient"] = distance(sobel(prediction), sobel(reference))
         if objective.lambda_consistency > 0.0:
             if second is None:
                 raise RuntimeError("consistency loss requires a second realization")
@@ -278,12 +323,18 @@ class Trainer:
             inputs = batch.inputs.to(self.device)
             targets = batch.targets.to(self.device)
             second = batch.second.to(self.device)
+            gradient_targets = (
+                batch.gradient_targets.to(self.device)
+                if batch.gradient_targets is not None
+                else None
+            )
 
             prediction = self.model(inputs)
             terms = self._loss_terms(
                 prediction,
                 targets,
                 second if self.config.objective.lambda_consistency > 0.0 else None,
+                gradient_targets,
             )
             writer.add_scalar("val/loss", float(self._combine(terms).item()), self.step)
 
@@ -336,9 +387,14 @@ class Trainer:
                 inputs = batch.inputs.to(self.device)
                 targets = batch.targets.to(self.device)
                 second = batch.second.to(self.device) if batch.second is not None else None
+                gradient_targets = (
+                    batch.gradient_targets.to(self.device)
+                    if batch.gradient_targets is not None
+                    else None
+                )
 
                 prediction = self.model(inputs)
-                terms = self._loss_terms(prediction, targets, second)
+                terms = self._loss_terms(prediction, targets, second, gradient_targets)
                 loss = self._combine(terms)
 
                 self.optimizer.zero_grad(set_to_none=True)

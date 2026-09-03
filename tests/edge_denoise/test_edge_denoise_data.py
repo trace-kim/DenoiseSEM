@@ -101,3 +101,84 @@ def test_too_few_replicas_is_rejected_up_front(tmp_path: Path) -> None:
 def test_crop_size_larger_than_source_is_rejected(burst_dataset: Path) -> None:
     with pytest.raises(ValueError, match="crops"):
         _factory(_cache(burst_dataset), image_size=32)
+
+
+def test_gradient_targets_default_to_absent(burst_dataset: Path) -> None:
+    factory = _factory(_cache(burst_dataset))
+    assert factory.sample_batch(count=2).gradient_targets is None
+    assert factory.val_batch(count=1).gradient_targets is None
+
+
+def test_gradient_target_clean_matches_the_clean_crop(burst_dataset: Path) -> None:
+    cache = _cache(burst_dataset)
+    factory = _factory(cache, gradient_target="clean")
+    batch, info = factory.sample_batch(count=6, return_info=True)
+    by_index = {source.source_index: source for source in cache.train_sources}
+    for position, sample in enumerate(info):
+        source = by_index[sample.source_index]
+        top, left = sample.crop_yx
+        window = np.s_[top : top + 16, left : left + 16]
+        expected = torch.from_numpy(
+            source.clean[window].astype(np.float32) / 255.0 * 2.0 - 1.0
+        )
+        assert torch.allclose(batch.gradient_targets[position, 0], expected)
+
+
+def test_gradient_target_noisy_mean_is_the_leave_one_out_average(burst_dataset: Path) -> None:
+    cache = _cache(burst_dataset)
+    factory = _factory(cache, gradient_target="noisy_mean")
+    batch, info = factory.sample_batch(count=12, return_info=True)
+    by_index = {source.source_index: source for source in cache.train_sources}
+    for position, sample in enumerate(info):
+        source = by_index[sample.source_index]
+        top, left = sample.crop_yx
+        window = np.s_[top : top + 16, left : left + 16]
+        others = [
+            source.frames[replica][window].astype(np.float64)
+            for replica in range(len(source.frames))
+            if replica != sample.input_replica
+        ]
+        expected = np.mean(others, axis=0) / 255.0 * 2.0 - 1.0
+        actual = batch.gradient_targets[position, 0].numpy()
+        assert np.allclose(actual, expected, atol=1e-5)
+
+
+def _write_file_targets(directory: Path, cache: BurstCache) -> dict[int, np.ndarray]:
+    rng = np.random.default_rng(5)
+    directory.mkdir(parents=True, exist_ok=True)
+    arrays: dict[int, np.ndarray] = {}
+    for source in list(cache.train_sources) + list(cache.val_sources):
+        array = rng.random(source.clean.shape[:2]).astype(np.float32)
+        np.save(directory / f"{source.source_index:05d}.npy", array)
+        arrays[source.source_index] = array
+    return arrays
+
+
+def test_gradient_target_file_serves_aligned_crops(burst_dataset: Path, tmp_path: Path) -> None:
+    cache = _cache(burst_dataset)
+    arrays = _write_file_targets(tmp_path / "targets", cache)
+    factory = _factory(
+        cache, gradient_target="file", gradient_target_dir=tmp_path / "targets"
+    )
+    batch, info = factory.sample_batch(count=6, return_info=True)
+    for position, sample in enumerate(info):
+        top, left = sample.crop_yx
+        expected = arrays[sample.source_index][top : top + 16, left : left + 16] * 2.0 - 1.0
+        assert np.allclose(batch.gradient_targets[position, 0].numpy(), expected, atol=1e-6)
+    val = factory.val_batch(count=2)
+    assert val.gradient_targets is not None
+    assert val.gradient_targets.shape == (2, 1, 16, 16)
+
+
+def test_gradient_target_file_missing_or_misshapen_is_rejected(
+    burst_dataset: Path, tmp_path: Path
+) -> None:
+    cache = _cache(burst_dataset)
+    with pytest.raises(ValueError, match="distill-targets"):
+        _factory(cache, gradient_target="file", gradient_target_dir=tmp_path / "empty")
+    targets_dir = tmp_path / "targets"
+    _write_file_targets(targets_dir, cache)
+    first = cache.train_sources[0]
+    np.save(targets_dir / f"{first.source_index:05d}.npy", np.zeros((3, 3), dtype=np.float32))
+    with pytest.raises(ValueError, match="shape"):
+        _factory(cache, gradient_target="file", gradient_target_dir=targets_dir)

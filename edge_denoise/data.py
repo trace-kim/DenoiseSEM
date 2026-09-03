@@ -12,8 +12,8 @@ worker-restart trap on small datasets, and the need for random access to all
 frames of a source.  :class:`PairFactory` assembles batches from one seeded
 RNG whose state rides in the checkpoint, so runs resume exactly.
 
-A training sample is (input frame, target, optional second frame), all crops
-of the SAME window of the same source:
+A training sample is (input frame, target, optional second frame, optional
+gradient target), all crops of the SAME window of the same source:
 
 - ``input``:  one noisy frame, drawn uniformly.
 - ``target``: the clean image (``target: clean``), or a FRESH noisy frame from
@@ -22,16 +22,26 @@ of the SAME window of the same source:
 - ``second``: an independent third frame for the consistency penalty,
   distinct from both input and target so the penalty correlates with neither
   the input noise nor the target noise.
+- ``gradient_targets``: present only when ``objective.gradient_target``
+  overrides the gradient term's reference (the target-ladder experiment):
+  the clean crop (``clean``), the leave-one-out mean of every replica EXCEPT
+  the input (``noisy_mean`` -- excluding the input keeps the target
+  independent of the input noise, the load-bearing Noise2Noise condition),
+  or a precomputed per-source image loaded from disk (``file`` -- the
+  distillation arm's frozen "answer sheet").
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
 
-from burst_diffusion.data import BurstCache
+from burst_diffusion.data import BurstCache, BurstSource
+
+GRADIENT_TARGET_MODES = ("target", "clean", "noisy_mean", "file")
 
 
 @dataclass(frozen=True)
@@ -50,6 +60,7 @@ class PairBatch:
     inputs: torch.Tensor  # [B, 1, S, S] float32 in [-1, 1]
     targets: torch.Tensor  # [B, 1, S, S] float32 in [-1, 1]
     second: torch.Tensor | None  # [B, 1, S, S] float32 in [-1, 1]
+    gradient_targets: torch.Tensor | None = None  # [B, 1, S, S]; None for mode "target"
 
 
 @dataclass
@@ -58,6 +69,7 @@ class ValPairBatch:
     targets: torch.Tensor
     second: torch.Tensor
     clean: torch.Tensor
+    gradient_targets: torch.Tensor | None = None
 
 
 def _to_model_chw(crop: np.ndarray) -> np.ndarray:
@@ -78,15 +90,25 @@ class PairFactory:
         batch_size: int,
         target: str = "noisy",
         need_second: bool = False,
+        gradient_target: str = "target",
+        gradient_target_dir: str | Path | None = None,
         seed: int = 0,
     ):
         if target not in ("clean", "noisy"):
             raise ValueError(f"target must be 'clean' or 'noisy', got {target!r}")
+        if gradient_target not in GRADIENT_TARGET_MODES:
+            raise ValueError(
+                f"gradient_target must be one of {GRADIENT_TARGET_MODES}, got {gradient_target!r}"
+            )
+        if gradient_target == "file" and gradient_target_dir is None:
+            raise ValueError("gradient_target 'file' requires gradient_target_dir")
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         if not cache.train_sources:
             raise ValueError("cache has no training sources")
         required = 1 + int(target == "noisy") + int(need_second)
+        if gradient_target == "noisy_mean":
+            required = max(required, 2)
         for source in cache.all_sources:
             if len(source.frames) < required:
                 raise ValueError(
@@ -105,7 +127,58 @@ class PairFactory:
         self.batch_size = batch_size
         self.target = target
         self.need_second = need_second
+        self.gradient_target = gradient_target
         self._rng = np.random.default_rng(seed)
+
+        # Per-source auxiliaries for the gradient-target modes, covering every
+        # source training or validation can touch (never the test split).
+        active_sources = list(cache.train_sources) + list(cache.val_sources)
+        self._frame_sums: dict[int, np.ndarray] = {}
+        self._file_targets: dict[int, np.ndarray] = {}
+        if gradient_target == "noisy_mean":
+            for source in active_sources:
+                if len(source.frames) > 257:
+                    raise ValueError(
+                        f"source {source.source_index} has {len(source.frames)} replicas; "
+                        "the uint16 frame-sum accumulator supports at most 257"
+                    )
+                total = np.zeros(source.frames[0].shape, dtype=np.uint16)
+                for frame in source.frames:
+                    total += frame
+                self._frame_sums[source.source_index] = total
+        elif gradient_target == "file":
+            directory = Path(gradient_target_dir)  # type: ignore[arg-type]
+            for source in active_sources:
+                path = directory / f"{source.source_index:05d}.npy"
+                if not path.is_file():
+                    raise ValueError(
+                        f"gradient_target 'file' needs {path} for source "
+                        f"{source.source_index}; generate targets with "
+                        "`python -m edge_denoise distill-targets`"
+                    )
+                array = np.load(path)
+                if array.ndim != 2 or array.shape != source.clean.shape[:2]:
+                    raise ValueError(
+                        f"{path} has shape {array.shape} but source "
+                        f"{source.source_index} is {source.clean.shape[:2]}"
+                    )
+                if not np.isfinite(array).all():
+                    raise ValueError(f"{path} contains non-finite values")
+                self._file_targets[source.source_index] = array.astype(np.float32)
+
+    def _gradient_target_crop(
+        self, source: BurstSource, window: tuple[slice, slice], input_replica: int
+    ) -> np.ndarray:
+        """The gradient term's reference crop in model range, [1, S, S]."""
+        if self.gradient_target == "clean":
+            return _to_model_chw(source.clean[window])
+        if self.gradient_target == "noisy_mean":
+            total = self._frame_sums[source.source_index][window].astype(np.float32)
+            others = total - source.frames[input_replica][window].astype(np.float32)
+            mean01 = others / (255.0 * (len(source.frames) - 1))
+            return (mean01 * 2.0 - 1.0)[None, :, :]
+        # "file": stored as float32 in [0, 1]
+        return (self._file_targets[source.source_index][window] * 2.0 - 1.0)[None, :, :]
 
     def sample_batch(
         self, *, count: int | None = None, return_info: bool = False
@@ -117,6 +190,7 @@ class PairFactory:
         input_list: list[np.ndarray] = []
         target_list: list[np.ndarray] = []
         second_list: list[np.ndarray] = []
+        gradient_list: list[np.ndarray] = []
         info: list[PairInfo] = []
         for _ in range(count):
             source = self.cache.train_sources[
@@ -145,6 +219,11 @@ class PairFactory:
                 second_replica = int(permutation[cursor])
                 second_list.append(_to_model_chw(source.frames[second_replica][window]))
 
+            if self.gradient_target != "target":
+                gradient_list.append(
+                    self._gradient_target_crop(source, window, input_replica)
+                )
+
             if return_info:
                 info.append(
                     PairInfo(
@@ -159,6 +238,11 @@ class PairFactory:
             inputs=torch.from_numpy(np.stack(input_list)),
             targets=torch.from_numpy(np.stack(target_list)),
             second=torch.from_numpy(np.stack(second_list)) if self.need_second else None,
+            gradient_targets=(
+                torch.from_numpy(np.stack(gradient_list))
+                if self.gradient_target != "target"
+                else None
+            ),
         )
         if return_info:
             return batch, info
@@ -181,6 +265,7 @@ class PairFactory:
         target_list: list[np.ndarray] = []
         second_list: list[np.ndarray] = []
         clean_list: list[np.ndarray] = []
+        gradient_list: list[np.ndarray] = []
         for index in range(count):
             source = self.cache.val_sources[index % len(self.cache.val_sources)]
             height, width = source.clean.shape[:2]
@@ -197,11 +282,18 @@ class PairFactory:
             else:
                 target_list.append(_to_model_chw(source.clean[window]))
             clean_list.append(_to_model_chw(source.clean[window]))
+            if self.gradient_target != "target":
+                gradient_list.append(self._gradient_target_crop(source, window, 0))
         return ValPairBatch(
             inputs=torch.from_numpy(np.stack(input_list)),
             targets=torch.from_numpy(np.stack(target_list)),
             second=torch.from_numpy(np.stack(second_list)),
             clean=torch.from_numpy(np.stack(clean_list)),
+            gradient_targets=(
+                torch.from_numpy(np.stack(gradient_list))
+                if self.gradient_target != "target"
+                else None
+            ),
         )
 
     def state_dict(self) -> dict:
