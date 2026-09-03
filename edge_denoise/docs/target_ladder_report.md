@@ -235,7 +235,25 @@ $$\lambda_{\mathrm{image}} = 1,\qquad \lambda_{\mathrm{gradient}} = 4,\qquad
 \lambda_{\mathrm{consistency}} = 1\ (\text{where the term appears}),$$
 
 set by the config keys `objective.lambda_image` / `lambda_gradient` /
-`lambda_consistency`.
+`lambda_consistency` (abbreviated $\lambda_i$, $\lambda_g$, $\lambda_c$ in
+the table).
+
+At a glance — the *init* and *steps* columns are the phase structure (phase 1
+= the n2n row; every `ft_*` loss is a phase-2 objective applied on top of its
+weights); the per-arm blocks below spell the same thing out phase by phase:
+
+| arm | init (phase 1) | steps | network input | training loss |
+|---|---|---|---|---|
+| single_frame / avg_of_m | — | — | — | none: the estimate is $y_1$ or $\tfrac1m\sum_{m'} y_{m'}$ directly |
+| n2n | scratch | 30k | $y_i$ | $d(f(y_i),\,y_j)$ — this row *is* phase 1 |
+| sobloss | scratch | 30k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j)$ (single phase) |
+| ft_noisy | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j)$ |
+| ft_oracle | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S x)$ |
+| ft_avg | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S \bar y_{-i})$, $\;\bar y_{-i} = \tfrac1{15}\sum_{m\neq i} y_m$ |
+| ft_distill | n2n EMA | 10k | $y_i$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S T)$, $\;T$ frozen (below) |
+| ft_consist | n2n EMA | 10k | $y_i$ and $y_k$ | $\lambda_i\, d(f(y_i),y_j) + \lambda_g\, d(S f(y_i),\,S y_j) + \lambda_c\, d(f(y_i),\,f(y_k))$ |
+| hybrid (pilot) | scratch | 30k | $[y_i,\,S y_i]$ | as sobloss |
+| grad (pilot) | scratch | 30k | $S y_i$ | $\lambda_g\, d(\hat g,\,S y_j)$ with $\lambda_i = 0$; FFT least-squares inverse at inference |
 
 **Classical rows** (`single_frame`, `avg_of_m`) — no training, no phases:
 the estimate is $y_1$ or $\tfrac1m\sum_{m'} y_{m'}$ directly.
