@@ -86,7 +86,9 @@ still buries in grain, from one frame at 14 dB. The differences between
 `n2n`, `sobloss`, and `hybrid` are — as the table says — visually negligible;
 the `grad` column is recognisably softer with mild large-scale shading
 errors (clearest on src 21, −3.6 dB), the low-frequency amplification of
-§5.2 made visible.
+§5.2 made visible. Note also that every learned column is *smoother than the
+clean column itself*: the flats' fine grain is conditional-mean-suppressed,
+not transmitted — quantified in the smoothness caveat (§6).
 
 ### 2.2 Where the outputs move between repeated acquisitions
 
@@ -202,3 +204,31 @@ split, seed, steps; the t-conditioning constant is 1.0 in both), but the
 codepaths differ in batch assembly order, so residual trainer-level
 differences of order ±0.05 dB cannot be excluded (visible as the
 n2n-vs-sobloss PSNR gap, which is within that band).
+
+**Smoothness: every learned arm outputs less fine texture than the clean
+reference — by construction, and PSNR barely notices.** A tiled full-frame
+diagnosis of the pilot checkpoints (2026-09-01) measured the clean sources'
+flat-region grain at $\sigma_m \approx 0.005$–$0.006$ against per-frame
+Poisson noise $\sigma_n \approx 0.19$: the per-pixel Wiener gain
+$\sigma_m^2/(\sigma_m^2+\sigma_n^2) \approx 0.001$, so ≥ 99.9% of the grain
+is unrecoverable from one frame and the conditional-mean optimum drops it.
+The arms do exactly that — output flat-texture RMS ≈ 0.0007 vs clean's
+0.0057, and the flat-region residual correlates with the clean image's own
+grain at −0.73…−0.81: the flat "error" *is* the untransmitted grain. The
+signature is identical on train scenes (no grain memorization), so it is
+estimator character, not a generalization gap. PSNR is near-blind to it:
+dropping all flat grain alone would still score 48–53 dB, the dropped grain
+is only ~5–10% of total MSE, and 52–68% of squared error sits on the edge
+mask instead. Consequences: outputs look cleaner than the ground truth they
+are scored against; texture-amplitude metrics (fine-scale LER, graininess)
+measured on any conditional-mean output read low; and real sub-recoverable
+features go with the grain (the small dark blemish in src 90's clean crop is
+largely erased by every learned arm). The grain is short-range correlated
+(lag-1 ≈ +0.5 horizontal / +0.3 vertical, full-row streaks ≤ 2%, amplitude
+scaling ≈ $\sqrt{I}$ — leftover acquisition noise of the source capture), so
+receptive field cannot substitute for dose: revealing it requires on the
+order of $m \approx I/(\text{peak}\cdot\sigma_m^2) \approx 10^3$ averaged
+frames (the short-range correlation buys at most ~2–3×). Reproduce:
+`python tools/diagnose_smoothness.py --config
+edge_denoise/configs/miic_p10_dedup_sobloss.yml --n2n-checkpoint <n2n.pt>
+--sobloss-checkpoint <...> --hybrid-checkpoint <...> --grad-checkpoint <...>`.
