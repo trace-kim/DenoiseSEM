@@ -1,0 +1,55 @@
+# TARGET-LADDER ARM A' (compute-matched control for arm E).  Identical to
+# miic_p10_dedup_ft_noisy.yml except max_steps 20000 (and the run_dir).
+#
+# Why it exists: ft_consist's consistency term runs a SECOND batch-8 forward
+# pass with gradients every step, so at 10k steps it has seen ~160k network
+# inputs (~20 min) against ft_noisy's ~80k (~11 min).  The 2026-09-04 audit of
+# the ladder report (docs/target_ladder_audit.md, item 7) pointed out that the
+# ft_consist-vs-ft_noisy comparison is therefore not compute-matched.  The
+# sobloss-from-scratch arm (30k steps, ~240k inputs, CD 3sigma scene 0.533 px)
+# already argues against "more compute" as the explanation for ft_consist's
+# 0.406 px, but this arm settles it inside the fine-tune protocol: same
+# objective as the control, same number of gradient-carrying examples as
+# ft_consist.  If it lands near ft_consist the consistency term is not the
+# cause; if it stays at ft_noisy's level the compute explanation is closed.
+#
+# Belongs to the lambda_c sweep as its lambda_c = 0 / matched-compute arm.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_noisy_20k.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target      # gradient term follows the image term (fresh frame)
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_noisy_20k
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 8
+  max_steps: 20000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000
