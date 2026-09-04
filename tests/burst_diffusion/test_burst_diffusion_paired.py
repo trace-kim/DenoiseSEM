@@ -16,6 +16,7 @@ from burst_diffusion.paired import (
     per_scene_metrics,
     regularized_incomplete_beta,
     resolve_method,
+    sign_test_two_sided_p,
     student_t_two_sided_p,
 )
 
@@ -56,14 +57,31 @@ def test_incomplete_beta_endpoints_and_symmetry() -> None:
 
 
 def test_paired_t_degenerate_inputs() -> None:
-    assert paired_t([]) == {"n": 0, "mean": None, "t": None, "p": None, "negative": 0}
+    assert paired_t([]) == {
+        "n": 0, "mean": None, "t": None, "p": None, "negative": 0, "sign_p": None
+    }
     single = paired_t([-0.3])
     assert single["n"] == 1 and single["mean"] == pytest.approx(-0.3) and single["t"] is None
+    assert single["sign_p"] == 1.0
     flat = paired_t([0.1, 0.1, 0.1])
-    assert flat["t"] is None and flat["negative"] == 0
+    assert flat["t"] is None and flat["negative"] == 0 and flat["sign_p"] == pytest.approx(0.25)
     stats = paired_t([-1.0, -2.0, -3.0, -4.0])
     assert stats["negative"] == 4
     assert stats["t"] == pytest.approx(-2.5 / (math.sqrt(5.0 / 3.0) / 2.0))
+    assert stats["sign_p"] == pytest.approx(2.0 / 16.0)
+
+
+def test_sign_test_is_robust_to_one_outlier_scene() -> None:
+    """Nine scenes improve by 0.1, one regresses by 3: the t-test cannot tell,
+    the sign test can -- the situation the D1 compute-matched controls produced."""
+    deltas = [-0.1] * 9 + [3.0]
+    stats = paired_t(deltas)
+    assert stats["negative"] == 9
+    assert stats["p"] > 0.3
+    assert stats["sign_p"] == pytest.approx(2.0 * 11.0 / 1024.0)
+    assert sign_test_two_sided_p(0, 0) is None
+    assert sign_test_two_sided_p(5, 5) == 1.0
+    assert sign_test_two_sided_p(10, 0) == pytest.approx(2.0 / 1024.0)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +179,7 @@ def test_resolve_method_accepts_bare_arm_names_and_rejects_ambiguity() -> None:
 
 def test_markdown_report_states_the_unit_and_three_sigma() -> None:
     text = format_markdown(paired_report(_results(), control="control"))
-    assert "3-sigma" in text and "scene" in text
+    assert "3-sigma" in text and "scene" in text and "p (sign)" in text
     assert "| one_shot@arm | 2 | -0.2250 | 2/2 |" in text
 
 

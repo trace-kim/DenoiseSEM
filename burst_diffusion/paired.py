@@ -136,8 +136,26 @@ def student_t_two_sided_p(t: float, dof: int) -> float:
     return regularized_incomplete_beta(0.5 * dof, 0.5, x)
 
 
+def sign_test_two_sided_p(negative: int, positive: int) -> float | None:
+    """Exact two-sided binomial sign test on the non-zero differences.
+
+    Robust companion to the paired t: with ten scenes one scene with a large
+    opposite-sign delta can drive the t-test to p ~ .3 while nine of ten
+    scenes agree in direction (which this test scores at p ~ .02).  Neither
+    replaces the other -- the t weighs magnitudes, the sign test only
+    directions -- so both are reported.  ``None`` when there are no
+    non-zero differences.
+    """
+    n = negative + positive
+    if n == 0:
+        return None
+    k = min(negative, positive)
+    tail = sum(math.comb(n, i) for i in range(0, k + 1)) / 2.0**n
+    return float(min(1.0, 2.0 * tail))
+
+
 def paired_t(deltas: Sequence[float]) -> dict:
-    """Mean, t statistic, two-sided p, and n for paired differences.
+    """Mean, t statistic, two-sided p, sign-test p, and n for paired differences.
 
     ``t``/``p`` are ``None`` with fewer than two pairs or a zero-variance
     difference (then the mean is the whole story).
@@ -145,15 +163,17 @@ def paired_t(deltas: Sequence[float]) -> dict:
     values = np.asarray(list(deltas), dtype=np.float64)
     n = int(values.size)
     if n == 0:
-        return {"n": 0, "mean": None, "t": None, "p": None, "negative": 0}
+        return {"n": 0, "mean": None, "t": None, "p": None, "negative": 0, "sign_p": None}
     mean = float(values.mean())
     negative = int((values < 0.0).sum())
+    positive = int((values > 0.0).sum())
+    sign_p = sign_test_two_sided_p(negative, positive)
     if n < 2:
-        return {"n": n, "mean": mean, "t": None, "p": None, "negative": negative}
+        return {"n": n, "mean": mean, "t": None, "p": None, "negative": negative, "sign_p": sign_p}
     spread = float(values.std(ddof=1))
     # Identical differences give a spread of ~1e-17, not exactly zero.
     if spread <= 1e-12 * max(1.0, abs(mean)):
-        return {"n": n, "mean": mean, "t": None, "p": None, "negative": negative}
+        return {"n": n, "mean": mean, "t": None, "p": None, "negative": negative, "sign_p": sign_p}
     t = mean / (spread / math.sqrt(n))
     return {
         "n": n,
@@ -161,6 +181,7 @@ def paired_t(deltas: Sequence[float]) -> dict:
         "t": float(t),
         "p": float(student_t_two_sided_p(t, n - 1)),
         "negative": negative,
+        "sign_p": sign_p,
     }
 
 
@@ -280,23 +301,24 @@ def format_markdown(report: Mapping) -> str:
         "",
         "Unit: one value per scene (source); sites within a scene are not "
         "independent. CD figures are **3-sigma** (the JSON's `scene_sigmas_px` "
-        "is 1-sigma). Two-sided paired t on `arm - control`; with ~10 scenes the "
-        "test is weak, so p > .05 is not evidence of equality. Bonferroni "
-        f"threshold across the {len(report['arms'])} arm(s): "
+        "is 1-sigma). Two-sided paired t on `arm - control` (weighs magnitudes) "
+        "and an exact sign test on the direction counts (robust to one outlier "
+        "scene); with ~10 scenes both are weak, so p > .05 is not evidence of "
+        f"equality. Bonferroni threshold across the {len(report['arms'])} arm(s): "
         f"alpha = {report['bonferroni_alpha']:.4f}.",
         "",
     ]
     for metric in report["metrics"]:
         lines.append(f"## {METRIC_LABELS.get(metric, metric)}")
         lines.append("")
-        lines.append("| arm | n scenes | mean delta | delta < 0 | t | p |")
-        lines.append("|---|---:|---:|---:|---:|---:|")
+        lines.append("| arm | n scenes | mean delta | delta < 0 | t | p (t) | p (sign) |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|")
         for arm, per_metric in report["arms"].items():
             stats = per_metric[metric]
             lines.append(
                 f"| {arm} | {stats['n']} | {_fmt(stats['mean'], '+.4f')} | "
                 f"{stats['negative']}/{stats['n']} | {_fmt(stats['t'], '+.2f')} | "
-                f"{_fmt(stats['p'], '.4f')} |"
+                f"{_fmt(stats['p'], '.4f')} | {_fmt(stats['sign_p'], '.4f')} |"
             )
         lines.append("")
     return "\n".join(lines)
