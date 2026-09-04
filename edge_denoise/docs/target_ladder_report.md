@@ -70,13 +70,22 @@ pilot report [`edge_denoise_report.md`](edge_denoise_report.md) · results:
   6/10 scenes, p = .33, roughly −0.19…+0.07 px at 95%; PSNR +0.15 dB,
   p = .01). Because every sweep arm shares the protocol, within-sweep
   comparisons are valid regardless.
-- **`ft_consist` is not compute-matched.** Its second forward pass carries
-  gradients, so 10k steps see ~160k network inputs (~20 min) against
-  `ft_noisy`'s ~80k (~11 min). The sobloss row (30k from scratch, ~240k
-  inputs, 0.533 px) argues against "more compute" as the explanation, but a
-  20k-step `ft_noisy` (`miic_p10_dedup_ft_noisy_20k.yml`) now exists as the
-  sweep's matched-compute λ_c = 0 arm. How to read the gain before that arm
-  runs is an open discussion item (backlog).
+- **Compute-matched controls (run 2026-09-04, §7) narrow but do not
+  overturn the result.** `ft_consist`'s second forward pass carries
+  gradients, so 10k steps see ~160k network inputs against `ft_noisy`'s
+  ~80k. Two controls with the sobloss objective and matched compute —
+  `ft_noisy_20k` (2× steps) and `ft_noisy_b16` (2× batch) — land at CD 3σ
+  scene **0.490 / 0.477 px**, better than `ft_noisy`'s 0.539 in the median
+  but not paired-significantly (p = .54 / .12), with pixel σ down only
+  1–3% and PSNR *up*. `ft_consist` still beats both on **9/10 scenes**
+  (sign test p = .02; mean −0.10 / −0.09 px) and on pixel σ by 26% (10/10,
+  p < 10⁻⁴). The one exception is src 87, a one-site scene where
+  `ft_consist` measured CD on only 7/10 seeds — it drives the paired t to
+  p = .16 / .37. So: "more compute" does not produce the effect, but the
+  CD-level claim at matched compute is **strong at one seed, not
+  established**; the headline p = .006 against `ft_noisy` overstated it
+  because that control sat at the unlucky end of its own run-to-run spread.
+  The sweep's λ_c = 0 baseline is now `ft_noisy_b16`, with seeds.
 
 ## 1. Protocol
 
@@ -252,15 +261,15 @@ recommended line drops phase-2 distillation and promotes the consistency
 term. The unbiased gradient targets are retained as a PSNR/accuracy option,
 no longer as a precision lever.
 
-1. **λ_c sweep × seed replication** (the decisive study): λ_c ∈ {0.25, 0.5,
-   1, 2} × ≥3 seeds on the fine-tune protocol (~20 min/run), **plus the
-   matched-compute λ_c = 0 arm** (`miic_p10_dedup_ft_noisy_20k.yml`, ~22
-   min) so the consistency term is separated from its extra forward pass.
-   Analyze with `python -m burst_diffusion paired --control <λ_c = 0 arm>`
-   — scene-level, 3σ, all four metrics — and read CD 3σ, |bias|, PSNR and
-   pixel σ together. Whether the bias–variance dial has a measurable
-   accuracy cost, and where its knee is, is what this study decides; the
-   present data show a PSNR cost and a descriptive bias increase only.
+1. **λ_c sweep × seed replication** (the decisive study): λ_c ∈ {0, 0.25,
+   0.5, 1, 2} × ≥3 seeds on the fine-tune protocol (~20 min/run), where
+   **λ_c = 0 is `ft_noisy_b16`** — the compute-matched control of §7, same
+   per-step cost as the consistency arms. Analyze with
+   `python -m burst_diffusion paired --control <λ_c = 0 arm>` — scene-level,
+   3σ, t and sign tests, all metrics — on per-scene values, never scene
+   medians (§7.3). Whether the bias–variance dial has a measurable accuracy
+   cost, and where its knee is, is what this study decides; the present
+   data show a PSNR cost and a descriptive bias increase only.
 2. **Gradient-domain consistency** (penalize `‖S f(y₁) − S f(y₂)‖²`): the σ
    maps concentrate variance on edges, so aiming the variance penalty there
    may buy the same CD improvement at lower PSNR/bias cost. Small code
@@ -285,9 +294,11 @@ no longer as a precision lever.
 ## 6. Caveats
 
 One training seed per arm; 10 dev scenes; 64px synthetic-Poisson patches;
-λ_c = 1 unswept; `ft_consist` is not compute-matched to the control; its
-accuracy cost is descriptive only (scene-level p ≈ .2) and must be
-re-measured with seeds at every λ_c; `avg_of_8` rests on two averages per
+λ_c = 1 unswept; against compute-matched controls `ft_consist`'s CD gain is
+9/10 scenes but p = .16–.37 by paired t at one seed (§7) — the single-seed
+run-to-run spread of the scene-median statistic is ~0.06 px; its accuracy
+cost is descriptive only (scene-level p ≈ .2) and must be re-measured with
+seeds at every λ_c; `avg_of_8` rests on two averages per
 scene and `avg_of_16` on one; the harness selects CD sites, matches
 crossings and references shift against the clean image (Appendix A.1), so
 its CD/shift columns are not ground-truth-free as implemented; slope/LER
@@ -307,6 +318,101 @@ overwrote the first's checkpoint and provenance and the evaluation used the
 second (timestamps match). The two runs agree to ~1e-5 in loss (cuDNN
 nondeterminism); training now refuses an occupied `run_dir` without
 `--overwrite`.
+
+## 7. Compute-matched controls (D1, run 2026-09-04)
+
+**Question.** Audit item 7: `ft_consist`'s consistency term costs a second
+forward pass with gradients, so its 10k steps are ~2× the control's compute.
+Is the precision gain the term's, or would fitting the sobloss objective
+harder do the same? Mechanically the second pass computes $f(y_k)$, which
+enters only the agreement term (with λ_c = 0 its gradient is identically
+zero), so "compute" can act only by reducing whatever under-convergence
+`ft_noisy` has. Two controls, pre-registered in `audit_backlog.md` (D1)
+with predictions before running:
+
+| arm | config | what it matches | steps/s | wall |
+|---|---|---|---:|---:|
+| `ft_noisy_20k` | `miic_p10_dedup_ft_noisy_20k.yml` | total examples (2× steps, batch 8) | 14.7 | 24 min |
+| `ft_noisy_b16` | `miic_p10_dedup_ft_noisy_b16.yml` | examples per step (batch 16, 10k steps) | 9.3 | 18 min |
+
+Both were evaluated in one harness call with every ladder arm
+(`runs/edge_denoise/repeatability_val_d1_controls/`); the ladder arms
+reproduce the 2026-09-02 table bit-identically.
+
+**Prediction vs outcome.** Predicted for both: CD 3σ scene 0.53–0.55 px,
+PSNR ≥ 35.54, val repeatability σ ≈ 0.0091; falsifier: ≤ 0.45 px with PSNR
+not below the control.
+
+| method | PSNR | pixel σ ×10⁻³ | CD 3σ scene | CD 3σ site | \|bias\| | center σ | shift σ | val repeat. σ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ft_noisy (10k, b8) | 35.54 | 6.28 | 0.539 | 0.917 | 0.302 | 0.184 | 0.141 | 0.00899 |
+| ft_noisy_20k | 35.55 | 6.20 | 0.490 | 0.952 | 0.316 | 0.191 | 0.146 | 0.00905 |
+| ft_noisy_b16 | 35.62 | 6.10 | 0.477 | 0.881 | 0.290 | 0.178 | 0.145 | 0.00874 |
+| ft_consist | 35.14 | 4.52 | 0.406 | 0.723 | 0.371 | 0.159 | 0.122 | 0.00726 |
+
+The falsifier was not met. The band prediction was **wrong on the CD
+median** for both controls (0.49 / 0.48, not 0.53–0.55) and right on
+everything else: fidelity losses stayed at the noise floor, PSNR rose,
+pixel σ fell 1–3% and the validation repeatability σ moved by −0% / −3%
+against `ft_consist`'s −19%.
+
+**Paired, scene level, 3σ** (`paired_vs_ft_noisy.md`, `paired_vs_ft_noisy_b16.md`,
+`paired_vs_ft_noisy_20k.md`):
+
+| comparison | CD 3σ: Δ px / lower / t-p / sign-p | pixel σ: Δ ×10⁻³ / lower / t-p | PSNR: Δ dB / t-p |
+|---|---|---|---|
+| ft_noisy_20k vs ft_noisy | −0.048 / 5/10 / .54 / 1.0 | −0.08 / 8/10 / .29 | +0.02 / .66 |
+| ft_noisy_b16 vs ft_noisy | −0.057 / 8/10 / .12 / .11 | −0.18 / 8/10 / .025 | +0.09 / .085 |
+| **ft_consist vs ft_noisy_b16** | **−0.094 / 9/10 / .16 / .021** | **−1.6 / 10/10 / <10⁻⁴** | −0.48 / .006 |
+| **ft_consist vs ft_noisy_20k** | **−0.103 / 9/10 / .37 / .021** | **−1.7 / 10/10 / <10⁻⁴** | −0.41 / .009 |
+
+Per scene (CD 3σ px):
+
+| src | sites | ft_noisy | ft_noisy_20k | ft_noisy_b16 | ft_consist | consist − b16 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 4 | 0.350 | 0.351 | 0.348 | 0.255 | −0.093 |
+| 21 | 4 | 2.104 | 2.403 | 2.071 | 1.626 | −0.444 |
+| 28 | 4 | 0.483 | 0.492 | 0.466 | 0.415 | −0.051 |
+| 48 | 4 | 0.561 | 0.473 | 0.464 | 0.337 | −0.126 |
+| 50 | 4 | 0.789 | 0.814 | 0.806 | 0.572 | −0.234 |
+| 71 | 4 | 0.207 | 0.204 | 0.186 | 0.141 | −0.045 |
+| 80 | 4 | 0.540 | 0.546 | 0.556 | 0.397 | −0.159 |
+| 83 | 4 | 0.539 | 0.488 | 0.488 | 0.421 | −0.067 |
+| **87** | **1** | 2.760 | 2.097 | 2.422 | 2.764 (7/10 measured) | **+0.341** |
+| 90 | 4 | 0.330 | 0.313 | 0.283 | 0.220 | −0.063 |
+
+**Reading.**
+
+1. *"More compute" does not produce the effect.* Doubling steps or batch
+   moves the control's pixel σ by 1–3% and its CD by a non-significant
+   amount, in the "better optimization" direction (PSNR up). The
+   consistency term moves pixel σ by 26% against those same controls, in
+   the opposite PSNR direction. The mechanism argument of the D1 discussion
+   stands.
+2. *But the CD-level claim at matched compute is not established at one
+   seed.* Nine of ten scenes favour `ft_consist` over both controls by
+   0.05–0.44 px (sign test p = .02; mean over those nine −0.14 / −0.19 px),
+   and the single exception, src 87, has one site, σ ≈ 2.5 px for every arm,
+   and 7/10 successful CD measurements under `ft_consist` against 10/10 under
+   every control — it is the least reliable scene in the table and it alone
+   turns the paired t to p = .16 / .37. Two honest statements: the term's
+   CD gain is consistent across the well-measured scenes; and it cannot yet
+   be separated from run-to-run spread with one seed and a t-test.
+3. *The headline p = .006 vs `ft_noisy` was flattered by its control.*
+   Three runs of the same objective with different optimization budgets
+   span 0.477–0.539 px in the scene median. That spread is the single-seed
+   noise floor of this statistic; the sweep must replicate seeds and use
+   the paired tool's per-scene values, not scene medians.
+4. *A blur-risk flag.* Only `ft_consist` loses CD measurements on src 87
+   (3 of 10 seeds outside the crossing tolerance). The smoothness
+   diagnostic on the λ_c winner (next-step #3) should look at src 87
+   specifically.
+
+**Consequences for the sweep.** λ_c = 0 baseline = `ft_noisy_b16` (same
+per-step cost as the consistency arms, slightly the better of the two
+controls); ≥ 3 seeds per cell; paired analysis on per-scene values with
+both the t and sign tests; pixel σ and val repeatability σ read alongside
+CD as the low-noise companions.
 
 ## Appendix A — exact objectives per arm, phase by phase
 

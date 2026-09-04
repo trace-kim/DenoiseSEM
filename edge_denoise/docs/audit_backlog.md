@@ -34,6 +34,38 @@ sobloss-from-scratch argument is sound given the different starting point;
 and what result from the 20k-step `ft_noisy` arm would settle it (my
 reading: near 0.406 → the term is not the cause; near 0.539 → closed).
 
+*Discussion held 2026-09-04.* Mechanics: the second forward pass computes
+$f(y_k)$, which enters only the agreement term; with λ_c = 0 its gradient is
+identically zero, so a "two-view control" is `ft_noisy` itself. "Compute or
+term?" therefore reduces to "is `ft_noisy` under-converged?". TensorBoard
+says no: both fidelity terms sit at the Poisson noise floor the trainer
+docstring predicts (image 0.1544 vs 0.154; Sobel 0.0283 vs 0.0289) from
+the first fine-tune step in every arm, `ft_noisy`'s val fidelity loss is
+flat to five decimals over 10k steps, and its val repeatability σ moves by
+2·10⁻⁵ while `ft_consist`'s falls 0.0081 → 0.0073 with slightly *worse*
+fidelity and PSNR — the signature of a changed optimum, not of better
+optimization. **Pre-registered controls and predictions (before running):**
+`ft_noisy_20k` (same objective, 2× steps) and `ft_noisy_b16` (same steps,
+2× examples per step). Prediction for both: CD 3σ scene 0.53–0.55 px, PSNR
+≥ 35.54 dB, val repeatability σ ≈ 0.0091. Falsifier: either at ≤ 0.45 px
+with PSNR not below `ft_noisy`'s → the term is not the cause, rethink the
+sweep.
+
+*Outcome (2026-09-04, report §7).* Falsifier not met; band prediction wrong
+on the CD median (controls 0.490 / 0.477 px, not 0.53–0.55), right on
+fidelity, PSNR direction and pixel σ (controls −1–3%, `ft_consist` −26%
+against them, 10/10 scenes). `ft_consist` beats both controls on 9/10
+scenes (sign p = .02) but the paired t is p = .16 / .37 because of src 87
+(one site, 7/10 CD measurements under `ft_consist`). Verdict: compute does
+not explain the effect; the CD claim at matched compute is strong but not
+established at one seed; the p = .006 headline was flattered by its
+control. Sweep baseline is now `ft_noisy_b16` with ≥ 3 seeds. **Still open
+for discussion**: whether the src 87 measurement failures under
+`ft_consist` are a blur signature (check in the smoothness diagnostic), and
+whether the user is satisfied that "term, not compute" is settled or wants
+a further control (e.g. the agreement term computed with the second view
+detached, which halves its backward cost).
+
 ## Deferred — deployment and evaluation
 
 ### B1. Clean-free CD site selection, crossing matching and shift reference

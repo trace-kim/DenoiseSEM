@@ -1,0 +1,50 @@
+# TARGET-LADDER ARM A'' (second compute-matched control for arm E).  Identical
+# to miic_p10_dedup_ft_noisy.yml except batch_size 16 (and the run_dir).
+#
+# Why it exists: ft_consist runs two batch-8 forward passes per step (16
+# network inputs, all with gradients).  Its sibling control
+# miic_p10_dedup_ft_noisy_20k.yml matches the total number of examples by
+# doubling the STEPS; this one matches the examples PER STEP at the same step
+# count, i.e. the same gradient-noise level.  Memory is the same as
+# ft_consist's, which already holds 16 inputs in one graph.  Together the two
+# controls close both "it was just more compute" readings of the ft_consist
+# result (docs/audit_backlog.md, D1).
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_noisy_b16.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target      # gradient term follows the image term (fresh frame)
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_noisy_b16
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 16
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000
