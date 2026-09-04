@@ -52,6 +52,14 @@ def train(
     config: Path = typer.Option(..., help="YAML config path."),
     resume: bool = typer.Option(False, help="Resume from <run_dir>/ckpt_latest.pt."),
     resume_from: Optional[Path] = typer.Option(None, help="Resume from a specific checkpoint."),
+    overwrite: bool = typer.Option(
+        False,
+        help=(
+            "Start over in a run_dir that already holds a run: its checkpoints, "
+            "provenance, config copy and TensorBoard logs are deleted first. Without "
+            "this flag (or --resume) an occupied run_dir is refused."
+        ),
+    ),
 ) -> None:
     """Train an edge_denoise model as described by a config file."""
     import sys
@@ -66,7 +74,10 @@ def train(
         checkpoint = Path(loaded.training.run_dir) / LATEST_CHECKPOINT_NAME
     if checkpoint is not None and not checkpoint.is_file():
         raise typer.BadParameter(f"resume checkpoint not found: {checkpoint}")
-    trainer = Trainer(loaded, resume_from=checkpoint)
+    try:
+        trainer = Trainer(loaded, resume_from=checkpoint, overwrite=overwrite)
+    except FileExistsError as error:
+        raise typer.BadParameter(str(error)) from error
     final = trainer.run()
     provenance = write_provenance(
         loaded.training.run_dir,
@@ -228,8 +239,10 @@ def repeatability(
     from burst_diffusion.repeatability import repeatability as run_repeatability
     from burst_diffusion.train import load_checkpoint as load_burst_checkpoint
 
+    import sys
+
     from .config import load_config
-    from .provider import providers_from_checkpoints
+    from .provider import checkpoint_records, providers_from_checkpoints
 
     edge_arms = _parse_arms(checkpoint, default_name="edge")
     burst_arms = _parse_arms(burst_checkpoint, default_name="burst")
@@ -283,6 +296,13 @@ def repeatability(
         num_seeds=seeds,
         device=device,
         extra_providers=providers,
+        # Bind every edge arm to the exact checkpoint evaluated (path + hash +
+        # step) and keep the invocation: the harness itself knows providers
+        # by name only.
+        extra_metadata={
+            "provider_checkpoints": checkpoint_records(edge_arms),
+            "command": " ".join(sys.argv),
+        },
         progress_callback=lambda done, total: typer.echo(f"source {done}/{total}", err=True),
     )
     for name, method in results["methods"].items():

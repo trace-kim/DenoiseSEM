@@ -68,6 +68,28 @@ def test_train_then_evaluate_then_repeatability(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "one_shot@mine" in result.output
     assert (tmp_path / "rep" / "repeatability.json").is_file()
+    # Edge arms are bound to the exact checkpoint evaluated, not just a name.
+    from burst_diffusion.provenance import file_sha256
+
+    rep = json.loads((tmp_path / "rep" / "repeatability.json").read_text(encoding="utf-8"))
+    assert rep["provider_arms"] == ["mine"]
+    assert rep["provider_checkpoints"]["mine"]["sha256"] == file_sha256(checkpoint)
+    assert rep["provider_checkpoints"]["mine"]["step"] == 2
+    assert rep["provider_checkpoints"]["mine"]["kind"] == "edge_denoise"
+    assert isinstance(rep["command"], str) and rep["command"]
+
+
+def test_train_refuses_an_occupied_run_dir_without_overwrite(tmp_path: Path) -> None:
+    config_path = _write_config_yaml(tmp_path)
+    assert runner.invoke(app, ["train", "--config", str(config_path)]).exit_code == 0
+    result = runner.invoke(app, ["train", "--config", str(config_path)])
+    assert result.exit_code != 0
+    assert "already holds a run" in result.output and "--overwrite" in result.output
+    result = runner.invoke(app, ["train", "--config", str(config_path), "--overwrite"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "run" / "ckpt_latest.pt").is_file()
+    result = runner.invoke(app, ["train", "--config", str(config_path), "--resume"])
+    assert result.exit_code == 0, result.output
 
 
 def test_train_resume_flag_requires_a_checkpoint(tmp_path: Path) -> None:

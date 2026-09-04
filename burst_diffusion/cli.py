@@ -300,6 +300,36 @@ def repeatability(
 
 
 @app.command()
+def paired(
+    results: Path = typer.Option(..., help="repeatability.json written by `repeatability`."),
+    control: str = typer.Option(
+        ..., help="Control method (full name like one_shot@ft_noisy, or a unique bare arm name)."
+    ),
+    arm: list[str] = typer.Option(
+        [], help="Arm(s) to compare against the control (repeatable; default: every other method)."
+    ),
+    out: Optional[Path] = typer.Option(None, help="Write the markdown report here as well."),
+) -> None:
+    """Scene-level paired tests of every arm against ONE control.
+
+    The scene is the independent unit (sites inside a scene share frames and
+    model output) and CD is reported as 3-sigma; see burst_diffusion/paired.py.
+    """
+    from .paired import format_markdown, load_results, paired_report
+
+    try:
+        report = paired_report(load_results(results), control=control, arms=arm or None)
+    except (KeyError, ValueError) as error:
+        raise typer.BadParameter(str(error.args[0] if error.args else error)) from error
+    text = format_markdown(report)
+    typer.echo(text)
+    if out is not None:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(text + "\n", encoding="utf-8")
+        typer.echo(f"report written to {out}", err=True)
+
+
+@app.command()
 def provenance(
     config: Path = typer.Option(..., help="YAML config path of the run to record."),
     checkpoint: Optional[Path] = typer.Option(

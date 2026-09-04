@@ -437,3 +437,37 @@ def test_misbehaving_providers_are_rejected(tmp_path: Path) -> None:
             avg_counts=(2,),
             extra_providers={"ext": wrong_count},
         )
+
+
+def test_results_bind_checkpoint_arms_by_hash_and_carry_extra_metadata(tmp_path: Path) -> None:
+    from burst_diffusion.provenance import file_sha256
+
+    dataset = _write_bar_burst(tmp_path / "data")
+    config = _config(dataset, tmp_path / "run")
+    checkpoint = _write_checkpoint(tmp_path / "ckpt.pt", config)
+    with pytest.warns(UserWarning, match="no EMA state"):
+        results = repeatability(
+            config,
+            {"model": checkpoint},
+            out_dir=tmp_path / "rep",
+            num_seeds=2,
+            avg_counts=(2,),
+            edge_tolerance=3.0,
+            extra_metadata={"command": "python -m x", "provider_checkpoints": {}},
+        )
+    assert results["checkpoint_sha256"] == {"model": file_sha256(checkpoint)}
+    assert results["command"] == "python -m x"
+    stored = json.loads((tmp_path / "rep" / "repeatability.json").read_text(encoding="utf-8"))
+    assert stored["command"] == "python -m x"
+    assert stored["provider_checkpoints"] == {}
+
+    with pytest.raises(ValueError, match="collide"), pytest.warns(UserWarning, match="no EMA"):
+        repeatability(
+            config,
+            {"model": checkpoint},
+            out_dir=tmp_path / "rep2",
+            num_seeds=2,
+            avg_counts=(2,),
+            edge_tolerance=3.0,
+            extra_metadata={"methods": "nope"},
+        )

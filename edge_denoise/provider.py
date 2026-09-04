@@ -18,11 +18,36 @@ from pathlib import Path
 
 import numpy as np
 
+from burst_diffusion.provenance import file_sha256
 from burst_diffusion.repeatability import RealizationProvider
 
 from .infer import Denoiser
+from .train import load_checkpoint
 
 METHOD_NAME = "one_shot"
+
+
+def checkpoint_record(path: str | Path) -> dict:
+    """What exactly was evaluated: path, content hash, training step, kind.
+
+    The harness records provider arms by *name* only; this record, stored next
+    to it in ``repeatability.json``, binds each edge arm to one checkpoint so
+    a table can be audited (and a re-run compared) without trusting file
+    names or directory contents that a later run may have overwritten.
+    """
+    resolved = Path(path)
+    payload = load_checkpoint(resolved, map_location="cpu")
+    return {
+        "path": str(resolved),
+        "sha256": file_sha256(resolved),
+        "step": int(payload.get("step", -1)),
+        "bytes": resolved.stat().st_size,
+        "kind": str(payload.get("kind", "")),
+    }
+
+
+def checkpoint_records(checkpoints: dict[str, str | Path]) -> dict[str, dict]:
+    return {arm: checkpoint_record(path) for arm, path in checkpoints.items()}
 
 
 def realization_provider(denoiser: Denoiser, *, max_batch: int = 10) -> RealizationProvider:

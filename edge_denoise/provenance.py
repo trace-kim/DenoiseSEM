@@ -50,6 +50,24 @@ def dataset_fingerprint(config: Config) -> dict:
     }
 
 
+def _checkpoint_record(checkpoint: str | Path | None) -> dict | None:
+    """Path, content hash, step, size and kind of a checkpoint file (None when
+    absent), for either pipeline's payload."""
+    if checkpoint is None:
+        return None
+    checkpoint_path = Path(checkpoint)
+    if not checkpoint_path.is_file():
+        return None
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    return {
+        "path": str(checkpoint_path),
+        "sha256": file_sha256(checkpoint_path),
+        "step": int(payload.get("step", -1)),
+        "bytes": checkpoint_path.stat().st_size,
+        "kind": str(payload.get("kind", "burst_diffusion")),
+    }
+
+
 def write_provenance(
     run_dir: str | Path,
     config: Config,
@@ -64,17 +82,10 @@ def write_provenance(
     destination.mkdir(parents=True, exist_ok=True)
     repo_root = Path(repo) if repo is not None else Path(__file__).resolve().parent.parent
 
-    checkpoint_record: dict | None = None
-    if checkpoint is not None:
-        checkpoint_path = Path(checkpoint)
-        if checkpoint_path.is_file():
-            payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-            checkpoint_record = {
-                "path": str(checkpoint_path),
-                "sha256": file_sha256(checkpoint_path),
-                "step": int(payload.get("step", -1)),
-                "bytes": checkpoint_path.stat().st_size,
-            }
+    checkpoint_record = _checkpoint_record(checkpoint)
+    # A warm start (training.init_checkpoint) is part of the recipe: record
+    # which file, by content, the run started from, not just its path.
+    init_record = _checkpoint_record(config.training.init_checkpoint)
 
     config_json = config.model_dump(mode="json")
     record = {
@@ -90,6 +101,7 @@ def write_provenance(
         "dataset": dataset_fingerprint(config),
         "environment": environment_state(),
         "checkpoint": checkpoint_record,
+        "init_checkpoint": init_record,
         "command": command,
     }
     path = destination / PROVENANCE_NAME

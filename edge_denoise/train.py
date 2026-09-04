@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -59,6 +60,23 @@ logger = logging.getLogger("edge_denoise.train")
 CHECKPOINT_FORMAT = 1
 CHECKPOINT_KIND = "edge_denoise"
 LATEST_CHECKPOINT_NAME = "ckpt_latest.pt"
+TENSORBOARD_DIR_NAME = "tb"
+# Everything a run writes into its run_dir.  A fresh run refuses to start on
+# top of these (a second run would overwrite the checkpoints and provenance
+# while TensorBoard merged both histories -- exactly what happened to the
+# 2026-09-02 ft_consist run); ``overwrite=True`` deletes them first.
+RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", TENSORBOARD_DIR_NAME)
+
+
+def existing_run_artifacts(run_dir: str | Path) -> list[Path]:
+    """Run artifacts already present in ``run_dir`` (empty for a fresh dir)."""
+    root = Path(run_dir)
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for pattern in RUN_ARTIFACT_GLOBS:
+        found.extend(sorted(root.glob(pattern)))
+    return found
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -137,10 +155,18 @@ def load_init_weights(
 
 
 class Trainer:
-    def __init__(self, config: Config, *, resume_from: str | Path | None = None):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        resume_from: str | Path | None = None,
+        overwrite: bool = False,
+    ):
         self.config = config
         self.device = resolve_device(config.training.device)
         self.run_dir = Path(config.training.run_dir)
+        if resume_from is None:
+            self._claim_run_dir(overwrite=overwrite)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.stop_file = self.run_dir / "stop"
         if self.stop_file.exists():
@@ -214,6 +240,34 @@ class Trainer:
         (self.run_dir / "config.yml").write_text(
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=True),
             encoding="utf-8",
+        )
+
+    def _claim_run_dir(self, *, overwrite: bool) -> None:
+        """Refuse to start a fresh run on top of an existing one.
+
+        Without ``overwrite`` an occupied run_dir raises ``FileExistsError``
+        (resume instead, or choose another directory).  With it, the previous
+        run's own artifacts -- and only those -- are deleted so the new run's
+        checkpoints, provenance and TensorBoard history are unambiguous.
+        """
+        existing = existing_run_artifacts(self.run_dir)
+        if not existing:
+            return
+        if not overwrite:
+            names = ", ".join(path.name for path in existing)
+            raise FileExistsError(
+                f"run_dir {self.run_dir} already holds a run ({names}); resume it, "
+                "pick another run_dir, or pass overwrite=True / --overwrite to start over"
+            )
+        for path in existing:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        logger.warning(
+            "overwrite: removed %d artifact(s) of the previous run in %s",
+            len(existing),
+            self.run_dir,
         )
 
     def _restore(self, checkpoint_path: Path) -> None:
@@ -372,7 +426,7 @@ class Trainer:
 
     def run(self) -> Path:
         training = self.config.training
-        writer = SummaryWriter(log_dir=str(self.run_dir / "tb"))
+        writer = SummaryWriter(log_dir=str(self.run_dir / TENSORBOARD_DIR_NAME))
         window_losses: dict[str, list[float]] = {}
         window_started = time.time()
         window_steps = 0

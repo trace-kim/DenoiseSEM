@@ -216,12 +216,22 @@ python -m edge_denoise repeatability --config edge_denoise/configs/miic_p10_dedu
   --checkpoint grad=runs/edge_denoise/miic_p10_dedup_grad/ckpt_latest.pt `
   --burst-checkpoint n2n=runs/burst_diffusion/miic_p10_dedup_n2n/ckpt_latest.pt `
   --out tmp/repeat --split val
+
+# Paired scene-level tests of every arm against ONE control (CD as 3-sigma;
+# the scene, not the site, is the independent unit)
+python -m burst_diffusion paired --results tmp/repeat/repeatability.json `
+  --control hybrid --arm grad --arm one_shot@n2n --out tmp/repeat/paired_vs_hybrid.md
 ```
 
-Training writes `provenance.json` automatically at completion; `--resume`
-continues from the run directory's latest checkpoint. All burst arms passed to
-one `repeatability` call must share one `schedule.num_steps` — run arms with
-different schedules separately.
+Training writes `provenance.json` automatically at completion (including the
+warm-start checkpoint's hash when `training.init_checkpoint` is set);
+`--resume` continues from the run directory's latest checkpoint. A fresh run
+**refuses a `run_dir` that already holds a run** — pass `--overwrite` to
+delete the previous run's checkpoints, provenance, config copy and
+TensorBoard logs first, or resume it. `repeatability.json` records the exact
+checkpoint (path, SHA-256, step) behind every edge arm plus the invocation.
+All burst arms passed to one `repeatability` call must share one
+`schedule.num_steps` — run arms with different schedules separately.
 
 Docs: [method & feasibility study](../edge_denoise/docs/edge_denoise_method.md) ·
 [experiment report](../edge_denoise/docs/edge_denoise_report.md)

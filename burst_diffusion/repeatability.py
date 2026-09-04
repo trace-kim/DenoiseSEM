@@ -54,6 +54,7 @@ from .config import Config
 from .data import BurstCache, BurstSource
 from .evaluate import _from_model_tensor, _to_hwc01, _to_model_tensor
 from .metrics import psnr, ssim
+from .provenance import file_sha256
 from .sample import Sampler
 from .schedule import min_replicas, sampling_schedule
 
@@ -705,6 +706,7 @@ def repeatability(
     registration_gate_px: float = 0.5,
     progress_callback: Callable[[int, int], None] | None = None,
     extra_providers: Mapping[str, RealizationProvider] | None = None,
+    extra_metadata: Mapping[str, object] | None = None,
 ) -> dict:
     """Run the repeatability evaluation; writes repeatability.json + summary.md.
 
@@ -713,6 +715,9 @@ def repeatability(
     ``extra_providers`` adds arms from OTHER pipelines (see
     :class:`RealizationProvider`); arm names must not collide with checkpoint
     arms, and a run may consist of extra providers alone.
+    ``extra_metadata`` is recorded verbatim at the top level of the results
+    (e.g. which checkpoint each provider arm evaluated, the invocation); its
+    keys must not collide with the harness's own.
 
     Registration statistics are gated per source: burst frames are pixel-
     aligned by the pipeline's premise, so the clean image registered against
@@ -870,6 +875,7 @@ def repeatability(
         "avg_counts": effective_avg_counts,
         "sample_steps": len(schedule),
         "checkpoints": {arm: str(path) for arm, path in checkpoints.items()},
+        "checkpoint_sha256": {arm: file_sha256(Path(path)) for arm, path in checkpoints.items()},
         "provider_arms": sorted(extra_providers),
         "cd_sites_total": sites_total,
         "sources_without_sites": sources_without_sites,
@@ -882,6 +888,11 @@ def repeatability(
         },
         "per_source": per_source,
     }
+    if extra_metadata:
+        colliding = sorted(set(extra_metadata) & set(results))
+        if colliding:
+            raise ValueError(f"extra_metadata keys collide with the results: {colliding}")
+        results.update(extra_metadata)
 
     destination = Path(out_dir)
     destination.mkdir(parents=True, exist_ok=True)

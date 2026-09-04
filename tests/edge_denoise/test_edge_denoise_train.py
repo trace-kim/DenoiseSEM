@@ -181,3 +181,63 @@ def test_training_runs_with_each_gradient_target_mode(tmp_path: Path) -> None:
     trainer = Trainer(Config.model_validate(raw))
     trainer.run()
     assert trainer.step == 2
+
+
+def test_fresh_run_refuses_an_occupied_run_dir_unless_overwritten(tmp_path: Path) -> None:
+    """A second run in the same run_dir overwrote the 2026-09-02 ft_consist
+    checkpoint and provenance while TensorBoard merged both histories; a fresh
+    run now refuses the directory, resume still works, and overwrite=True
+    clears exactly the previous run's artifacts first."""
+    from edge_denoise.train import TENSORBOARD_DIR_NAME, existing_run_artifacts
+
+    dataset = write_burst(tmp_path / "data")
+    run_dir = tmp_path / "run"
+    config = make_config(dataset, run_dir, representation="image", max_steps=2)
+    assert existing_run_artifacts(run_dir) == []
+    Trainer(config).run()
+    (run_dir / "notes.txt").write_text("keep me", encoding="utf-8")
+    names = {path.name for path in existing_run_artifacts(run_dir)}
+    assert names == {"ckpt_0000002.pt", LATEST_CHECKPOINT_NAME, "config.yml", TENSORBOARD_DIR_NAME}
+
+    with pytest.raises(FileExistsError, match="already holds a run"):
+        Trainer(config)
+
+    # Resume is the sanctioned way back into an occupied directory.
+    resumed = Trainer(config, resume_from=run_dir / LATEST_CHECKPOINT_NAME)
+    assert resumed.step == 2
+
+    events_before = sorted((run_dir / TENSORBOARD_DIR_NAME).iterdir())
+    assert len(events_before) == 1
+    Trainer(config, overwrite=True).run()
+    events_after = sorted((run_dir / TENSORBOARD_DIR_NAME).iterdir())
+    assert len(events_after) == 1 and events_after != events_before
+    assert (run_dir / "notes.txt").read_text(encoding="utf-8") == "keep me"
+
+
+def test_provenance_records_the_warm_start_checkpoint_by_content(tmp_path: Path) -> None:
+    from burst_diffusion.provenance import file_sha256
+
+    from edge_denoise.provenance import write_provenance
+
+    dataset = write_burst(tmp_path / "data")
+    teacher_config = make_config(dataset, tmp_path / "teacher", representation="image", max_steps=1)
+    teacher = Trainer(teacher_config).run()
+
+    raw = make_config(dataset, tmp_path / "student", representation="image", max_steps=1)
+    raw = raw.model_dump(mode="json")
+    raw["training"]["init_checkpoint"] = str(teacher)
+    student_config = Config.model_validate(raw)
+    final = Trainer(student_config).run()
+
+    record = write_provenance(tmp_path / "student", student_config, checkpoint=final)
+    import json
+
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    assert payload["init_checkpoint"]["sha256"] == file_sha256(teacher)
+    assert payload["init_checkpoint"]["step"] == 1
+    assert payload["init_checkpoint"]["kind"] == CHECKPOINT_KIND
+    assert payload["checkpoint"]["sha256"] == file_sha256(final)
+    assert payload["checkpoint"]["sha256"] != payload["init_checkpoint"]["sha256"]
+
+    plain = write_provenance(tmp_path / "teacher", teacher_config, checkpoint=teacher)
+    assert json.loads(plain.read_text(encoding="utf-8"))["init_checkpoint"] is None
