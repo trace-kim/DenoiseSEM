@@ -15,6 +15,7 @@ is a single deterministic forward pass on the raw frame, so rows read
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -55,6 +56,18 @@ def realization_provider(denoiser: Denoiser, *, max_batch: int = 10) -> Realizat
 
     def generate(seeds01: list[np.ndarray]) -> dict[str, list[np.ndarray]]:
         return {METHOD_NAME: denoiser.denoise01(seeds01, max_batch=max_batch)}
+
+    return RealizationProvider(method_names=(METHOD_NAME,), generate=generate)
+
+
+def callable_provider(
+    denoise01: "Callable[[list[np.ndarray]], list[np.ndarray]]", *, max_batch: int = 10
+) -> RealizationProvider:
+    """Wrap any ``denoise01(list of [H, W, C] in [0, 1]) -> same`` callable
+    (e.g. a posterior sampler) as a ``one_shot`` provider."""
+
+    def generate(seeds01: list[np.ndarray]) -> dict[str, list[np.ndarray]]:
+        return {METHOD_NAME: denoise01(seeds01, max_batch=max_batch)}
 
     return RealizationProvider(method_names=(METHOD_NAME,), generate=generate)
 

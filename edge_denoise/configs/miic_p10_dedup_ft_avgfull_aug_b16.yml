@@ -1,0 +1,56 @@
+# FINE-FEATURE STUDY ARM F: prior enrichment.  Identical to
+# miic_p10_dedup_ft_avgfull_b16.yml plus `training.defect_augment`: half of
+# the training samples receive 1-3 synthetic soft defects (Gaussian blobs of
+# 1.5-6 px or scratches, +-0.02..0.08 contrast) added to EVERY frame of the
+# window -- input, leave-one-out-mean target and all.  Tests the hypothesis
+# that the erasure of real blemishes is prior-driven (a 76-scene corpus
+# teaches "flats are flat"), not information-driven: if real val blemishes
+# come back at higher contrast, the limit was the prior; if the arm instead
+# paints defects into noise, the false-feature rate will say so.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_avgfull_aug_b16.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy_mean
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_avgfull_aug_b16
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  defect_augment:
+    probability: 0.5
+    max_count: 3
+    contrast: [0.02, 0.08]
+    blob_sigma: [1.5, 6.0]
+    line_probability: 0.3
+    line_length: [8.0, 40.0]
+    line_sigma: 1.0
+  batch_size: 16
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

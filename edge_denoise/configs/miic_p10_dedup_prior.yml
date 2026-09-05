@@ -1,0 +1,47 @@
+# FINE-FEATURE STUDY: the diffusion PRIOR over clean SEM crops.
+#
+# A standard DDPM (linear betas, epsilon prediction, 1000 timesteps) on random
+# 64px crops of the TRAIN split's clean images (the long-dwell captures the
+# bursts were generated from), flips on.  Same 8.95M-parameter U-Net as every
+# other arm, now with its timestep conditioning actually used.  Nothing from
+# the val or the locked test split is ever seen.
+#
+# The prior is not itself a denoiser: `python -m edge_denoise fine-features /
+# repeatability --prior-checkpoint <ckpt> --posterior-arm NAME=dps,...`
+# combine it with the exact clipped-Poisson likelihood of one frame to draw
+# posterior samples (perception) or their mean (distortion).
+#
+#   python -m edge_denoise train-prior --config edge_denoise/configs/miic_p10_dedup_prior.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+diffusion:
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  flip_augment: true
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_prior
+  batch_size: 16
+  max_steps: 40000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 5000
+  val_images: 8
+  checkpoint_every: 10000

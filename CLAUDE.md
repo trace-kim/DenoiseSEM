@@ -22,7 +22,9 @@ code and the add-ons built on top of it do not share a namespace:
    imports `burst_diffusion` for the audited `BurstCache` content-group split,
    the U-Net backbone (equal-capacity comparisons), metrics, and the
    repeatability harness; never imports `ddim` or `runctl`. Math and
-   feasibility study: `edge_denoise/docs/edge_denoise_method.md`.
+   feasibility study: `edge_denoise/docs/edge_denoise_method.md`; the
+   fine-feature / burst-mean-target / diffusion-prior study and the current
+   best arms: `edge_denoise/docs/fine_feature_report.md`.
 5. **`noising_pipeline/`** — standalone paired clean/noisy image generator.
    Depends on nothing in this repo.
 
@@ -50,6 +52,8 @@ runctl track serve | track publish <run_dir>
 python -m burst_diffusion train --config burst_diffusion/configs/<name>.yml
 python -m edge_denoise train --config edge_denoise/configs/<name>.yml
 python -m edge_denoise repeatability --config <cfg> --checkpoint a=<pt> --burst-checkpoint b=<pt> ...
+python -m edge_denoise fine-features --config <cfg> --checkpoint a=<pt> --out <dir>   # per-band gain / blemish retention
+python -m edge_denoise train-prior --config edge_denoise/configs/miic_p10_dedup_prior.yml  # DDPM prior; --prior-checkpoint --posterior-arm on the two commands above
 python -m ddim.main --config <name>.yml --exp <path> --doc <name> --ni
 ```
 

@@ -1,0 +1,49 @@
+# FINE-FEATURE STUDY ARM A-debias: the burst-mean target with its clipping bias
+# removed.  Identical to miic_p10_dedup_ft_avgfull_b16.yml plus
+# `objective.target_debias_peak: 10.0`: the leave-one-out mean of the other 15
+# frames is pushed through the inverse of the stored frames' expected response
+# g(x) = E[min(Pois(10x), 10)]/10 before it is used as the target.  The full
+# clean-target oracle showed the learned arms' systematic CD bias (+0.10 px)
+# collapsing to +0.01 px; this arm asks how much of that is the target's
+# clipping bias (audit backlog B3) -- removable without a clean image whenever
+# the detector response is known.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_avgdebias_b16.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy_mean
+  target_debias_peak: 10.0      # undo the clipped-Poisson bias of the stored frames
+  gradient_target: target      # gradient term follows the image term (LOO mean)
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_avgdebias_b16
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 16
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

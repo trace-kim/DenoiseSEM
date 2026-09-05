@@ -1,0 +1,49 @@
+# FINE-FEATURE STUDY ARM A: the burst as a cleaner training target.
+#
+# Identical to miic_p10_dedup_ft_noisy_b16.yml (the compute-matched lambda_c=0
+# control) except `target: noisy_mean`: BOTH fidelity terms chase the
+# leave-one-out mean of the other 15 replicas instead of one fresh frame.  The
+# target is still unbiased (the input's own noise never enters it) but carries
+# 1/15 of a fresh frame's variance, so the per-step gradient signal for rare,
+# low-contrast structure (blemishes, scratches -- the "fine features" every
+# N2N arm erases) is ~15x cleaner.  Inference is unchanged: one frame in.
+# Deployable on real bursts, which exist at training time anyway.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_avgfull_b16.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy_mean
+  gradient_target: target      # gradient term follows the image term (LOO mean)
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_avgfull_b16
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 16
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

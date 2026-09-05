@@ -1,0 +1,48 @@
+# FINE-FEATURE STUDY ARM C: cleaner target + the consistency term.
+#
+# miic_p10_dedup_ft_consist.yml (the precision winner: lambda_consistency 1.0,
+# batch 8 with two forward passes per step) with `target: noisy_mean` -- both
+# fidelity terms chase the leave-one-out mean of the other 15 replicas.  The
+# agreement pair (input, second) stays pairwise distinct; the second frame may
+# sit inside the input's LOO-mean target with weight 1/15, which is harmless
+# because f(input) never sees it (the zero-cross-term argument holds per term).
+# Per-step network inputs (16) match the b16 controls.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_ft_avgfull_consist.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy_mean
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 1.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_dedup_ft_avgfull_consist
+  init_checkpoint: runs/edge_denoise/ft_ladder/teacher_n2n.pt
+  batch_size: 8
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

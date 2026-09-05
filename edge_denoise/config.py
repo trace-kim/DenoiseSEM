@@ -58,6 +58,14 @@ class ObjectiveConfig(_StrictModel):
                     noisy input's crop mean.
     - ``hybrid``:   input [y, sobel(y)],  output x_hat (1 channel)
 
+    ``target`` is what the fidelity terms chase: ``"noisy"`` is a fresh noisy
+    replica (Noise2Noise), ``"clean"`` the clean image (supervised oracle), and
+    ``"noisy_mean"`` the leave-one-out mean of every replica EXCEPT the input
+    -- as unbiased as a fresh frame (the input's own noise never enters it) but
+    with ~1/(N-1) of its variance, so the gradient signal for rare, low-contrast
+    structure is ~(N-1)x cleaner per step.  It uses the burst only at training
+    time; inference stays single-frame.
+
     ``lambda_image`` weighs the image-domain residual, ``lambda_gradient`` the
     Sobel-domain residual (for ``gradient`` the output already lives there, so
     ``lambda_image`` must be 0).  ``lambda_consistency`` adds the two-
@@ -78,7 +86,14 @@ class ObjectiveConfig(_StrictModel):
     """
 
     representation: Literal["image", "gradient", "hybrid"] = "hybrid"
-    target: Literal["clean", "noisy"] = "noisy"
+    target: Literal["clean", "noisy", "noisy_mean"] = "noisy"
+    # With ``target: noisy_mean``: undo the clipping bias of the stored frames
+    # (``min(Pois(peak * x), peak) / peak``) by pushing the leave-one-out mean
+    # through the inverse of its expected response g(x) = E[min(K, peak)] / peak.
+    # The mean of 15 clipped frames is precise enough for the 1-D inversion to
+    # be well conditioned; the network then sees clipped inputs and unbiased
+    # targets, like a clean-target oracle, without a clean image.  None = off.
+    target_debias_peak: float | None = Field(default=None, gt=0.0)
     gradient_target: Literal["target", "clean", "noisy_mean", "file"] = "target"
     gradient_target_dir: Path | None = None
     lambda_image: float = Field(default=1.0, ge=0.0)
@@ -119,6 +134,11 @@ class ObjectiveConfig(_StrictModel):
                 "objective.gradient_target_dir is only meaningful with "
                 "objective.gradient_target 'file'"
             )
+        if self.target_debias_peak is not None and self.target != "noisy_mean":
+            raise ValueError(
+                "objective.target_debias_peak applies to the leave-one-out mean target "
+                "only (objective.target 'noisy_mean')"
+            )
         return self
 
 
@@ -139,8 +159,49 @@ class ModelConfig(_StrictModel):
         return self.num_groups if self.num_groups is not None else min(32, self.ch)
 
 
+class DefectAugmentConfig(_StrictModel):
+    """Synthetic low-contrast defects added to the whole burst window of a
+    training sample (input, target, agreement frame and gradient target all
+    receive the SAME additive field), so the network learns that soft
+    blemishes and scratches exist inside otherwise flat regions.
+
+    Why: a conditional-mean estimator shows a weak feature at (contrast x
+    posterior probability), and the posterior probability is driven by the
+    learned prior -- a corpus of 76 scenes teaches "flats are flat", so rare
+    real blemishes are treated as noise and erased.  Adding defects to every
+    frame of the burst keeps the Noise2Noise argument intact (the field is
+    independent of every frame's noise) and is exactly what one would do on
+    real bursts.  The variance mismatch of not re-drawing Poisson noise for
+    the added intensity is second order at these contrasts.
+
+    Defects are Gaussian blobs (anisotropic sigma in ``blob_sigma`` px) or
+    scratches (segments of length ``line_length`` with a ``line_sigma`` px
+    Gaussian cross-profile), of either sign, with peak amplitude drawn from
+    ``contrast`` (in [0, 1] intensity units).
+    """
+
+    probability: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_count: int = Field(default=3, ge=1)
+    contrast: tuple[float, float] = (0.02, 0.08)
+    blob_sigma: tuple[float, float] = (1.5, 6.0)
+    line_probability: float = Field(default=0.3, ge=0.0, le=1.0)
+    line_length: tuple[float, float] = (8.0, 40.0)
+    line_sigma: float = Field(default=1.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> "DefectAugmentConfig":
+        for name in ("contrast", "blob_sigma", "line_length"):
+            low, high = getattr(self, name)
+            if not 0.0 < low <= high:
+                raise ValueError(f"defect_augment.{name} must satisfy 0 < low <= high, got {low}, {high}")
+        return self
+
+
 class TrainingConfig(_StrictModel):
     run_dir: Path
+    # Optional synthetic-defect augmentation of training samples (see
+    # DefectAugmentConfig); absent = the historical data stream, bit for bit.
+    defect_augment: DefectAugmentConfig | None = None
     # Weights-only warm start (the fine-tune protocol): model parameters are
     # initialized from this checkpoint's EMA weights (falling back to the live
     # weights) before step 0.  Accepts edge_denoise checkpoints and
@@ -191,9 +252,9 @@ class Config(_StrictModel):
             required += 1
         if self.objective.lambda_consistency > 0.0:
             required += 1
-        if self.objective.gradient_target == "noisy_mean":
+        if "noisy_mean" in (self.objective.target, self.objective.gradient_target):
             # The leave-one-out average needs at least one replica besides the
-            # input; it may share replicas with the image-term target (each
+            # input; it may share replicas with the consistency frame (each
             # term's zero-cross-term argument holds separately).
             required = max(required, 2)
         return required

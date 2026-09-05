@@ -27,6 +27,8 @@ target-noise floor, so a plateau is correct behavior, not divergence:
 
 For the MIIC peak-10 data (sigma01^2 ~ 0.0385) that predicts ~0.154 for a pure
 N2N arm and ~0.154 * (lambda_image + 0.1875 * lambda_gradient) in general.
+With ``target: noisy_mean`` (leave-one-out mean of the other N-1 replicas) the
+same floors divide by N-1 (~0.0103 for the image term at N = 16).
 Progress is measured by ``val/psnr`` (denoised image vs clean) and by
 ``val/consistency_sigma`` -- the direct repeatability readout: the RMS
 disagreement between the denoised versions of two independent frames of the
@@ -204,6 +206,8 @@ class Trainer:
             gradient_target=objective.gradient_target,
             gradient_target_dir=objective.gradient_target_dir,
             seed=config.training.seed,
+            defect_augment=config.training.defect_augment,
+            target_debias_peak=objective.target_debias_peak,
         )
         self.model: EdgeDenoiser = build_model(config).to(self.device)
         if config.training.init_checkpoint is not None:

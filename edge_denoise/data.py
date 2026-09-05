@@ -16,9 +16,11 @@ A training sample is (input frame, target, optional second frame, optional
 gradient target), all crops of the SAME window of the same source:
 
 - ``input``:  one noisy frame, drawn uniformly.
-- ``target``: the clean image (``target: clean``), or a FRESH noisy frame from
-  a different replica (``target: noisy`` -- Noise2Noise).  Sharing the input
-  replica would make the MSE-optimal network the identity.
+- ``target``: the clean image (``target: clean``), a FRESH noisy frame from
+  a different replica (``target: noisy`` -- Noise2Noise), or the leave-one-out
+  mean of every replica except the input (``target: noisy_mean`` -- the burst
+  as a cleaner unbiased target; the input's own noise must stay out of it).
+  Sharing the input replica would make the MSE-optimal network the identity.
 - ``second``: an independent third frame for the consistency penalty,
   distinct from both input and target so the penalty correlates with neither
   the input noise nor the target noise.
@@ -33,6 +35,7 @@ gradient target), all crops of the SAME window of the same source:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +44,39 @@ import torch
 
 from burst_diffusion.data import BurstCache, BurstSource
 
+from .config import DefectAugmentConfig
+
+TARGET_MODES = ("clean", "noisy", "noisy_mean")
 GRADIENT_TARGET_MODES = ("target", "clean", "noisy_mean", "file")
+
+
+def clipped_poisson_mean(x01: np.ndarray, peak: float) -> np.ndarray:
+    """``g(x) = E[min(Pois(peak * x), peak)] / peak`` -- the expected value of a
+    stored frame (``noising_pipeline`` clips to [0, 1]) at clean intensity x."""
+    lam = np.asarray(x01, dtype=np.float64) * peak
+    kmax = int(round(peak))
+    ks = np.arange(0, kmax + 1, dtype=np.float64)
+    log_pmf = ks[None, ...] * np.log(np.maximum(lam[..., None], 1e-300)) - lam[..., None] - np.array(
+        [math.lgamma(k + 1.0) for k in ks]
+    )
+    pmf = np.exp(log_pmf)
+    below = pmf[..., :kmax]  # P(K = k) for k < peak
+    expected = (below * ks[:kmax]).sum(axis=-1) + kmax * (1.0 - below.sum(axis=-1))
+    return expected / peak
+
+
+class ClipDebiaser:
+    """Invert :func:`clipped_poisson_mean` by table lookup: a mean of clipped
+    frames in, an unbiased clean-intensity estimate out.  Monotone, so the
+    inverse is unique; means above g(1) (possible from noise) map to 1."""
+
+    def __init__(self, peak: float, grid: int = 4097):
+        self.peak = peak
+        self.x = np.linspace(0.0, 1.0, grid)
+        self.g = clipped_poisson_mean(self.x, peak)
+
+    def __call__(self, mean01: np.ndarray) -> np.ndarray:
+        return np.interp(np.asarray(mean01, dtype=np.float64), self.g, self.x, left=0.0, right=1.0)
 
 
 @dataclass(frozen=True)
@@ -51,7 +86,7 @@ class PairInfo:
     source_index: int
     crop_yx: tuple[int, int]
     input_replica: int
-    target_replica: int | None  # None when the target is the clean image
+    target_replica: int | None  # None for the clean or leave-one-out-mean target
     second_replica: int | None
 
 
@@ -93,9 +128,11 @@ class PairFactory:
         gradient_target: str = "target",
         gradient_target_dir: str | Path | None = None,
         seed: int = 0,
+        defect_augment: DefectAugmentConfig | None = None,
+        target_debias_peak: float | None = None,
     ):
-        if target not in ("clean", "noisy"):
-            raise ValueError(f"target must be 'clean' or 'noisy', got {target!r}")
+        if target not in TARGET_MODES:
+            raise ValueError(f"target must be one of {TARGET_MODES}, got {target!r}")
         if gradient_target not in GRADIENT_TARGET_MODES:
             raise ValueError(
                 f"gradient_target must be one of {GRADIENT_TARGET_MODES}, got {gradient_target!r}"
@@ -107,7 +144,7 @@ class PairFactory:
         if not cache.train_sources:
             raise ValueError("cache has no training sources")
         required = 1 + int(target == "noisy") + int(need_second)
-        if gradient_target == "noisy_mean":
+        if "noisy_mean" in (target, gradient_target):
             required = max(required, 2)
         for source in cache.all_sources:
             if len(source.frames) < required:
@@ -128,14 +165,18 @@ class PairFactory:
         self.target = target
         self.need_second = need_second
         self.gradient_target = gradient_target
+        self.defect_augment = defect_augment
+        if target_debias_peak is not None and target != "noisy_mean":
+            raise ValueError("target_debias_peak applies to target 'noisy_mean' only")
+        self._debias = None if target_debias_peak is None else ClipDebiaser(target_debias_peak)
         self._rng = np.random.default_rng(seed)
 
-        # Per-source auxiliaries for the gradient-target modes, covering every
+        # Per-source auxiliaries for the mean/file target modes, covering every
         # source training or validation can touch (never the test split).
         active_sources = list(cache.train_sources) + list(cache.val_sources)
         self._frame_sums: dict[int, np.ndarray] = {}
         self._file_targets: dict[int, np.ndarray] = {}
-        if gradient_target == "noisy_mean":
+        if "noisy_mean" in (target, gradient_target):
             for source in active_sources:
                 if len(source.frames) > 257:
                     raise ValueError(
@@ -146,7 +187,7 @@ class PairFactory:
                 for frame in source.frames:
                     total += frame
                 self._frame_sums[source.source_index] = total
-        elif gradient_target == "file":
+        if gradient_target == "file":
             directory = Path(gradient_target_dir)  # type: ignore[arg-type]
             for source in active_sources:
                 path = directory / f"{source.source_index:05d}.npy"
@@ -166,6 +207,55 @@ class PairFactory:
                     raise ValueError(f"{path} contains non-finite values")
                 self._file_targets[source.source_index] = array.astype(np.float32)
 
+    def _loo_mean_crop(
+        self, source: BurstSource, window: tuple[slice, slice], input_replica: int
+    ) -> np.ndarray:
+        """Leave-one-out mean of every replica except ``input_replica``, in
+        model range, [1, S, S].  Excluding the input is load-bearing: its noise
+        inside the target would pull the optimum toward the identity."""
+        total = self._frame_sums[source.source_index][window].astype(np.float32)
+        others = total - source.frames[input_replica][window].astype(np.float32)
+        mean01 = others / (255.0 * (len(source.frames) - 1))
+        if self._debias is not None:
+            mean01 = self._debias(mean01).astype(np.float32)
+        return (mean01 * 2.0 - 1.0)[None, :, :]
+
+    def _defect_field(self, size: int) -> np.ndarray | None:
+        """One sample's additive defect field in MODEL units ([-1, 1] scale, i.e.
+        2x the [0, 1] contrast), or ``None`` when augmentation is off or the
+        per-sample coin says no.  Drawn AFTER the source/crop/replica draws so
+        those stay identical to an un-augmented stream for the same seed."""
+        aug = self.defect_augment
+        if aug is None:
+            return None
+        rng = self._rng
+        if rng.random() >= aug.probability:
+            return None
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+        field = np.zeros((size, size), dtype=np.float64)
+        for _ in range(int(rng.integers(1, aug.max_count + 1))):
+            amplitude = float(rng.uniform(*aug.contrast)) * (1.0 if rng.random() < 0.5 else -1.0)
+            cy, cx = rng.uniform(0.0, size, size=2)
+            if rng.random() < aug.line_probability:
+                theta = float(rng.uniform(0.0, np.pi))
+                length = float(rng.uniform(*aug.line_length))
+                dx, dy = np.cos(theta), np.sin(theta)
+                along = np.clip((xx - cx) * dx + (yy - cy) * dy, -length / 2.0, length / 2.0)
+                px, py = cx + along * dx, cy + along * dy
+                field += amplitude * np.exp(-((xx - px) ** 2 + (yy - py) ** 2) / (2.0 * aug.line_sigma**2))
+            else:
+                sy, sx = rng.uniform(*aug.blob_sigma, size=2)
+                field += amplitude * np.exp(
+                    -((yy - cy) ** 2 / (2.0 * sy**2) + (xx - cx) ** 2 / (2.0 * sx**2))
+                )
+        return (2.0 * field).astype(np.float32)
+
+    @staticmethod
+    def _apply_defects(crop: np.ndarray, field: np.ndarray | None) -> np.ndarray:
+        if field is None:
+            return crop
+        return np.clip(crop + field[None, :, :], -1.0, 1.0)
+
     def _gradient_target_crop(
         self, source: BurstSource, window: tuple[slice, slice], input_replica: int
     ) -> np.ndarray:
@@ -173,10 +263,7 @@ class PairFactory:
         if self.gradient_target == "clean":
             return _to_model_chw(source.clean[window])
         if self.gradient_target == "noisy_mean":
-            total = self._frame_sums[source.source_index][window].astype(np.float32)
-            others = total - source.frames[input_replica][window].astype(np.float32)
-            mean01 = others / (255.0 * (len(source.frames) - 1))
-            return (mean01 * 2.0 - 1.0)[None, :, :]
+            return self._loo_mean_crop(source, window, input_replica)
         # "file": stored as float32 in [0, 1]
         return (self._file_targets[source.source_index][window] * 2.0 - 1.0)[None, :, :]
 
@@ -204,24 +291,35 @@ class PairFactory:
             permutation = self._rng.permutation(len(source.frames))
             input_replica = int(permutation[0])
             cursor = 1
-            input_list.append(_to_model_chw(source.frames[input_replica][window]))
-
             target_replica: int | None = None
             if self.target == "noisy":
                 target_replica = int(permutation[cursor])
                 cursor += 1
-                target_list.append(_to_model_chw(source.frames[target_replica][window]))
-            else:
-                target_list.append(_to_model_chw(source.clean[window]))
-
             second_replica: int | None = None
             if self.need_second:
                 second_replica = int(permutation[cursor])
-                second_list.append(_to_model_chw(source.frames[second_replica][window]))
+            # The same additive defect field goes onto EVERY tensor of the sample.
+            field = self._defect_field(size)
 
+            input_list.append(
+                self._apply_defects(_to_model_chw(source.frames[input_replica][window]), field)
+            )
+            if self.target == "noisy":
+                target_crop = _to_model_chw(source.frames[target_replica][window])
+            elif self.target == "noisy_mean":
+                target_crop = self._loo_mean_crop(source, window, input_replica)
+            else:
+                target_crop = _to_model_chw(source.clean[window])
+            target_list.append(self._apply_defects(target_crop, field))
+            if self.need_second:
+                second_list.append(
+                    self._apply_defects(_to_model_chw(source.frames[second_replica][window]), field)
+                )
             if self.gradient_target != "target":
                 gradient_list.append(
-                    self._gradient_target_crop(source, window, input_replica)
+                    self._apply_defects(
+                        self._gradient_target_crop(source, window, input_replica), field
+                    )
                 )
 
             if return_info:
@@ -279,6 +377,8 @@ class PairFactory:
             if self.target == "noisy":
                 target_replica = min(2, len(source.frames) - 1)
                 target_list.append(_to_model_chw(source.frames[target_replica][window]))
+            elif self.target == "noisy_mean":
+                target_list.append(self._loo_mean_crop(source, window, 0))
             else:
                 target_list.append(_to_model_chw(source.clean[window]))
             clean_list.append(_to_model_chw(source.clean[window]))

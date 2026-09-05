@@ -101,6 +101,19 @@ noising pipeline reports the expected clipping bias per dataset in
 `stats.json`, and a real-data evaluation plan includes a check of target
 bias at the bright end.
 
+*Update 2026-09-05 (fine-feature study, [`fine_feature_report.md`](fine_feature_report.md)
+§5–6).* This item is larger than "a footnote": the full clean-target oracle
+`ft_cleanfull_b16` has a signed CD bias of +0.013 px against +0.105 for the
+matched noisy-target control, and every diffusion-prior estimator (fitted to
+unclipped clean crops) sits at +0.02–0.05 px — so most of the learned arms'
+systematic +0.1 px edge shift is the clipped-mean target $g(x) < x$ of the
+stored frames. `objective.target_debias_peak` now pushes the leave-one-out
+burst-mean target through $g^{-1}$ (`edge_denoise.data.ClipDebiaser`); the
+arm `miic_p10_dedup_ft_avgdebias_b16` measures how much of the bias that
+removes without a clean image. On real detectors the same correction needs
+the measured response curve (saturation / gain), which is the deployment
+prerequisite this item should track.
+
 ## Deferred — workflow defects
 
 ### B4. Resume with a changed config only warns

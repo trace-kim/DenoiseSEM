@@ -130,3 +130,17 @@ def test_load_config_round_trips_yaml(tmp_path: Path) -> None:
         bad = tmp_path / "bad.yml"
         bad.write_text("- just\n- a list\n", encoding="utf-8")
         load_config(bad)
+
+
+def test_noisy_mean_target_validates_and_needs_two_replicas() -> None:
+    raw = {
+        "data": {"dataset_dir": "x", "image_size": 16},
+        "objective": {"representation": "image", "target": "noisy_mean", "lambda_gradient": 4.0},
+        "model": {"ch": 8, "ch_mult": [1, 2], "num_res_blocks": 1, "attn_resolutions": []},
+        "training": {"run_dir": "r"},
+    }
+    config = Config.model_validate(raw)
+    assert config.objective.target == "noisy_mean"
+    assert config.min_replicas == 2
+    raw["objective"]["lambda_consistency"] = 1.0
+    assert Config.model_validate(raw).min_replicas == 2

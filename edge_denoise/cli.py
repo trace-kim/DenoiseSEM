@@ -90,6 +90,42 @@ def train(
     typer.echo(f"provenance written to {provenance}")
 
 
+@app.command("train-prior")
+def train_prior(
+    config: Path = typer.Option(..., help="Prior YAML config (data / diffusion / model / training)."),
+    resume: bool = typer.Option(False, help="Resume from <run_dir>/ckpt_latest.pt."),
+) -> None:
+    """Train the DDPM prior on clean train-split crops (the generative arm)."""
+    from .prior import LATEST_CHECKPOINT_NAME, PriorTrainer, load_prior_config
+
+    loaded = load_prior_config(config)
+    checkpoint = Path(loaded.training.run_dir) / LATEST_CHECKPOINT_NAME if resume else None
+    if checkpoint is not None and not checkpoint.is_file():
+        raise typer.BadParameter(f"resume checkpoint not found: {checkpoint}")
+    trainer = PriorTrainer(loaded, resume_from=checkpoint)
+    final = trainer.run()
+    typer.echo(f"finished at step {trainer.step}; latest checkpoint: {final}")
+
+
+def _posterior_arms(
+    prior_checkpoint: Optional[Path], specs: list[str], *, device: str, peak: float
+) -> dict:
+    """Build posterior samplers from ``--posterior-arm NAME=mode,key=value...``."""
+    from .prior import PosteriorSampler, parse_posterior_spec
+
+    if specs and prior_checkpoint is None:
+        raise typer.BadParameter("--posterior-arm needs --prior-checkpoint")
+    arms = {}
+    for spec in specs:
+        name, kwargs = parse_posterior_spec(spec)
+        if name in arms:
+            raise typer.BadParameter(f"duplicate posterior arm {name!r}")
+        arms[name] = PosteriorSampler.from_checkpoint(
+            prior_checkpoint, device=device, peak=peak, **kwargs
+        )
+    return arms
+
+
 @app.command("distill-targets")
 def distill_targets(
     config: Path = typer.Option(..., help="edge_denoise YAML config (dataset section drives the split)."),
@@ -211,6 +247,84 @@ def evaluate(
     typer.echo(f"results written to {Path(out) / 'results.json'}")
 
 
+@app.command("fine-features")
+def fine_features_command(
+    config: Path = typer.Option(..., help="edge_denoise YAML config (dataset section drives the split)."),
+    checkpoint: list[str] = typer.Option(
+        [], help="edge_denoise checkpoint arm as NAME=PATH (repeatable; a bare PATH is named 'edge')."
+    ),
+    burst_checkpoint: list[str] = typer.Option(
+        [], help="burst_diffusion checkpoint arm as NAME=PATH (repeatable), one-shot prediction."
+    ),
+    out: Path = typer.Option(..., help="Output directory for fine_features.json, summary.md, feature_plate.png."),
+    split: str = typer.Option("val", help="val | train | test (test is the locked holdout: report once)"),
+    sources: Optional[str] = typer.Option(None, help="Comma-separated source indices (default: whole split)."),
+    seeds: int = typer.Option(4, min=1, help="Retakes (frames) denoised per source for the retention spread."),
+    stride: int = typer.Option(48, min=1, help="Tile stride for full-frame blended denoising."),
+    peak: float = typer.Option(10.0, help="Effective Poisson peak of the dataset (feature SNR scale)."),
+    prior_checkpoint: Optional[Path] = typer.Option(None, help="Diffusion prior checkpoint for --posterior-arm."),
+    posterior_arm: list[str] = typer.Option(
+        [], help="Posterior-sampling arm as NAME=mode[,steps=..,samples=..,guidance=..,clip=..,seed=..] (repeatable)."
+    ),
+    device: str = typer.Option("auto", help="auto | cpu | cuda"),
+) -> None:
+    """Scale-resolved fine-feature retention of every arm on full frames.
+
+    Measures, in flat regions, the transfer gain/correlation of each
+    difference-of-Gaussian band against the linear (Wiener) bound, and the
+    retention of structured clean features (blemishes, scratches) per
+    single-frame SNR, per retake, plus false-feature rates.
+    """
+    import sys
+
+    from .config import load_config
+    from .distill import build_teacher
+    from .finefeat import fine_features as run_fine_features
+    from .provider import checkpoint_records
+
+    edge_arms = _parse_arms(checkpoint, default_name="edge")
+    burst_arms = _parse_arms(burst_checkpoint, default_name="burst")
+    overlap = set(edge_arms) & set(burst_arms)
+    if overlap:
+        raise typer.BadParameter(f"arm name(s) used in both tiers: {sorted(overlap)}")
+    if not edge_arms and not burst_arms and not posterior_arm:
+        raise typer.BadParameter("provide at least one --checkpoint, --burst-checkpoint or --posterior-arm")
+    arms = {}
+    for name, path in {**burst_arms, **edge_arms}.items():
+        arms[name], _ = build_teacher(path, device=device)
+    for name, sampler in _posterior_arms(prior_checkpoint, posterior_arm, device=device, peak=peak).items():
+        if name in arms:
+            raise typer.BadParameter(f"arm name {name!r} used twice")
+        arms[name] = sampler.denoise
+    loaded = load_config(config)
+    wanted = None if sources is None else [int(part) for part in sources.split(",") if part.strip()]
+    results = run_fine_features(
+        loaded,
+        arms,
+        out_dir=out,
+        split=split,
+        sources=wanted,
+        num_seeds=seeds,
+        stride=stride,
+        peak=peak,
+        extra_metadata={
+            "provider_checkpoints": checkpoint_records(edge_arms),
+            "burst_checkpoints": {name: str(path) for name, path in burst_arms.items()},
+            "command": " ".join(sys.argv),
+        },
+        progress=lambda message: typer.echo(message, err=True),
+    )
+    for name, method in results["summary"]["methods"].items():
+        gains = " ".join(f"{g:.2f}" if g is not None else "-" for g in method["band_gain"])
+        retention = method["feature_retention_median"]
+        typer.echo(
+            f"{name:>22}: band gain [{gains}] | feature retention median "
+            f"{'-' if retention is None else f'{retention:.3f}'} | false/1000px "
+            f"{method['false_features_per_1000_flat_px']:.2f}"
+        )
+    typer.echo(f"results written to {Path(out) / 'fine_features.json'}")
+
+
 @app.command()
 def repeatability(
     config: Path = typer.Option(..., help="edge_denoise YAML config (dataset section drives the split)."),
@@ -226,6 +340,11 @@ def repeatability(
     split: str = typer.Option("val", help="val | train | test (test is the locked holdout: report once)"),
     limit: Optional[int] = typer.Option(None, help="Evaluate at most this many sources."),
     seeds: int = typer.Option(10, min=1, help="Fresh frames (seeds) per source."),
+    prior_checkpoint: Optional[Path] = typer.Option(None, help="Diffusion prior checkpoint for --posterior-arm."),
+    posterior_arm: list[str] = typer.Option(
+        [], help="Posterior-sampling arm as NAME=mode[,steps=..,samples=..,guidance=..,clip=..,seed=..] (repeatable)."
+    ),
+    peak: float = typer.Option(10.0, help="Effective Poisson peak (posterior likelihood)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
     """One metrology-precision table: classical + edge_denoise (+ burst) arms.
@@ -242,13 +361,17 @@ def repeatability(
     import sys
 
     from .config import load_config
-    from .provider import checkpoint_records, providers_from_checkpoints
+    from .provider import callable_provider, checkpoint_records, providers_from_checkpoints
 
     edge_arms = _parse_arms(checkpoint, default_name="edge")
     burst_arms = _parse_arms(burst_checkpoint, default_name="burst")
     overlap = set(edge_arms) & set(burst_arms)
     if overlap:
         raise typer.BadParameter(f"arm name(s) used in both tiers: {sorted(overlap)}")
+    posterior = _posterior_arms(prior_checkpoint, posterior_arm, device=device, peak=peak)
+    overlap = set(posterior) & (set(edge_arms) | set(burst_arms))
+    if overlap:
+        raise typer.BadParameter(f"posterior arm name(s) already used: {sorted(overlap)}")
 
     loaded = load_config(config)
 
@@ -287,6 +410,8 @@ def repeatability(
     )
 
     providers = providers_from_checkpoints(edge_arms, device=device)
+    for name, sampler in posterior.items():
+        providers[name] = callable_provider(sampler.denoise01)
     results = run_repeatability(
         bridge,
         burst_arms,
@@ -301,6 +426,10 @@ def repeatability(
         # by name only.
         extra_metadata={
             "provider_checkpoints": checkpoint_records(edge_arms),
+            "posterior_arms": {
+                "prior_checkpoint": None if prior_checkpoint is None else str(prior_checkpoint),
+                "specs": list(posterior_arm),
+            },
             "command": " ".join(sys.argv),
         },
         progress_callback=lambda done, total: typer.echo(f"source {done}/{total}", err=True),
