@@ -54,6 +54,7 @@ from burst_diffusion.metrics import psnr
 
 from .config import Config
 from .data import PairFactory
+from .fusion import FusionBatch, FusionFactory, build_alignment, warp_prediction
 from .gradient import sobel
 from .model import EdgeDenoiser, build_model
 
@@ -197,18 +198,35 @@ class Trainer:
             summary["ram_bytes"] / 1e6,
         )
         objective = config.objective
-        self.factory = PairFactory(
-            self.cache,
-            image_size=config.data.image_size,
-            batch_size=config.training.batch_size,
-            target=objective.target,
-            need_second=objective.lambda_consistency > 0.0,
-            gradient_target=objective.gradient_target,
-            gradient_target_dir=objective.gradient_target_dir,
-            seed=config.training.seed,
-            defect_augment=config.training.defect_augment,
-            target_debias_peak=objective.target_debias_peak,
-        )
+        self.factory: PairFactory | FusionFactory
+        if objective.fusion is not None:
+            self.factory = FusionFactory(
+                self.cache,
+                image_size=config.data.image_size,
+                batch_size=config.training.batch_size,
+                fusion=objective.fusion,
+                alignment=build_alignment(config),
+                seed=config.training.seed,
+            )
+            logger.info(
+                "burst fusion: %d frames per burst, levels %s, align %s",
+                objective.fusion.frames_per_burst,
+                objective.fusion.levels,
+                objective.fusion.align,
+            )
+        else:
+            self.factory = PairFactory(
+                self.cache,
+                image_size=config.data.image_size,
+                batch_size=config.training.batch_size,
+                target=objective.target,
+                need_second=objective.lambda_consistency > 0.0,
+                gradient_target=objective.gradient_target,
+                gradient_target_dir=objective.gradient_target_dir,
+                seed=config.training.seed,
+                defect_augment=config.training.defect_augment,
+                target_debias_peak=objective.target_debias_peak,
+            )
         self.model: EdgeDenoiser = build_model(config).to(self.device)
         if config.training.init_checkpoint is not None:
             if resume_from is not None:
@@ -357,6 +375,79 @@ class Trainer:
             terms["consistency"] = ((prediction - prediction_second) ** 2).mean()
         return terms
 
+    @property
+    def is_fusion(self) -> bool:
+        return self.config.objective.fusion is not None
+
+    def _fusion_loss_terms(
+        self, prediction: torch.Tensor, targets: torch.Tensor, shifts: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Fusion objective: the prediction (frame-0 coordinates) warped into
+        the raw target frame's coordinates, compared on the interior."""
+        objective = self.config.objective
+        assert objective.fusion is not None
+        margin = objective.fusion.warp_margin
+        size = prediction.shape[-1]
+        interior = np.s_[..., margin : size - margin, margin : size - margin]
+        warped = warp_prediction(prediction, shifts)
+
+        def distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            if objective.loss == "l1":
+                return (a - b).abs().mean()
+            return ((a - b) ** 2).mean()
+
+        terms: dict[str, torch.Tensor] = {}
+        if objective.lambda_image > 0.0:
+            terms["image"] = distance(warped[interior], targets[interior])
+        if objective.lambda_gradient > 0.0:
+            terms["gradient"] = distance(sobel(warped)[interior], sobel(targets)[interior])
+        return terms
+
+    def _fusion_multi_terms(
+        self, prediction: torch.Tensor, batch: FusionBatch
+    ) -> dict[str, torch.Tensor]:
+        """``target: multi_frame``: the main target plus every extra raw target,
+        each through its own warp of the prediction, averaged per sample over
+        the valid targets (masked mean, so a sample with fewer targets is not
+        under-weighted)."""
+        objective = self.config.objective
+        assert objective.fusion is not None and batch.extra_targets is not None
+        margin = objective.fusion.warp_margin
+        size = prediction.shape[-1]
+        interior = np.s_[..., margin : size - margin, margin : size - margin]
+        targets = torch.cat([batch.targets.to(self.device)[:, None], batch.extra_targets.to(self.device)], dim=1)
+        shifts = torch.cat([batch.shifts.to(self.device)[:, None], batch.extra_shifts.to(self.device)], dim=1)
+        mask = torch.cat(
+            [torch.ones_like(batch.extra_mask[:, :1]), batch.extra_mask], dim=1
+        ).to(self.device)  # [B, T]
+        count = targets.shape[1]
+        flat_pred = prediction[:, None].expand(-1, count, -1, -1, -1).reshape(-1, *prediction.shape[1:])
+        warped = warp_prediction(flat_pred, shifts.reshape(-1, 2))
+        flat_targets = targets.reshape(-1, *prediction.shape[1:])
+        weights = mask.reshape(-1)
+        weight_sum = weights.sum().clamp_min(1.0)
+
+        def distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            per = ((a - b).abs() if objective.loss == "l1" else (a - b) ** 2).mean(dim=(1, 2, 3))
+            return (per * weights).sum() / weight_sum
+
+        terms: dict[str, torch.Tensor] = {}
+        if objective.lambda_image > 0.0:
+            terms["image"] = distance(warped[interior], flat_targets[interior])
+        if objective.lambda_gradient > 0.0:
+            terms["gradient"] = distance(sobel(warped)[interior], sobel(flat_targets)[interior])
+        return terms
+
+    def _fusion_step(self, batch: FusionBatch) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        inputs = batch.inputs.to(self.device)
+        levels = batch.levels.to(self.device)
+        prediction = self.model(inputs, t=levels)
+        if batch.extra_targets is not None:
+            return prediction, self._fusion_multi_terms(prediction, batch)
+        targets = batch.targets.to(self.device)
+        shifts = batch.shifts.to(self.device)
+        return prediction, self._fusion_loss_terms(prediction, targets, shifts)
+
     def _combine(self, terms: dict[str, torch.Tensor]) -> torch.Tensor:
         objective = self.config.objective
         weights = {
@@ -371,8 +462,50 @@ class Trainer:
         assert total is not None
         return total
 
+    def _validate_fusion(self, writer: SummaryWriter) -> None:
+        """Validation at the lowest and highest configured dose levels: the
+        loss against frame 0 of each val burst, PSNR of the fused output vs
+        clean (frame 0 sits at the burst's origin, so no warp is needed), and
+        a picture per level."""
+        assert isinstance(self.factory, FusionFactory)
+        count = self.config.training.val_images
+        levels = sorted({min(self.factory.levels), max(self.factory.levels)})
+        self.model.eval()
+        with ema_parameters(self.model, self.ema), torch.no_grad():
+            for level in levels:
+                batch = self.factory.val_batch(count=count, level=level)
+                prediction, terms = self._fusion_step(batch)
+                writer.add_scalar(f"val/loss_m{level}", float(self._combine(terms).item()), self.step)
+                denoised = self.model.predict_image(
+                    batch.inputs.to(self.device), t=batch.levels.to(self.device)
+                ).clamp(-1.0, 1.0)
+                clean01 = ((batch.clean + 1.0) / 2.0).numpy()
+                pred01 = ((denoised + 1.0) / 2.0).cpu().numpy()
+                psnr_values = [
+                    psnr(np.moveaxis(clean01[i], 0, -1), np.moveaxis(pred01[i], 0, -1))
+                    for i in range(pred01.shape[0])
+                ]
+                writer.add_scalar(f"val/psnr_m{level}", float(np.mean(psnr_values)), self.step)
+                grad_mse = ((sobel(denoised) - sobel(batch.clean.to(self.device))) ** 2).mean()
+                writer.add_scalar(f"val/gradient_mse_vs_clean_m{level}", float(grad_mse.item()), self.step)
+                shown = min(4, pred01.shape[0])
+                input01 = ((batch.inputs.clamp(-1.0, 1.0) + 1.0) / 2.0).numpy()
+                rows = [
+                    np.concatenate([input01[i], pred01[i], clean01[i]], axis=-1)
+                    for i in range(shown)
+                ]
+                writer.add_image(
+                    f"val/input_pred_clean_m{level}", np.concatenate(rows, axis=-2), self.step
+                )
+            # The headline scalar keeps its historical name at the top level.
+            writer.add_scalar("val/psnr", float(np.mean(psnr_values)), self.step)
+        self.model.train()
+
     def _validate(self, writer: SummaryWriter) -> None:
         if not self.cache.val_sources:
+            return
+        if self.is_fusion:
+            self._validate_fusion(writer)
             return
         count = self.config.training.val_images
         self.model.eval()
@@ -442,17 +575,20 @@ class Trainer:
                     stop_reason = f"stop file present: {self.stop_file}"
                     break
                 batch = self.factory.sample_batch()
-                inputs = batch.inputs.to(self.device)
-                targets = batch.targets.to(self.device)
-                second = batch.second.to(self.device) if batch.second is not None else None
-                gradient_targets = (
-                    batch.gradient_targets.to(self.device)
-                    if batch.gradient_targets is not None
-                    else None
-                )
+                if isinstance(batch, FusionBatch):
+                    prediction, terms = self._fusion_step(batch)
+                else:
+                    inputs = batch.inputs.to(self.device)
+                    targets = batch.targets.to(self.device)
+                    second = batch.second.to(self.device) if batch.second is not None else None
+                    gradient_targets = (
+                        batch.gradient_targets.to(self.device)
+                        if batch.gradient_targets is not None
+                        else None
+                    )
 
-                prediction = self.model(inputs)
-                terms = self._loss_terms(prediction, targets, second, gradient_targets)
+                    prediction = self.model(inputs)
+                    terms = self._loss_terms(prediction, targets, second, gradient_targets)
                 loss = self._combine(terms)
 
                 self.optimizer.zero_grad(set_to_none=True)

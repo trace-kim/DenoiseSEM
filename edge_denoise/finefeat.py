@@ -308,6 +308,39 @@ def _band_stats(
     return rows
 
 
+#: A burst arm: ``(source, retake) -> full-frame [H, W] output in [0, 1]``.
+BurstDenoiseFn = Callable[[BurstSource, int], np.ndarray]
+
+
+def _retake_rows(
+    frames: Sequence[np.ndarray], num_seeds: int, frames_per_retake: int
+) -> tuple[list[np.ndarray], dict[str, list[np.ndarray]], int]:
+    """Seed frames and classical rows.  With ``frames_per_retake > 1`` the
+    frames are consecutive retakes (drifting bursts): seed ``r`` is the first
+    frame of retake ``r`` and the averages are taken INSIDE each retake, one
+    realization per retake -- what an instrument averaging a drifting burst
+    delivers.  With 1 the historical layout applies (frame k is seed k; the
+    averages are disjoint groups of consecutive frames)."""
+    if frames_per_retake > 1:
+        retakes = len(frames) // frames_per_retake
+        seeds = min(num_seeds, retakes)
+        seed_frames = [frames[r * frames_per_retake] for r in range(seeds)]
+        rows: dict[str, list[np.ndarray]] = {}
+        for count in (4, 16):
+            if frames_per_retake >= count:
+                rows[f"avg_of_{count}"] = [
+                    np.mean(frames[r * frames_per_retake : r * frames_per_retake + count], axis=0)
+                    for r in range(seeds)
+                ]
+        return seed_frames, rows, seeds
+    seeds = min(num_seeds, len(frames))
+    rows = {
+        "avg_of_4": [np.mean(frames[4 * g : 4 * g + 4], axis=0) for g in range(min(seeds, len(frames) // 4))],
+        "avg_of_16": [np.mean(frames[:16], axis=0)],
+    }
+    return list(frames[:seeds]), rows, seeds
+
+
 def analyze_source(
     source: BurstSource,
     arms: Mapping[str, DenoiseFn],
@@ -317,11 +350,17 @@ def analyze_source(
     num_seeds: int,
     peak: float,
     tile_batch: int = 64,
+    burst_arms: Mapping[str, BurstDenoiseFn] | None = None,
+    frames_per_retake: int = 1,
 ) -> tuple[dict, dict[str, np.ndarray]]:
-    """Full-frame analysis of one source; returns (record, frame-0 outputs)."""
+    """Full-frame analysis of one source; returns (record, frame-0 outputs).
+
+    ``burst_arms`` are scored per retake (see :func:`_retake_rows`); every
+    other arm denoises the retake's first frame.
+    """
     clean = source.clean.astype(np.float64) / 255.0
-    frames = [f.astype(np.float64) / 255.0 for f in source.frames]
-    seeds = min(num_seeds, len(frames))
+    all_frames = [f.astype(np.float64) / 255.0 for f in source.frames]
+    frames, classical_rows, seeds = _retake_rows(all_frames, num_seeds, frames_per_retake)
     flat, edge = flat_and_edge_masks(clean)
     regions = region_labels(clean)
     clean_bands = band_maps(clean, regions)
@@ -344,17 +383,19 @@ def analyze_source(
         wiener_1.append(s / (s + n) if s + n > 0 else float("nan"))
         wiener_16.append(s / (s + n / 16.0) if s + n > 0 else float("nan"))
 
-    # Realizations: classical rows from the frames, arms by full-frame tiling.
-    outputs: dict[str, list[np.ndarray]] = {
-        "single_frame": frames[:seeds],
-        "avg_of_4": [np.mean(frames[4 * g : 4 * g + 4], axis=0) for g in range(min(seeds, len(frames) // 4))],
-        "avg_of_16": [np.mean(frames[:16], axis=0)],
-    }
+    # Realizations: classical rows from the frames, arms by full-frame tiling,
+    # burst arms per retake.
+    outputs: dict[str, list[np.ndarray]] = {"single_frame": list(frames)}
+    outputs.update(classical_rows)
     for name, fn in arms.items():
         outputs[name] = [
             denoise_full_frame(fn, frames[k], tile=tile, stride=stride, tile_batch=tile_batch)
             for k in range(seeds)
         ]
+    for name, burst_fn in (burst_arms or {}).items():
+        if name in outputs:
+            raise ValueError(f"arm name {name!r} used twice")
+        outputs[name] = [burst_fn(source, retake) for retake in range(seeds)]
 
     record: dict = {
         "source_index": source.source_index,
@@ -652,15 +693,23 @@ def fine_features(
     plate_sources: int = 3,
     extra_metadata: Mapping[str, object] | None = None,
     progress: Callable[[str], None] | None = None,
+    burst_arms: Mapping[str, BurstDenoiseFn] | None = None,
+    frames_per_retake: int = 1,
 ) -> dict:
     """Run the diagnostic; writes fine_features.json, summary.md and a plate."""
     if split not in ("val", "train", "test"):
         raise ValueError(f"split must be 'val', 'train', or 'test', got {split!r}")
+    if frames_per_retake < 1:
+        raise ValueError(f"frames_per_retake must be >= 1, got {frames_per_retake}")
     tile = config.data.image_size
+    # min_replicas must not drop any source: the content-group split is
+    # computed over the KEPT sources, so dropping the (16-frame) training
+    # sources of a drifting dataset would silently re-split the holdout ones.
+    # Sources with fewer retakes than requested simply yield fewer.
     cache = BurstCache(
         config.data.dataset_dir,
         channels=config.data.channels,
-        min_replicas=max(2, num_seeds),
+        min_replicas=2,
         min_size=tile,
         val_fraction=config.data.val_fraction,
         test_fraction=config.data.test_fraction,
@@ -679,7 +728,14 @@ def fine_features(
     plates: list[tuple[dict, np.ndarray, dict[str, np.ndarray]]] = []
     for source in available:
         record, frame0 = analyze_source(
-            source, arms, tile=tile, stride=stride, num_seeds=num_seeds, peak=peak
+            source,
+            arms,
+            tile=tile,
+            stride=stride,
+            num_seeds=num_seeds,
+            peak=peak,
+            burst_arms=burst_arms,
+            frames_per_retake=frames_per_retake,
         )
         records.append(record)
         if len(plates) < plate_sources:
@@ -691,6 +747,7 @@ def fine_features(
         "dataset_dir": str(config.data.dataset_dir),
         "split": split,
         "num_seeds": num_seeds,
+        "frames_per_retake": frames_per_retake,
         "stride": stride,
         "peak": peak,
         "summary": summary,

@@ -1,0 +1,59 @@
+# BURST FUSION, complement-mean target (see miic_p10_drift_fuse.yml for the
+# base recipe).  Same registered subset means with t = m, but the loss compares
+# the prediction with the registered mean of EVERY frame outside the subset,
+# in frame-0 coordinates (no warp): still independent of the input's noise,
+# so still Noise2Noise, with (16 - m) times less target noise.  The gradient
+# of the high-dose levels -- where the estimation error is ~100x below the
+# single-frame target noise -- is otherwise buried in that noise, which is
+# where the frame-target run plateaus.  Levels stop at 12 (a 4-frame target);
+# inference caps the conditioning at 12 for K = 16.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/miic_p10_drift_fuse_cmean.yml
+data:
+  dataset_dir: data/MIIC-burst-p10-drift
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  loss: l2
+  fusion:
+    frames_per_burst: 16
+    levels: [1, 2, 4, 6, 8, 12, 12, 12]   # duplicates weight the burst-dose level
+    target: complement_mean
+    level_cap: 12
+    align: registered
+    registration: runs/edge_denoise/registration_drift_pre.json
+    condition_on_level: true
+    warp_margin: 2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/miic_p10_drift_fuse_cmean
+  # Warm start from the frame-target fusion model: the level conditioning is
+  # already in place, the cleaner targets refine every level from there.
+  init_checkpoint: runs/edge_denoise/miic_p10_drift_fuse/ckpt_latest.pt
+  batch_size: 8
+  max_steps: 40000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

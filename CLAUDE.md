@@ -23,12 +23,18 @@ code and the add-ons built on top of it do not share a namespace:
    the U-Net backbone (equal-capacity comparisons), metrics, and the
    repeatability harness; never imports `ddim` or `runctl`. Math and
    feasibility study: `edge_denoise/docs/edge_denoise_method.md`; the
-   fine-feature / burst-mean-target / diffusion-prior study and the current
-   best arms: `edge_denoise/docs/fine_feature_report.md`.
+   fine-feature / burst-mean-target / diffusion-prior study:
+   `edge_denoise/docs/fine_feature_report.md`; the drift-robust burst fusion
+   (drifting-burst generator, registration from noisy frames, level-
+   conditioned fusion trained on raw drifting bursts) and the current best
+   arms: `edge_denoise/docs/burst_fusion_report.md`.
 5. **`noising_pipeline/`** — standalone paired clean/noisy image generator.
    Depends on nothing in this repo.
 
 `docs/workflows.md` is the entry point for running anything.
+`docs/denoising_qna.md` is the design-review Q&A (burst diffusion, single-frame
+limits, the model-free detection bound, noise models, transforms) — read it
+before re-deriving any of those arguments.
 `runctl/docs/training_workflow.md` is the authoritative spec for run bundles,
 machine profiles and executors. `ddim/docs/sem_dataset_migration.md` explains the
 SEM loader and a DataLoader-worker perf pitfall (see Gotchas).
@@ -54,6 +60,11 @@ python -m edge_denoise train --config edge_denoise/configs/<name>.yml
 python -m edge_denoise repeatability --config <cfg> --checkpoint a=<pt> --burst-checkpoint b=<pt> ...
 python -m edge_denoise fine-features --config <cfg> --checkpoint a=<pt> --out <dir>   # per-band gain / blemish retention
 python -m edge_denoise train-prior --config edge_denoise/configs/miic_p10_dedup_prior.yml  # DDPM prior; --prior-checkpoint --posterior-arm on the two commands above
+python -m edge_denoise generate-drift --source data/MIIC-burst-p10-dedup --out data/MIIC-burst-p10-drift   # drifting bursts + drift.json truth
+python -m edge_denoise register --dataset data/MIIC-burst-p10-drift --out <table.json> [--checkpoint <single-frame pt>]  # registration table (+ accuracy vs truth)
+python -m edge_denoise train --config edge_denoise/configs/miic_p10_drift_fuse.yml   # burst fusion (objective.fusion); needs the registration table
+python -m edge_denoise fuse --checkpoint <pt> --dataset data/MIIC-burst-p10-drift --source-index 48 --frames 1,4,16 --out <dir>
+#   --fusion-checkpoint NAME=PATH --fusion-frames 1,2,4,8,16 --fusion-predenoise <pt> on repeatability / fine-features adds fuse{K}/regavg{K} rows
 python -m ddim.main --config <name>.yml --exp <path> --doc <name> --ni
 ```
 
@@ -132,7 +143,22 @@ and `python -m edge_denoise repeatability` produces one table holding classical,
 burst, and edge arms measured on identical sources, seeds, crops, and CD sites.
 All burst arms in one call must share `schedule.num_steps`. The dev split for
 MIIC experiments is `val`; the `test` split is locked (report once, only for a
-frozen method).
+frozen method). Methods that need more than the seed crops (burst fusion)
+plug in through `RealizationProvider.generate_source` and the harness's
+`seed_stride`, which on a drifting dataset makes seed `j` the first frame of
+retake `j` and the classical `avg_of_m` rows averages of *drifting* frames
+inside a retake.
+
+- **Drifting bursts are the deployment condition.** Real SEM bursts drift
+  (several px over 16 frames, scan shear inside a frame, charging), so any
+  training target that averages or pairs unregistered frames blurs the
+  estimator. `edge_denoise/register.py` registers bursts from the frames
+  alone: the stock global cross-correlation peak fails on periodic line
+  patterns (errors of 5-15 px), a bounded search plus Gauss-Newton refinement
+  is at the Cramér-Rao level on constrained axes but 1-3 px along fields of
+  parallel lines, and running the same fit on *denoised* frames is what
+  works everywhere. Always register denoised frames (`--fusion-predenoise`,
+  `register --checkpoint`).
 
 ## Gotchas
 

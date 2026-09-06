@@ -64,12 +64,20 @@ class EdgeDenoiser(nn.Module):
             num_groups=config.model.effective_num_groups,
         )
 
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+    def forward(self, frames: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
+        """``t`` (``[B]``) conditions the backbone; ``None`` = the constant
+        every single-frame arm uses.  Burst fusion passes the number of frames
+        averaged, so the same network serves every dose level."""
         features = make_input(frames, self.representation)
-        t = torch.full((frames.shape[0],), CONSTANT_T, device=frames.device)
+        if t is None:
+            t = torch.full((frames.shape[0],), CONSTANT_T, device=frames.device)
+        else:
+            t = t.to(device=frames.device, dtype=torch.float32)
+            if t.shape != (frames.shape[0],):
+                raise ValueError(f"t must be [B] = [{frames.shape[0]}], got {tuple(t.shape)}")
         return self.unet(features, t)
 
-    def predict_image(self, frames: torch.Tensor) -> torch.Tensor:
+    def predict_image(self, frames: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
         """Denoised IMAGE regardless of representation.
 
         For ``gradient`` the predicted Sobel field is inverted by the exact
@@ -81,7 +89,7 @@ class EdgeDenoiser(nn.Module):
         the mean estimate's variance costs pixel-sigma/PSNR only, never edge
         position.
         """
-        prediction = self.forward(frames)
+        prediction = self.forward(frames, t)
         if self.representation != "gradient":
             return prediction
         return reconstruct_from_sobel(prediction, mean=frames.mean(dim=(1, 2, 3)))

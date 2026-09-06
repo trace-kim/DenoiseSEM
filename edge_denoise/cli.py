@@ -247,6 +247,257 @@ def evaluate(
     typer.echo(f"results written to {Path(out) / 'results.json'}")
 
 
+@app.command("generate-drift")
+def generate_drift_command(
+    source: Path = typer.Option(..., help="Pixel-aligned burst dataset whose clean images (and split) are reused."),
+    out: Path = typer.Option(..., help="Output dataset directory (burst/ + drift.json)."),
+    frames: int = typer.Option(16, min=2, help="Frames per burst."),
+    retakes: int = typer.Option(10, min=1, help="Independent bursts per held-out (val/test) source."),
+    velocity_sigma: float = typer.Option(0.35, help="Stage drift velocity sigma, px/frame per axis."),
+    walk_sigma: float = typer.Option(0.25, help="Random-walk drift increment sigma, px/frame per axis."),
+    gain_sigma: float = typer.Option(0.02, help="Charging gain drift amplitude."),
+    offset_sigma: float = typer.Option(0.005, help="Charging offset drift amplitude ([0, 1] units)."),
+    peak: float = typer.Option(10.0, help="Poisson peak (must match the source dataset)."),
+    seed: int = typer.Option(0, help="Generation seed."),
+    val_fraction: float = typer.Option(0.1),
+    test_fraction: float = typer.Option(0.1),
+    split_seed: int = typer.Option(2019),
+) -> None:
+    """Render a drifting-burst dataset (stage drift, intra-frame shear,
+    charging) from the clean images of an existing burst dataset, with the
+    per-frame truth recorded in drift.json."""
+    from .drift import DriftParams, generate_drift_dataset
+
+    truth = generate_drift_dataset(
+        source,
+        out,
+        frames_per_burst=frames,
+        holdout_retakes=retakes,
+        params=DriftParams(
+            velocity_sigma=velocity_sigma,
+            walk_sigma=walk_sigma,
+            gain_sigma=gain_sigma,
+            offset_sigma=offset_sigma,
+        ),
+        peak=peak,
+        seed=seed,
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+        split_seed=split_seed,
+        progress=lambda message: typer.echo(message, err=True),
+    )
+    typer.echo(
+        f"wrote {out}: {len(truth['sources'])} sources, val {truth['split']['val_source_indices']}, "
+        f"test {truth['split']['test_source_indices']}"
+    )
+
+
+@app.command()
+def register(
+    dataset: Path = typer.Option(..., help="Burst dataset (drifting or not) to register burst by burst."),
+    out: Path = typer.Option(..., help="Output registration table (JSON)."),
+    checkpoint: Optional[Path] = typer.Option(
+        None, help="Single-frame checkpoint: register its denoised outputs instead of the raw frames."
+    ),
+    sigma: Optional[float] = typer.Option(None, help="Gaussian smoothing before registration (default 2 raw / 1 pre-denoised)."),
+    radius: int = typer.Option(6, min=1, help="Coarse search radius around the previous frame's shift (px)."),
+    frames_per_burst: Optional[int] = typer.Option(None, help="Burst length (default: drift.json, else all frames of a source)."),
+    stride: int = typer.Option(48, min=1, help="Tile stride of the pre-denoiser."),
+    device: str = typer.Option("auto", help="auto | cpu | cuda"),
+) -> None:
+    """Register every burst of a dataset to its first frame from the noisy
+    frames alone (bounded-search cross-correlation + Gauss-Newton refinement
+    + constant-velocity smoothing); reports the accuracy against drift.json
+    when the dataset carries one."""
+    import time
+
+    import numpy as np
+    from burst_diffusion.data import BurstCache
+
+    from .distill import build_teacher, denoise_full_frame
+    from .drift import burst_truths, load_drift_truth
+    from .register import RegistrationTable, register_burst, registration_errors
+    from .train import resolve_device
+
+    resolved = resolve_device(device)
+    truth = load_drift_truth(dataset)
+    if frames_per_burst is None:
+        frames_per_burst = int(truth["frames_per_burst"]) if truth is not None else 0
+    predenoise = None
+    method = "raw"
+    if checkpoint is not None:
+        import torch
+
+        fn, description = build_teacher(checkpoint, device=device)
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        tile = int(payload["config"]["data"]["image_size"])
+        predenoise = lambda frame01: denoise_full_frame(fn, frame01, tile=tile, stride=stride)  # noqa: E731
+        method = f"predenoised:{checkpoint}"
+        typer.echo(f"registering pre-denoised frames ({description})", err=True)
+    effective_sigma = sigma if sigma is not None else (2.0 if predenoise is None else 1.0)
+    cache = BurstCache(dataset, channels=1, min_replicas=1, min_size=1, val_fraction=0.0, test_fraction=0.0)
+    bursts: dict[int, list] = {}
+    errors: dict[str, list] = {"train": [], "holdout": []}
+    started = time.time()
+    for source in sorted(cache.all_sources, key=lambda item: item.source_index):
+        length = frames_per_burst if frames_per_burst > 0 else len(source.frames)
+        count = len(source.frames) // length
+        trajectories = []
+        truths = burst_truths(truth, source.source_index) if truth is not None else None
+        split = truth["sources"][str(source.source_index)]["split"] if truth is not None else "train"
+        for burst in range(count):
+            frames01 = [f.astype(np.float64) / 255.0 for f in source.frames[burst * length : (burst + 1) * length]]
+            trajectory = register_burst(
+                frames01, sigma=effective_sigma, radius=radius, device=resolved, predenoise=predenoise
+            )
+            trajectories.append(trajectory)
+            if truths is not None:
+                errors[split].append(
+                    {
+                        "source_index": source.source_index,
+                        "burst": burst,
+                        **registration_errors(trajectory, truths[burst].position, truths[burst].velocity),
+                    }
+                )
+        bursts[source.source_index] = trajectories
+        typer.echo(
+            f"source {source.source_index}: {count} burst(s) registered ({time.time() - started:.0f} s)",
+            err=True,
+        )
+    table = RegistrationTable(
+        method=method,
+        sigma=effective_sigma,
+        radius=radius,
+        frames_per_burst=frames_per_burst if frames_per_burst > 0 else max(len(s.frames) for s in cache.all_sources),
+        bursts=bursts,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    table.save(out)
+    typer.echo(f"registration table written to {out}")
+    if truth is not None:
+        report = {}
+        for split, items in errors.items():
+            if not items:
+                continue
+            per_frame = np.concatenate([np.asarray(item["position_errors"]) for item in items])
+            report[split] = {
+                "bursts": len(items),
+                "position_rms_px": np.sqrt((per_frame**2).mean(axis=0)).tolist(),
+                "position_p95_px": np.percentile(np.abs(per_frame), 95.0, axis=0).tolist(),
+                "position_max_px": np.abs(per_frame).max(axis=0).tolist(),
+                "frames_worse_than_0.25px": float((np.abs(per_frame) > 0.25).any(axis=1).mean()),
+                "per_burst": items,
+            }
+            typer.echo(
+                f"{split}: {len(items)} bursts | position error rms (dy, dx) "
+                f"{report[split]['position_rms_px'][0]:.3f}, {report[split]['position_rms_px'][1]:.3f} px | "
+                f"p95 {report[split]['position_p95_px'][0]:.3f}, {report[split]['position_p95_px'][1]:.3f} | "
+                f"max {report[split]['position_max_px'][0]:.2f}, {report[split]['position_max_px'][1]:.2f} | "
+                f"frames > 0.25 px: {100 * report[split]['frames_worse_than_0.25px']:.1f}%"
+            )
+        report_path = out.with_suffix(".accuracy.json")
+        report_path.write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+        typer.echo(f"accuracy vs drift truth written to {report_path}")
+
+
+def _fusion_burst_arms(
+    fusion_checkpoint: list[str],
+    *,
+    fusion_frames: str,
+    fusion_align: str,
+    fusion_predenoise: Optional[Path],
+    regavg: bool,
+    frames_per_retake: int,
+    dataset_dir: Path,
+    device: str,
+    stride: int,
+    debias_peak: Optional[float] = None,
+) -> dict:
+    """Build a :class:`~edge_denoise.fusion.BurstFusionArms` per fusion checkpoint."""
+    from .data import ClipDebiaser
+    from .distill import build_teacher, denoise_full_frame
+    from .drift import load_drift_truth
+    from .fusion import BurstFusionArms, FusionDenoiser
+
+    arms = _parse_arms(fusion_checkpoint, default_name="fuse")
+    if not arms:
+        return {}
+    counts = [int(part) for part in fusion_frames.split(",") if part.strip()]
+    truth = load_drift_truth(dataset_dir) if fusion_align == "truth" else None
+    result = {}
+    for name, path in arms.items():
+        denoiser = FusionDenoiser.from_checkpoint(path, device=device)
+        if debias_peak is not None:
+            # Inference-time inverse of the clipped-Poisson response on the OUTPUT
+            # (the network estimates the clipped mean g(x); g is monotone).
+            denoiser._debias = ClipDebiaser(debias_peak)
+        predenoise = None
+        if fusion_predenoise is not None:
+            fn, _ = build_teacher(fusion_predenoise, device=device)
+            tile = denoiser.image_size
+            predenoise = lambda frame01, fn=fn, tile=tile: denoise_full_frame(fn, frame01, tile=tile, stride=stride)  # noqa: E731
+        result[name] = BurstFusionArms(
+            denoiser,
+            frame_counts=counts,
+            frames_per_retake=frames_per_retake,
+            align=fusion_align,
+            regavg=regavg,
+            predenoise=predenoise,
+            truth=truth,
+            stride=stride,
+        )
+    return result
+
+
+@app.command()
+def fuse(
+    checkpoint: Path = typer.Option(..., help="Burst-fusion checkpoint."),
+    dataset: Path = typer.Option(..., help="Burst dataset directory."),
+    source_index: int = typer.Option(..., help="Source to fuse."),
+    retake: int = typer.Option(0, min=0, help="Which burst (retake) of the source."),
+    frames: str = typer.Option("1,4,16", help="Frame counts K to fuse."),
+    out: Path = typer.Option(..., help="Output directory for the PNGs."),
+    align: str = typer.Option("registered", help="registered | none | truth"),
+    device: str = typer.Option("auto", help="auto | cpu | cuda"),
+) -> None:
+    """Fuse one burst at several frame counts and write the images next to the
+    classical references (single frame, drifting average, registered average, clean)."""
+    import numpy as np
+    from burst_diffusion.data import BurstCache
+    from PIL import Image
+
+    from .fusion import frames_per_retake_of
+
+    per_retake = frames_per_retake_of(dataset, default=0)
+    cache = BurstCache(dataset, channels=1, min_replicas=1, min_size=1, val_fraction=0.0, test_fraction=0.0)
+    matches = [s for s in cache.all_sources if s.source_index == source_index]
+    if not matches:
+        raise typer.BadParameter(f"source {source_index} not in {dataset}")
+    source = matches[0]
+    per_retake = per_retake or len(source.frames)
+    arms = _fusion_burst_arms(
+        [f"fuse={checkpoint}"],
+        fusion_frames=frames,
+        fusion_align=align,
+        fusion_predenoise=None,
+        regavg=True,
+        frames_per_retake=per_retake,
+        dataset_dir=dataset,
+        device=device,
+        stride=48,
+    )["fuse"]
+    outputs = arms.outputs(source, retake)
+    burst = arms.retake_frames(source, retake)
+    outputs["single_frame"] = burst[0]
+    for count in arms.counts:
+        outputs[f"avg{count}"] = np.mean(burst[:count], axis=0)
+    outputs["clean"] = source.clean.astype(np.float64) / 255.0
+    out.mkdir(parents=True, exist_ok=True)
+    for name, image in outputs.items():
+        Image.fromarray(np.rint(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)).save(out / f"{name}.png")
+    typer.echo(f"wrote {len(outputs)} images to {out}")
+
+
 @app.command("fine-features")
 def fine_features_command(
     config: Path = typer.Option(..., help="edge_denoise YAML config (dataset section drives the split)."),
@@ -266,6 +517,21 @@ def fine_features_command(
     posterior_arm: list[str] = typer.Option(
         [], help="Posterior-sampling arm as NAME=mode[,steps=..,samples=..,guidance=..,clip=..,seed=..] (repeatable)."
     ),
+    fusion_checkpoint: list[str] = typer.Option(
+        [], help="Burst-fusion checkpoint arm as NAME=PATH (repeatable): rows fuse{K}@NAME (+ regavg{K}@NAME)."
+    ),
+    fusion_frames: str = typer.Option("1,2,4,8,16", help="Frame counts K of the fusion arms."),
+    fusion_align: str = typer.Option("registered", help="registered | none | truth: how evaluated bursts are aligned."),
+    fusion_predenoise: Optional[Path] = typer.Option(
+        None, help="Single-frame checkpoint whose outputs the registration runs on instead of the raw frames."
+    ),
+    regavg: bool = typer.Option(True, "--regavg/--no-regavg", help="Also report the registered K-frame average."),
+    retake_frames: Optional[int] = typer.Option(
+        None, help="Frames per retake (default: the dataset's drift.json frames_per_burst, else 1)."
+    ),
+    fusion_debias_peak: Optional[float] = typer.Option(
+        None, help="Apply the inverse clipped-Poisson response (this peak) to the fusion outputs."
+    ),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
     """Scale-resolved fine-feature retention of every arm on full frames.
@@ -280,6 +546,7 @@ def fine_features_command(
     from .config import load_config
     from .distill import build_teacher
     from .finefeat import fine_features as run_fine_features
+    from .fusion import frames_per_retake_of
     from .provider import checkpoint_records
 
     edge_arms = _parse_arms(checkpoint, default_name="edge")
@@ -287,8 +554,10 @@ def fine_features_command(
     overlap = set(edge_arms) & set(burst_arms)
     if overlap:
         raise typer.BadParameter(f"arm name(s) used in both tiers: {sorted(overlap)}")
-    if not edge_arms and not burst_arms and not posterior_arm:
-        raise typer.BadParameter("provide at least one --checkpoint, --burst-checkpoint or --posterior-arm")
+    if not edge_arms and not burst_arms and not posterior_arm and not fusion_checkpoint:
+        raise typer.BadParameter(
+            "provide at least one --checkpoint, --burst-checkpoint, --posterior-arm or --fusion-checkpoint"
+        )
     arms = {}
     for name, path in {**burst_arms, **edge_arms}.items():
         arms[name], _ = build_teacher(path, device=device)
@@ -297,6 +566,25 @@ def fine_features_command(
             raise typer.BadParameter(f"arm name {name!r} used twice")
         arms[name] = sampler.denoise
     loaded = load_config(config)
+    per_retake = retake_frames if retake_frames is not None else frames_per_retake_of(loaded.data.dataset_dir)
+    fusion_arms = _fusion_burst_arms(
+        fusion_checkpoint,
+        fusion_frames=fusion_frames,
+        fusion_align=fusion_align,
+        fusion_predenoise=fusion_predenoise,
+        regavg=regavg,
+        frames_per_retake=per_retake,
+        dataset_dir=loaded.data.dataset_dir,
+        device=device,
+        stride=stride,
+        debias_peak=fusion_debias_peak,
+    )
+    burst_callables = {}
+    for name, fusion in fusion_arms.items():
+        if name in arms:
+            raise typer.BadParameter(f"arm name {name!r} used twice")
+        for method, fn in fusion.burst_arms().items():
+            burst_callables[f"{method}@{name}"] = fn
     wanted = None if sources is None else [int(part) for part in sources.split(",") if part.strip()]
     results = run_fine_features(
         loaded,
@@ -310,9 +598,15 @@ def fine_features_command(
         extra_metadata={
             "provider_checkpoints": checkpoint_records(edge_arms),
             "burst_checkpoints": {name: str(path) for name, path in burst_arms.items()},
+            "fusion_checkpoints": checkpoint_records(_parse_arms(fusion_checkpoint, default_name="fuse")),
+            "fusion_frames": fusion_frames,
+            "fusion_align": fusion_align,
+            "fusion_predenoise": None if fusion_predenoise is None else str(fusion_predenoise),
             "command": " ".join(sys.argv),
         },
         progress=lambda message: typer.echo(message, err=True),
+        burst_arms=burst_callables,
+        frames_per_retake=per_retake,
     )
     for name, method in results["summary"]["methods"].items():
         gains = " ".join(f"{g:.2f}" if g is not None else "-" for g in method["band_gain"])
@@ -345,6 +639,21 @@ def repeatability(
         [], help="Posterior-sampling arm as NAME=mode[,steps=..,samples=..,guidance=..,clip=..,seed=..] (repeatable)."
     ),
     peak: float = typer.Option(10.0, help="Effective Poisson peak (posterior likelihood)."),
+    fusion_checkpoint: list[str] = typer.Option(
+        [], help="Burst-fusion checkpoint arm as NAME=PATH (repeatable): rows fuse{K}@NAME (+ regavg{K}@NAME)."
+    ),
+    fusion_frames: str = typer.Option("1,2,4,8,16", help="Frame counts K of the fusion arms."),
+    fusion_align: str = typer.Option("registered", help="registered | none | truth: how evaluated bursts are aligned."),
+    fusion_predenoise: Optional[Path] = typer.Option(
+        None, help="Single-frame checkpoint whose outputs the registration runs on instead of the raw frames."
+    ),
+    regavg: bool = typer.Option(True, "--regavg/--no-regavg", help="Also report the registered K-frame average."),
+    retake_frames: Optional[int] = typer.Option(
+        None, help="Frames per retake = seed stride (default: the dataset's drift.json frames_per_burst, else 1)."
+    ),
+    fusion_debias_peak: Optional[float] = typer.Option(
+        None, help="Apply the inverse clipped-Poisson response (this peak) to the fusion outputs."
+    ),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
     """One metrology-precision table: classical + edge_denoise (+ burst) arms.
@@ -352,7 +661,9 @@ def repeatability(
     Runs burst_diffusion's repeatability harness (CD sites, subpixel
     crossings, pooled c4-debiased sigmas) with edge arms supplied as
     realization providers, so every method is measured on identical sources,
-    seeds, crops, and CD sites.
+    seeds, crops, and CD sites.  On a drifting dataset the seeds are the
+    first frames of consecutive retakes and burst-fusion arms fuse each
+    retake's first K frames.
     """
     from burst_diffusion.config import Config as BurstConfig
     from burst_diffusion.repeatability import repeatability as run_repeatability
@@ -361,6 +672,7 @@ def repeatability(
     import sys
 
     from .config import load_config
+    from .fusion import frames_per_retake_of
     from .provider import callable_provider, checkpoint_records, providers_from_checkpoints
 
     edge_arms = _parse_arms(checkpoint, default_name="edge")
@@ -374,6 +686,22 @@ def repeatability(
         raise typer.BadParameter(f"posterior arm name(s) already used: {sorted(overlap)}")
 
     loaded = load_config(config)
+    per_retake = retake_frames if retake_frames is not None else frames_per_retake_of(loaded.data.dataset_dir)
+    fusion_arms = _fusion_burst_arms(
+        fusion_checkpoint,
+        fusion_frames=fusion_frames,
+        fusion_align=fusion_align,
+        fusion_predenoise=fusion_predenoise,
+        regavg=regavg,
+        frames_per_retake=per_retake,
+        dataset_dir=loaded.data.dataset_dir,
+        device=device,
+        stride=48,
+        debias_peak=fusion_debias_peak,
+    )
+    overlap = set(fusion_arms) & (set(edge_arms) | set(burst_arms) | set(posterior))
+    if overlap:
+        raise typer.BadParameter(f"fusion arm name(s) already used: {sorted(overlap)}")
 
     # The harness plans its schedule and frame requirements from a burst
     # config; bridge the edge config's data section into one.  Every burst arm
@@ -412,6 +740,8 @@ def repeatability(
     providers = providers_from_checkpoints(edge_arms, device=device)
     for name, sampler in posterior.items():
         providers[name] = callable_provider(sampler.denoise01)
+    for name, fusion in fusion_arms.items():
+        providers[name] = fusion.provider()
     results = run_repeatability(
         bridge,
         burst_arms,
@@ -421,6 +751,7 @@ def repeatability(
         num_seeds=seeds,
         device=device,
         extra_providers=providers,
+        seed_stride=per_retake,
         # Bind every edge arm to the exact checkpoint evaluated (path + hash +
         # step) and keep the invocation: the harness itself knows providers
         # by name only.
@@ -430,6 +761,10 @@ def repeatability(
                 "prior_checkpoint": None if prior_checkpoint is None else str(prior_checkpoint),
                 "specs": list(posterior_arm),
             },
+            "fusion_checkpoints": checkpoint_records(_parse_arms(fusion_checkpoint, default_name="fuse")),
+            "fusion_frames": fusion_frames,
+            "fusion_align": fusion_align,
+            "fusion_predenoise": None if fusion_predenoise is None else str(fusion_predenoise),
             "command": " ".join(sys.argv),
         },
         progress_callback=lambda done, total: typer.echo(f"source {done}/{total}", err=True),

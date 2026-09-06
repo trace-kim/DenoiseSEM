@@ -76,6 +76,15 @@ class RealizationProvider:
 
     method_names: tuple[str, ...]
     generate: Callable[[list[np.ndarray]], dict[str, list[np.ndarray]]]
+    # Optional source-aware entry point for methods that need MORE than the
+    # seed crops -- e.g. burst fusion, which registers and fuses the full
+    # frames of each retake.  Called as ``generate_source(source, window,
+    # num_seeds)`` with the source's crop window (row slice, column slice);
+    # it must return ``num_seeds`` outputs per method, cropped to the window,
+    # in the same ``[H, W, C]`` format.  When present it replaces ``generate``.
+    generate_source: (
+        Callable[["BurstSource", tuple[slice, slice], int], dict[str, list[np.ndarray]]] | None
+    ) = None
 
 
 _SIGMA_MAP_FULL_SCALE = 0.2  # sigma (in [0,1] intensity) rendered as white
@@ -343,20 +352,24 @@ def find_cd_sites(
 # realization generation
 
 
-def _center_crop01(source: BurstSource, image_size: int) -> tuple[np.ndarray, list[np.ndarray]]:
+def _center_window(source: BurstSource, image_size: int) -> tuple[slice, slice]:
     height, width = source.clean.shape[:2]
     top = (height - image_size) // 2
     left = (width - image_size) // 2
-    window = np.s_[top : top + image_size, left : left + image_size]
+    return np.s_[top : top + image_size, left : left + image_size]
+
+
+def _center_crop01(source: BurstSource, image_size: int) -> tuple[np.ndarray, list[np.ndarray]]:
+    window = _center_window(source, image_size)
     clean01 = _to_hwc01(source.clean[window])
     frames01 = [_to_hwc01(frame[window]) for frame in source.frames]
     return clean01, frames01
 
 
 def _classical_realizations(
-    frames01: list[np.ndarray], num_seeds: int, avg_counts: Sequence[int]
+    frames01: list[np.ndarray], num_seeds: int, avg_counts: Sequence[int], seed_stride: int = 1
 ) -> dict[str, list[np.ndarray]]:
-    methods = {"single_frame": frames01[:num_seeds]}
+    methods = {"single_frame": frames01[::seed_stride][:num_seeds]}
     for count in avg_counts:
         groups = len(frames01) // count
         methods[f"avg_of_{count}"] = [
@@ -707,8 +720,16 @@ def repeatability(
     progress_callback: Callable[[int, int], None] | None = None,
     extra_providers: Mapping[str, RealizationProvider] | None = None,
     extra_metadata: Mapping[str, object] | None = None,
+    seed_stride: int = 1,
 ) -> dict:
     """Run the repeatability evaluation; writes repeatability.json + summary.md.
+
+    ``seed_stride`` spaces the seed frames: with a dataset organised in
+    retakes of ``seed_stride`` consecutive frames (a drifting burst each),
+    seed ``j`` is the first frame of retake ``j`` and ``avg_of_m`` groups are
+    consecutive frames INSIDE retakes -- the classical rows then average a
+    drifting burst, as an instrument would.  1 = every frame is a seed (the
+    pixel-aligned datasets).
 
     ``checkpoints`` maps an arm label to a burst checkpoint path; model methods
     are reported as ``{method}@{arm}``. Classical methods are computed once.
@@ -730,6 +751,8 @@ def repeatability(
         raise ValueError(f"split must be 'val', 'train', or 'test', got {split!r}")
     if num_seeds < 1:
         raise ValueError(f"num_seeds must be >= 1, got {num_seeds}")
+    if seed_stride < 1:
+        raise ValueError(f"seed_stride must be >= 1, got {seed_stride}")
     if not checkpoints and not extra_providers:
         raise ValueError("provide at least one checkpoint arm or extra provider")
     extra_providers = dict(extra_providers or {})
@@ -768,13 +791,14 @@ def repeatability(
         sources = sources[:limit]
 
     min_frames = min(len(source.frames) for source in sources)
-    if num_seeds > min_frames:
+    available_seeds = len(range(0, min_frames, seed_stride))
+    if num_seeds > available_seeds:
         warnings.warn(
-            f"num_seeds={num_seeds} exceeds the {min_frames} frames available on every "
-            f"source; clamping to {min_frames}",
+            f"num_seeds={num_seeds} exceeds the {available_seeds} seed frames available on "
+            f"every source (stride {seed_stride}); clamping to {available_seeds}",
             stacklevel=2,
         )
-        num_seeds = min_frames
+        num_seeds = available_seeds
     effective_avg_counts = []
     for count in avg_counts:
         if count < 2 or count > min_frames:
@@ -820,15 +844,21 @@ def repeatability(
         registrable = math.hypot(*gate_shift) <= registration_gate_px
         registration_sources += int(registrable)
 
-        realizations = _classical_realizations(frames01, num_seeds, effective_avg_counts)
-        seeds01 = frames01[:num_seeds]
+        realizations = _classical_realizations(
+            frames01, num_seeds, effective_avg_counts, seed_stride
+        )
+        seeds01 = frames01[::seed_stride][:num_seeds]
         for arm, sampler in samplers.items():
             for name, outputs in _model_realizations(
                 sampler, seeds01, schedule, max_batch
             ).items():
                 realizations[f"{name}@{arm}"] = outputs
+        window = _center_window(source, config.data.image_size)
         for arm, provider in extra_providers.items():
-            produced = provider.generate(seeds01)
+            if provider.generate_source is not None:
+                produced = provider.generate_source(source, window, num_seeds)
+            else:
+                produced = provider.generate(seeds01)
             if set(produced) != set(provider.method_names):
                 raise ValueError(
                     f"provider {arm!r} returned methods {sorted(produced)} but "
@@ -872,6 +902,7 @@ def repeatability(
         "count": len(sources),
         "source_indices": [source.source_index for source in sources],
         "num_seeds": num_seeds,
+        "seed_stride": seed_stride,
         "avg_counts": effective_avg_counts,
         "sample_steps": len(schedule),
         "checkpoints": {arm: str(path) for arm, path in checkpoints.items()},

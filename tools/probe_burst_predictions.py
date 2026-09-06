@@ -6,8 +6,8 @@ image and (b) an actual fresh noisy frame, when the network is fed:
   A. REAL m-frame averages (in-distribution inputs, as in training), and
   B. the sampler's own pseudo-averages (the iterative trajectory).
 
-Interpretation (see docs/burst_diffusion_method.md S5 and
-docs/burst_diffusion_qna.md):
+Interpretation (see burst_diffusion/docs/burst_diffusion_method.md S5 and
+docs/denoising_qna.md, Q1-Q6):
 - pred-vs-clean high while pred-vs-frame ~= the frame's own noise distance
   proves the network outputs the clean estimate, not "a noisy image";
 - the gap between A and B at the same t isolates the train/inference input-

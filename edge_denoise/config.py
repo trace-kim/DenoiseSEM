@@ -48,6 +48,86 @@ class DataConfig(_StrictModel):
         return self
 
 
+class FusionConfig(_StrictModel):
+    """Drift-robust burst fusion (see ``edge_denoise/fusion.py``).
+
+    The network is trained on the mean of a registered subset of ``m`` raw
+    frames of one burst against ONE other raw frame of the same burst, read
+    in its own (drifted) coordinates: the prediction is warped by the
+    registration's residual shift before the loss, the noisy target is never
+    resampled or averaged.  ``t = m`` conditions the backbone on the dose, so
+    the same network serves every frame count from 1 to ``frames_per_burst``.
+
+    - ``frames_per_burst``: replicas per burst in the dataset (the generator's
+      ``frames_per_burst``); training subsets never cross a burst.
+    - ``levels``: the subset sizes ``m`` drawn uniformly at training time
+      (each in ``1 .. frames_per_burst - 1``, one frame is the target).
+    - ``align``: ``registered`` uses the table written by
+      ``python -m edge_denoise register`` (``registration``); ``none`` averages
+      the drifting frames as they are (the un-registered ablation); ``truth``
+      uses the generator's recorded drift (the oracle-registration ablation).
+    - ``condition_on_level``: feed ``t = m`` (``False`` = t = 1 everywhere, a
+      dose-blind ablation).
+    - ``warp_margin``: border (px) excluded from the loss after the warp.
+    - ``registration_sigma`` / ``predenoised_sigma`` / ``registration_radius``:
+      the registration's smoothing (raw / pre-denoised frames) and search
+      radius, used at inference when a burst is registered on the fly.
+    - ``debias_peak``: inference-time inverse of the clipped-Poisson response
+      applied to the OUTPUT (the network estimates the clipped mean g(x);
+      g is monotone, so g^-1 of the estimate is an estimate of x).
+    - ``target``: ``frame`` = one raw frame outside the subset, read in its own
+      coordinates through the warped prediction (the default; the target is
+      never resampled).  ``complement_mean`` = the registered mean of EVERY
+      frame outside the subset, in frame-0 coordinates like the input: still
+      independent of the input's noise, so still an unbiased Noise2Noise
+      target, but with ``(frames_per_burst - m)`` times less noise -- the
+      gradient signal of the high-dose levels, where the estimation error is
+      a hundred times below the single-frame target noise, is otherwise
+      buried.  Legitimate exactly because the registration is measured.
+    - ``level_cap``: inference conditioning uses ``min(K, level_cap)`` so a
+      network trained up to a lower level still serves larger bursts.
+    - ``target: clean`` is the synthetic-land oracle (the clean image in
+      frame-0 coordinates): the ceiling any unbiased target can reach.
+    - ``target: multi_frame``: ``targets_per_sample`` raw frames outside the
+      subset, each compared with the prediction warped into ITS coordinates
+      and averaged -- the frame target's unbiasedness with a fraction of its
+      gradient noise (the complement mean resamples its frames and inherits
+      the interpolation blur; this does not).
+    """
+
+    frames_per_burst: int = Field(default=16, ge=2)
+    levels: list[int] = Field(default=[1, 2, 3, 4, 6, 8, 12, 15], min_length=1)
+    target: Literal["frame", "complement_mean", "clean", "multi_frame"] = "frame"
+    # ``multi_frame``: up to this many raw frames outside the subset are read
+    # as targets at once (each through its own warp of the prediction) -- the
+    # gradient noise of the frame target divided by the count, without ever
+    # resampling a target.
+    targets_per_sample: int = Field(default=4, ge=1)
+    level_cap: int | None = Field(default=None, ge=1)
+    align: Literal["registered", "none", "truth"] = "registered"
+    registration: Path | None = None
+    condition_on_level: bool = True
+    warp_margin: int = Field(default=2, ge=0)
+    registration_sigma: float = Field(default=2.0, ge=0.0)
+    predenoised_sigma: float = Field(default=1.0, ge=0.0)
+    registration_radius: int = Field(default=6, ge=1)
+    debias_peak: float | None = Field(default=None, gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_levels(self) -> "FusionConfig":
+        for level in self.levels:
+            if not 1 <= level <= self.frames_per_burst - 1:
+                raise ValueError(
+                    f"fusion.levels entries must be in [1, frames_per_burst - 1] = "
+                    f"[1, {self.frames_per_burst - 1}], got {level}"
+                )
+        if self.align == "registered" and self.registration is None:
+            raise ValueError("fusion.align 'registered' requires fusion.registration (a table path)")
+        if self.align != "registered" and self.registration is not None:
+            raise ValueError("fusion.registration is only used with fusion.align 'registered'")
+        return self
+
+
 class ObjectiveConfig(_StrictModel):
     """What the network sees, what it predicts, and what the loss weighs.
 
@@ -100,6 +180,28 @@ class ObjectiveConfig(_StrictModel):
     lambda_gradient: float = Field(default=4.0, ge=0.0)
     lambda_consistency: float = Field(default=0.0, ge=0.0)
     loss: Literal["l2", "l1"] = "l2"
+    # Burst fusion (registered subset mean in, one raw drifted frame as the
+    # target, dose conditioning); None = the single-frame objectives above.
+    fusion: FusionConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_fusion(self) -> "ObjectiveConfig":
+        if self.fusion is None:
+            return self
+        problems = []
+        if self.representation == "gradient":
+            problems.append("representation must be 'image' or 'hybrid'")
+        if self.target != "noisy":
+            problems.append("target must be 'noisy' (one raw frame of the burst)")
+        if self.gradient_target != "target":
+            problems.append("gradient_target must be 'target'")
+        if self.lambda_consistency > 0.0:
+            problems.append("lambda_consistency is not supported")
+        if self.target_debias_peak is not None:
+            problems.append("target_debias_peak is not supported (use fusion.debias_peak)")
+        if problems:
+            raise ValueError("objective.fusion: " + "; ".join(problems))
+        return self
 
     @model_validator(mode="after")
     def _check_weights(self) -> "ObjectiveConfig":
@@ -247,6 +349,8 @@ class Config(_StrictModel):
         consistency pair from a third frame distinct from both (a shared frame
         would correlate the penalty with the input or target noise).
         """
+        if self.objective.fusion is not None:
+            return self.objective.fusion.frames_per_burst
         required = 1
         if self.objective.target == "noisy":
             required += 1
@@ -261,6 +365,8 @@ class Config(_StrictModel):
 
     @model_validator(mode="after")
     def _check_structure(self) -> "Config":
+        if self.objective.fusion is not None and self.training.defect_augment is not None:
+            raise ValueError("training.defect_augment is not supported with objective.fusion")
         image_size = self.data.image_size
         num_levels = len(self.model.ch_mult)
         divisor = 2 ** (num_levels - 1)
