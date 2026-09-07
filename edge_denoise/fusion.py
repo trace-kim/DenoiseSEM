@@ -624,9 +624,13 @@ class FusionDenoiser:
         stride: int = 48,
     ) -> np.ndarray:
         """Fused image of the first ``count`` frames of a burst, in frame-0
-        coordinates, ``[H, W]`` in [0, 1]."""
+        coordinates, ``[H, W]`` in [0, 1].  At ``count = 1`` the raw anchor
+        is denoised without registration or resampling, even when a trajectory
+        is supplied for a multi-frame comparison."""
         if count < 1 or count > len(frames01):
             raise ValueError(f"count must be in [1, {len(frames01)}], got {count}")
+        if count == 1:
+            return self.denoise_mean(np.asarray(frames01[0], dtype=np.float64), count, stride=stride)
         if trajectory is None:
             trajectory = self.register(frames01[:count], predenoise=predenoise)
         mean01 = self.registered_mean(frames01, count, trajectory)
@@ -645,7 +649,10 @@ class BurstFusionArms:
 
     A retake ``r`` is the burst of ``frames_per_retake`` consecutive replicas
     starting at ``r * frames_per_retake``; every method uses its first ``K``
-    frames, registered once per retake and shared across K.
+    frames for both registration and fusion.  Registrations are cached per
+    retake AND K; later frames cannot supply motion to a smaller-K arm.
+    K = 1 always denoises the untouched anchor, including in truth mode.
+    Truth alignment at K > 1 is an explicitly privileged comparator.
     """
 
     def __init__(
@@ -675,7 +682,7 @@ class BurstFusionArms:
         self.predenoise = predenoise
         self.truth = truth
         self.stride = stride
-        self._trajectories: dict[tuple[int, int], Trajectory] = {}
+        self._trajectories: dict[tuple[int, int, int], Trajectory] = {}
 
     @property
     def method_names(self) -> tuple[str, ...]:
@@ -695,18 +702,22 @@ class BurstFusionArms:
         return [frame.astype(np.float64) / 255.0 for frame in source.frames[start:stop]]
 
     def trajectory(self, source: BurstSource, retake: int, frames01: Sequence[np.ndarray]) -> Trajectory:
-        key = (source.source_index, retake)
+        """Motion estimated from exactly the supplied prefix of one retake."""
+        count = len(frames01)
+        if not 1 <= count <= self.frames_per_retake:
+            raise ValueError(f"frame count must lie in [1, {self.frames_per_retake}], got {count}")
+        key = (source.source_index, retake, count)
         if key not in self._trajectories:
-            if self.align == "none":
-                self._trajectories[key] = Trajectory.identity(len(frames01))
+            if count == 1 or self.align == "none":
+                self._trajectories[key] = Trajectory.identity(count)
             elif self.align == "truth":
                 assert self.truth is not None
                 item = burst_truths(self.truth, source.source_index)[retake]
                 self._trajectories[key] = Trajectory(
-                    position=item.position,
-                    velocity=item.velocity,
-                    raw_position=item.position,
-                    covariance=np.zeros((len(item.position), 2, 2)),
+                    position=item.position[:count],
+                    velocity=item.velocity[:count],
+                    raw_position=item.position[:count],
+                    covariance=np.zeros((count, 2, 2)),
                 )
             else:
                 self._trajectories[key] = self.denoiser.register(frames01, predenoise=self.predenoise)
@@ -715,10 +726,15 @@ class BurstFusionArms:
     def outputs(self, source: BurstSource, retake: int) -> dict[str, np.ndarray]:
         """Every method's full-frame output for one retake."""
         frames01 = self.retake_frames(source, retake)
-        trajectory = self.trajectory(source, retake, frames01)
         result: dict[str, np.ndarray] = {}
         for count in self.counts:
-            mean01 = self.denoiser.registered_mean(frames01, count, trajectory)
+            prefix = frames01[:count]
+            trajectory = self.trajectory(source, retake, prefix)
+            mean01 = (
+                prefix[0].copy()
+                if count == 1
+                else self.denoiser.registered_mean(prefix, count, trajectory)
+            )
             result[f"fuse{count}"] = self.denoiser.denoise_mean(mean01, count, stride=self.stride)
             if self.regavg:
                 result[f"regavg{count}"] = mean01

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 from conftest import write_burst
 
-from burst_diffusion.data import BurstCache
+from burst_diffusion.data import BurstCache, BurstSource
 from burst_diffusion.repeatability import RealizationProvider
 from edge_denoise.config import Config, FusionConfig
 from edge_denoise.drift import (
@@ -426,13 +427,11 @@ def test_fusion_training_runs_checkpoints_and_fuses_a_retake(tmp_path: Path) -> 
     outputs = arms.outputs(source, 1)
     assert set(outputs) == {"fuse1", "fuse3", "regavg1", "regavg3"}
     assert outputs["fuse3"].shape == source.clean.shape and outputs["regavg3"].shape == source.clean.shape
-    # regavg1 is retake 1's first frame (replica 4) brought to its own mid-frame
-    # coordinates (de-sheared by the registered velocity).
-    trajectory = arms._trajectories[(source.source_index, 1)]
+    # A one-frame arm cannot infer scan motion from the other retake frames.
+    trajectory = arms._trajectories[(source.source_index, 1, 1)]
     raw = source.frames[4].astype(float) / 255.0
-    expected, valid = warp_frame(raw, trajectory.position[0], trajectory.velocity[0])
-    np.testing.assert_allclose(outputs["regavg1"][valid], expected[valid], atol=1e-6)
-    np.testing.assert_allclose(outputs["regavg1"][~valid], raw[~valid], atol=1e-6)  # uncovered pixels fall back
+    np.testing.assert_array_equal(trajectory.velocity, np.zeros((1, 2)))
+    np.testing.assert_array_equal(outputs["regavg1"], raw)
     assert denoiser.level_for(3) == 3.0
     burst = arms.burst_arms()
     np.testing.assert_allclose(burst["fuse3"](source, 1), outputs["fuse3"])
@@ -457,6 +456,110 @@ def test_fusion_training_runs_checkpoints_and_fuses_a_retake(tmp_path: Path) -> 
     assert results["methods"]["fuse3@fuse"]["realizations_per_source"] == [2] * len(cache.val_sources)
     assert results["methods"]["avg_of_4"]["realizations_per_source"] == [2] * len(cache.val_sources)
     assert results["methods"]["single_frame"]["realizations_per_source"] == [2] * len(cache.val_sources)
+
+
+@pytest.mark.parametrize("align", ["registered", "none", "truth"])
+def test_one_frame_fusion_arm_never_registers_or_resamples(align: str) -> None:
+    frames = [np.arange(16, dtype=np.uint8).reshape(4, 4), np.full((4, 4), 200, dtype=np.uint8)]
+    source = BurstSource(source_index=7, clean=np.zeros((4, 4), dtype=np.uint8), frames=frames)
+    denoiser = Mock(spec=FusionDenoiser)
+    denoiser.register.side_effect = AssertionError("one frame must not be registered")
+    denoiser.registered_mean.side_effect = AssertionError("the anchor must not be resampled")
+    denoiser.denoise_mean.side_effect = lambda image, count, **kwargs: image.copy()
+    # An empty truth mapping must never be read for the one-frame arm.
+    arms = BurstFusionArms(
+        denoiser, frame_counts=[1], frames_per_retake=2, align=align, truth={} if align == "truth" else None
+    )
+    before = arms.outputs(source, 0)
+    source.frames[1][:] = 0
+    after = arms.outputs(source, 0)
+    for name in ("fuse1", "regavg1"):
+        np.testing.assert_array_equal(before[name], source.frames[0].astype(np.float64) / 255.0)
+        np.testing.assert_array_equal(after[name], before[name])
+    trajectory = arms._trajectories[(7, 0, 1)]
+    np.testing.assert_array_equal(trajectory.position, np.zeros((1, 2)))
+    np.testing.assert_array_equal(trajectory.velocity, np.zeros((1, 2)))
+
+
+def test_fusion_registration_and_outputs_use_only_each_arms_frame_prefix() -> None:
+    def evaluate(last_value: int) -> tuple[BurstFusionArms, dict[str, np.ndarray], Mock]:
+        frames = [np.full((4, 4), value, dtype=np.uint8) for value in (10, 20, 30, last_value)]
+        source = BurstSource(source_index=7, clean=np.zeros((4, 4), dtype=np.uint8), frames=frames)
+        denoiser = Mock(spec=FusionDenoiser)
+
+        def register(prefix, **kwargs):
+            trajectory = Trajectory.identity(len(prefix))
+            trajectory.velocity[:, 0] = prefix[-1].mean()
+            return trajectory
+
+        def registered_mean(prefix, count, trajectory):
+            assert len(prefix) == count == len(trajectory)
+            # Make any motion leaked from the later frames observable in the output.
+            return np.mean(prefix, axis=0) + trajectory.velocity[0, 0]
+
+        denoiser.register.side_effect = register
+        denoiser.registered_mean.side_effect = registered_mean
+        denoiser.denoise_mean.side_effect = lambda image, count, **kwargs: image.copy()
+        arms = BurstFusionArms(denoiser, frame_counts=[1, 2, 4], frames_per_retake=4)
+        outputs = arms.outputs(source, 0)
+        repeated = arms.outputs(source, 0)
+        for name in outputs:
+            np.testing.assert_array_equal(repeated[name], outputs[name])
+        return arms, outputs, denoiser
+
+    arms, before, denoiser = evaluate(40)
+    changed_arms, after, changed_denoiser = evaluate(240)
+    for name in ("fuse1", "regavg1", "fuse2", "regavg2"):
+        np.testing.assert_array_equal(after[name], before[name])
+    assert not np.array_equal(after["fuse4"], before["fuse4"])
+    for count in (1, 2):
+        np.testing.assert_array_equal(
+            arms._trajectories[(7, 0, count)].velocity,
+            changed_arms._trajectories[(7, 0, count)].velocity,
+        )
+    for model in (denoiser, changed_denoiser):
+        assert [len(call.args[0]) for call in model.register.call_args_list] == [2, 4]
+    assert set(arms._trajectories) == {(7, 0, 1), (7, 0, 2), (7, 0, 4)}
+
+
+def test_truth_fusion_arm_limits_privileged_motion_to_selected_frames() -> None:
+    truth = sample_burst_truth(np.random.default_rng(5), 4, DriftParams(), list(range(4)))
+    source = BurstSource(
+        source_index=7, clean=np.zeros((4, 4), dtype=np.uint8),
+        frames=[np.full((4, 4), value, dtype=np.uint8) for value in (10, 20, 30, 40)],
+    )
+    denoiser = Mock(spec=FusionDenoiser)
+    denoiser.denoise_mean.side_effect = lambda image, count, **kwargs: image.copy()
+
+    def registered_mean(prefix, count, trajectory):
+        assert len(prefix) == count == len(trajectory) == 2
+        np.testing.assert_array_equal(trajectory.position, truth.position[:2])
+        np.testing.assert_array_equal(trajectory.velocity, truth.velocity[:2])
+        return np.mean(prefix, axis=0)
+
+    denoiser.registered_mean.side_effect = registered_mean
+    arms = BurstFusionArms(
+        denoiser, frame_counts=[1, 2], frames_per_retake=4, align="truth",
+        truth={"sources": {"7": {"bursts": [truth.to_json()]}}},
+    )
+    outputs = arms.outputs(source, 0)
+    np.testing.assert_array_equal(outputs["regavg1"], source.frames[0].astype(np.float64) / 255.0)
+    np.testing.assert_array_equal(arms._trajectories[(7, 0, 1)].velocity, np.zeros((1, 2)))
+    denoiser.register.assert_not_called()
+    denoiser.registered_mean.assert_called_once()
+
+
+def test_direct_one_frame_fusion_ignores_external_trajectory() -> None:
+    denoiser = Mock(spec=FusionDenoiser)
+    denoiser.register.side_effect = AssertionError("one frame must not be registered")
+    denoiser.registered_mean.side_effect = AssertionError("the anchor must not be resampled")
+    denoiser.denoise_mean.side_effect = lambda image, count, **kwargs: image.copy()
+    anchor = np.arange(16, dtype=np.float64).reshape(4, 4) / 255.0
+    trajectory = Trajectory.identity(2)
+    trajectory.velocity[:] = 2.5
+    for supplied in (None, trajectory):
+        result = FusionDenoiser.fuse(denoiser, [anchor, np.ones_like(anchor)], 1, trajectory=supplied)
+        np.testing.assert_array_equal(result, anchor)
 
 
 def test_repeatability_seed_stride_picks_the_first_frame_of_each_retake(tmp_path: Path) -> None:
