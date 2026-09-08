@@ -1,8 +1,22 @@
-# SEM synthetic 15x100 corpus, stage 1: the Noise2Noise teacher.
+# SEM synthetic 15x100 corpus, stage 1: the Noise2Noise teacher -- NATIVE
+# 512x512 full-frame training, no crops.
 #
-# Same recipe as miic_p10_dedup_n2n.yml (the validated teacher of every ft_*
-# arm), pointed at the 15-pattern / 100-replica dataset produced by
-# noising_pipeline.create_noisy_dataset.
+# The MIIC arms trained on 64-px random crops only because the local GPU
+# could not fit full frames; that was a resource constraint, not part of the
+# method.  Here data.image_size = 512 = the whole frame: the random-crop
+# window degenerates to the identity and every training sample is one full
+# 512x512 frame.  (The 2K originals were downscaled to 512 at dataset
+# creation; at deployment `python -m edge_denoise denoise` covers any larger
+# frame with blended 512-px tiles.)
+#
+# The backbone is re-scaled for 512 the way the original DDPM/DDIM
+# high-resolution recipes scale: two extra pooling levels
+# (ch_mult [1, 1, 2, 2, 4, 4]) keep the bottleneck -- where the U-Net's
+# always-on middle attention runs -- at 16x16, the same attention geometry
+# as the validated 64-px recipe.  Without them the bottleneck would sit at
+# 64x64 and every attention matrix would hold 4096^2 entries.  This backbone
+# is therefore NOT weight-compatible with the 64-px MIIC checkpoints (a
+# warm start from one fails loudly, by design).
 #
 # data.dataset_dir is the DATASET ROOT: the folder that contains
 # manifest.jsonl plus the clean/ and noisy/ subfolders -- the parent of both
@@ -13,11 +27,12 @@
 #     clean/00000.png ...                  (the 15 patterns)
 #     noisy/00000_00000.png ...            (100 replicas per pattern)
 #
-# data.image_size is the TRAINING CROP SIZE, not the image resolution: the
-# full 512x512 frames are loaded whole and training draws random 64x64
-# windows from them -- exactly how every validated MIIC arm (frames also
-# 512x512) was trained.  Inference denoises whole frames of any size by
-# blended tiling (`python -m edge_denoise denoise`, full-frame by default).
+# training.batch_size sizes the card.  Measured (fp32, this backbone, dev
+# RTX 4060 Ti): a train step peaks at ~0.3 + 5.3 x batch_size GiB and runs
+# ~0.33 s/sample -- batch 2 ~ 11 GiB (16 GB card), batch 4 ~ 22 GiB (24 GB
+# card, the default here), batch 8 ~ 43 GiB (48 GB+).  Raise it to fill the
+# VRAM.  Milestone checkpoints are ~455 MB each (28.4 M params + EMA +
+# Adam); checkpoint_every 5000 keeps 6 plus the rolling latest.
 #
 # With 15 content groups and 0.1/0.1 fractions the split is 11 train / 2 val
 # / 2 test patterns; the test patterns stay untouched during development
@@ -26,7 +41,7 @@
 #   python -m edge_denoise train --config edge_denoise/configs/sem_synth15_n2n.yml
 data:
   dataset_dir: data/SEM-synth-15x100
-  image_size: 64
+  image_size: 512
   channels: 1
   val_fraction: 0.1
   test_fraction: 0.1
@@ -40,14 +55,14 @@ objective:
   loss: l2
 model:
   ch: 64
-  ch_mult: [1, 2, 2, 2]
+  ch_mult: [1, 1, 2, 2, 4, 4]
   num_res_blocks: 2
   attn_resolutions: [16]
   dropout: 0.0
   resamp_with_conv: true
 training:
   run_dir: runs/edge_denoise/sem_synth15_n2n
-  batch_size: 8
+  batch_size: 4
   max_steps: 30000
   lr: 0.0002
   grad_clip: 1.0
@@ -57,5 +72,5 @@ training:
   device: auto
   log_every: 50
   val_every: 1000
-  val_images: 8
-  checkpoint_every: 2000
+  val_images: 4
+  checkpoint_every: 5000

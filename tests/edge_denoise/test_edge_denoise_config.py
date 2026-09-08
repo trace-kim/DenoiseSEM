@@ -144,3 +144,25 @@ def test_noisy_mean_target_validates_and_needs_two_replicas() -> None:
     assert config.min_replicas == 2
     raw["objective"]["lambda_consistency"] = 1.0
     assert Config.model_validate(raw).min_replicas == 2
+
+
+def test_shipped_sem_synth15_configs_train_native_512_full_frames() -> None:
+    """The production 512 configs must stay structurally valid AND buildable:
+    full-frame resolution, a bottleneck small enough for the always-on middle
+    attention (16x16 at six levels), and a stage-1 -> stage-2 warm start with
+    matching state dicts.  Regression for the 2026-09-08 config review."""
+    from edge_denoise.model import build_model
+
+    configs_dir = Path(__file__).resolve().parents[2] / "edge_denoise" / "configs"
+    teacher = load_config(configs_dir / "sem_synth15_n2n.yml")
+    student = load_config(configs_dir / "sem_synth15_ft_avgfull_consist.yml")
+    for config in (teacher, student):
+        assert config.data.image_size == 512  # native full frames, not crops
+        levels = len(config.model.ch_mult)
+        assert config.data.image_size >> (levels - 1) == 16  # bottleneck = attn geometry
+    assert student.training.init_checkpoint is not None
+    assert student.model == teacher.model  # warm start needs identical backbones
+    teacher_state = build_model(teacher).state_dict()
+    student_state = build_model(student).state_dict()
+    assert set(teacher_state) == set(student_state)
+    assert all(teacher_state[k].shape == student_state[k].shape for k in teacher_state)

@@ -246,10 +246,12 @@ val vs 0.477 for the matched control). The `sem_synth15_*` configs apply it to
 the 15-pattern × 100-replica synthetic corpus produced by
 `noising_pipeline.create_noisy_dataset`; that output folder
 (`manifest.jsonl` + `clean/` + `noisy/`) is loaded as-is — no conversion step.
-The configs' `image_size: 64` is the **training crop size**, not the image
-resolution: the 512×512 frames are loaded whole and training draws random
-64-px windows from them (the same protocol as every validated MIIC arm, whose
-frames are also 512×512); inference denoises whole frames by blended tiling.
+These configs train **native full-frame 512×512** (`image_size: 512`; the
+sample window degenerates to the whole frame — the MIIC arms' 64-px
+random-crop protocol was a local-GPU constraint, not part of the method).
+The backbone carries two extra pooling levels (`ch_mult [1, 1, 2, 2, 4, 4]`)
+so the U-Net's always-on bottleneck attention stays at 16×16 at the new
+resolution; it is not weight-compatible with the 64-px MIIC checkpoints.
 Bursts are a training-time device only; inference stays single-frame.
 
 ```bash
@@ -282,12 +284,21 @@ tensorboard --logdir runs/edge_denoise   # val/psnr, val/consistency_sigma
 
 # Deployment checkpoint (EMA weights inside; all eval/inference tools use them):
 #   runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt
-# Denoises the WHOLE 512x512 frame (blended 64-px tiles) and writes it at
-# full size; --center-crop instead processes one 64-px center tile.
+# A 512x512 measurement is denoised in ONE full-frame pass (the model's
+# native size); larger frames -- e.g. the 2K originals -- are covered with
+# blended 512-px tiles automatically.
 python -m edge_denoise denoise \
   --checkpoint runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt \
-  --input <noisy_512x512.png> --out tmp/denoise
+  --input <noisy.png> --out tmp/denoise
 ```
+
+Sizing, measured in fp32 on the dev RTX 4060 Ti: a stage-1 step peaks at
+~0.3 + 5.3 × batch_size GiB (~0.33 s/sample); stage 2 runs two forward
+passes per step, ~0.3 + 10.4 × batch_size GiB (~0.62 s/batch-unit). The
+shipped defaults (batch 4 / batch 2) target a 24 GB card and cost roughly
+11 h + 3.5 h at dev-GPU speed — halve the batches for a 16 GB card, raise
+them to fill a bigger one (`training.batch_size` is the only knob).
+Milestone checkpoints are ~455 MB each.
 
 Touching `runs/edge_denoise/<run>/stop` stops a run gracefully at the next
 step; `--resume` continues it exactly. On a shared multi-GPU box pin the run
