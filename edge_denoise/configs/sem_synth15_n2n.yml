@@ -1,0 +1,46 @@
+# SEM synthetic 15x100 corpus, stage 1: the Noise2Noise teacher.
+#
+# Same recipe as miic_p10_dedup_n2n.yml (the validated teacher of every ft_*
+# arm), pointed at the 15-pattern / 100-replica dataset produced by
+# noising_pipeline.create_noisy_dataset.  `data.dataset_dir` is the folder
+# that holds manifest.jsonl + clean/ + noisy/ (or its parent) -- edit it if
+# the dataset lives elsewhere.  With 15 content groups and 0.1/0.1 fractions
+# the split is 11 train / 2 val / 2 test patterns; the test patterns stay
+# untouched during development (repo leakage discipline).
+#
+#   python -m edge_denoise train --config edge_denoise/configs/sem_synth15_n2n.yml
+data:
+  dataset_dir: data/SEM-synth-15x100
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  lambda_image: 1.0
+  lambda_gradient: 0.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_synth15_n2n
+  batch_size: 8
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000

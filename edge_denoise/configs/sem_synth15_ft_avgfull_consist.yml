@@ -1,0 +1,52 @@
+# SEM synthetic 15x100 corpus, stage 2: the production arm.
+#
+# miic_p10_dedup_ft_avgfull_consist.yml (the best committed single-frame
+# precision arm: CD 3sigma scene 0.368 px on MIIC val vs 0.477 for the
+# ft_noisy_b16 control) retargeted to the 15-pattern / 100-replica dataset.
+# Both fidelity terms chase the leave-one-out mean of the OTHER 99 replicas
+# (~99x less target noise than a fresh frame, still unbiased because the
+# input's own noise never enters it) and lambda_consistency adds the direct
+# repeatability penalty |f(y_a) - f(y_b)|^2 on two independent frames.
+# Inference stays single-frame; the burst is a training-time device only.
+#
+# Warm start: stage 1's EMA weights via training.init_checkpoint -- run
+# sem_synth15_n2n.yml to completion first.
+#
+#   python -m edge_denoise train --config edge_denoise/configs/sem_synth15_ft_avgfull_consist.yml
+data:
+  dataset_dir: data/SEM-synth-15x100
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy_mean
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 1.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_synth15_ft_avgfull_consist
+  init_checkpoint: runs/edge_denoise/sem_synth15_n2n/ckpt_latest.pt
+  batch_size: 8
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000
