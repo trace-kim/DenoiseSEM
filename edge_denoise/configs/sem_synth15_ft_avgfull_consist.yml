@@ -12,6 +12,11 @@
 # Warm start: stage 1's EMA weights via training.init_checkpoint -- run
 # sem_synth15_n2n.yml to completion first.
 #
+# The data block mirrors sem_synth15_n2n.yml; see that header for the
+# dataset-root layout (dataset_dir = the folder holding manifest.jsonl +
+# clean/ + noisy/) and why image_size is the 64-px TRAINING CROP drawn from
+# the full 512x512 frames, not the image resolution.
+#
 #   python -m edge_denoise train --config edge_denoise/configs/sem_synth15_ft_avgfull_consist.yml
 data:
   dataset_dir: data/SEM-synth-15x100

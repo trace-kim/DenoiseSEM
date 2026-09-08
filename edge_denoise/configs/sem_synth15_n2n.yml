@@ -2,11 +2,26 @@
 #
 # Same recipe as miic_p10_dedup_n2n.yml (the validated teacher of every ft_*
 # arm), pointed at the 15-pattern / 100-replica dataset produced by
-# noising_pipeline.create_noisy_dataset.  `data.dataset_dir` is the folder
-# that holds manifest.jsonl + clean/ + noisy/ (or its parent) -- edit it if
-# the dataset lives elsewhere.  With 15 content groups and 0.1/0.1 fractions
-# the split is 11 train / 2 val / 2 test patterns; the test patterns stay
-# untouched during development (repo leakage discipline).
+# noising_pipeline.create_noisy_dataset.
+#
+# data.dataset_dir is the DATASET ROOT: the folder that contains
+# manifest.jsonl plus the clean/ and noisy/ subfolders -- the parent of both
+# image folders, not either one.  Edit it (or move the dataset) so this holds:
+#
+#   data/SEM-synth-15x100/                 <- data.dataset_dir
+#     manifest.jsonl
+#     clean/00000.png ...                  (the 15 patterns)
+#     noisy/00000_00000.png ...            (100 replicas per pattern)
+#
+# data.image_size is the TRAINING CROP SIZE, not the image resolution: the
+# full 512x512 frames are loaded whole and training draws random 64x64
+# windows from them -- exactly how every validated MIIC arm (frames also
+# 512x512) was trained.  Inference denoises whole frames of any size by
+# blended tiling (`python -m edge_denoise denoise`, full-frame by default).
+#
+# With 15 content groups and 0.1/0.1 fractions the split is 11 train / 2 val
+# / 2 test patterns; the test patterns stay untouched during development
+# (repo leakage discipline).
 #
 #   python -m edge_denoise train --config edge_denoise/configs/sem_synth15_n2n.yml
 data:

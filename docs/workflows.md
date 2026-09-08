@@ -201,7 +201,8 @@ python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_hybrid
 python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_grad.yml
 python -m edge_denoise train --config edge_denoise/configs/miic_p10_dedup_n2n.yml
 
-# Denoise one measurement (single deterministic forward pass)
+# Denoise one measurement (the whole frame, via blended overlapping tiles;
+# --center-crop processes a single training-resolution tile instead)
 python -m edge_denoise denoise `
   --checkpoint runs/edge_denoise/miic_p10_dedup_hybrid/ckpt_latest.pt `
   --dataset data/MIIC-burst-p10-dedup --source-index 0 --out tmp/denoise
@@ -245,6 +246,10 @@ val vs 0.477 for the matched control). The `sem_synth15_*` configs apply it to
 the 15-pattern × 100-replica synthetic corpus produced by
 `noising_pipeline.create_noisy_dataset`; that output folder
 (`manifest.jsonl` + `clean/` + `noisy/`) is loaded as-is — no conversion step.
+The configs' `image_size: 64` is the **training crop size**, not the image
+resolution: the 512×512 frames are loaded whole and training draws random
+64-px windows from them (the same protocol as every validated MIIC arm, whose
+frames are also 512×512); inference denoises whole frames by blended tiling.
 Bursts are a training-time device only; inference stays single-frame.
 
 ```bash
@@ -254,8 +259,14 @@ python -m venv .venv && source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -c "import torch; print(torch.cuda.is_available())"   # must print True
 
-# Place the create_noisy_dataset output at data/SEM-synth-15x100
-# (the folder holding manifest.jsonl), or edit data.dataset_dir in both configs.
+# Place the create_noisy_dataset output at data/SEM-synth-15x100, or edit
+# data.dataset_dir in both configs.  The path is the DATASET ROOT -- the
+# folder that contains manifest.jsonl plus the clean/ and noisy/ subfolders
+# (the parent of both image folders, not either one):
+#   data/SEM-synth-15x100/
+#     manifest.jsonl
+#     clean/00000.png ...                (the 15 patterns)
+#     noisy/00000_00000.png ...          (100 replicas per pattern)
 
 # Optional sanity check: clean / single-frame / running-average grid
 python -m burst_diffusion preview --dataset data/SEM-synth-15x100 \
@@ -271,9 +282,11 @@ tensorboard --logdir runs/edge_denoise   # val/psnr, val/consistency_sigma
 
 # Deployment checkpoint (EMA weights inside; all eval/inference tools use them):
 #   runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt
+# Denoises the WHOLE 512x512 frame (blended 64-px tiles) and writes it at
+# full size; --center-crop instead processes one 64-px center tile.
 python -m edge_denoise denoise \
   --checkpoint runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt \
-  --input <noisy.png> --out tmp/denoise
+  --input <noisy_512x512.png> --out tmp/denoise
 ```
 
 Touching `runs/edge_denoise/<run>/stop` stops a run gracefully at the next
