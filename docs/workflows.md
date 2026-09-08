@@ -236,6 +236,56 @@ All burst arms passed to one `repeatability` call must share one
 Docs: [method & feasibility study](../edge_denoise/docs/edge_denoise_method.md) ·
 [experiment report](../edge_denoise/docs/edge_denoise_report.md)
 
+### 4b.1 Production training on a remote Linux server (two-stage recipe)
+
+The best single-frame arm on record is the two-stage recipe — Noise2Noise
+teacher (30k steps), then the `ft_avgfull_consist` fine-tune (10k steps,
+leave-one-out-mean target + consistency penalty; CD 3σ scene 0.368 px on MIIC
+val vs 0.477 for the matched control). The `sem_synth15_*` configs apply it to
+the 15-pattern × 100-replica synthetic corpus produced by
+`noising_pipeline.create_noisy_dataset`; that output folder
+(`manifest.jsonl` + `clean/` + `noisy/`) is loaded as-is — no conversion step.
+Bursts are a training-time device only; inference stays single-frame.
+
+```bash
+# One-time setup
+git clone <repo-url> DenoiseSEM && cd DenoiseSEM
+python -m venv .venv && source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -c "import torch; print(torch.cuda.is_available())"   # must print True
+
+# Place the create_noisy_dataset output at data/SEM-synth-15x100
+# (the folder holding manifest.jsonl), or edit data.dataset_dir in both configs.
+
+# Optional sanity check: clean / single-frame / running-average grid
+python -m burst_diffusion preview --dataset data/SEM-synth-15x100 \
+  --source-index 0 --out tmp/preview.png
+
+# Stage 1 (teacher) then stage 2 (production arm; warm-starts from stage 1)
+nohup bash -c '
+  python -m edge_denoise train --config edge_denoise/configs/sem_synth15_n2n.yml &&
+  python -m edge_denoise train --config edge_denoise/configs/sem_synth15_ft_avgfull_consist.yml
+' > train.log 2>&1 &
+
+tensorboard --logdir runs/edge_denoise   # val/psnr, val/consistency_sigma
+
+# Deployment checkpoint (EMA weights inside; all eval/inference tools use them):
+#   runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt
+python -m edge_denoise denoise \
+  --checkpoint runs/edge_denoise/sem_synth15_ft_avgfull_consist/ckpt_latest.pt \
+  --input <noisy.png> --out tmp/denoise
+```
+
+Touching `runs/edge_denoise/<run>/stop` stops a run gracefully at the next
+step; `--resume` continues it exactly. On a shared multi-GPU box pin the run
+with `CUDA_VISIBLE_DEVICES=<n>`. The 15 patterns split 11 train / 2 val /
+2 test by content group (`split_seed: 2019`); the test patterns are locked —
+report on them once, only for a frozen method. If the corpus noise is clipped
+Poisson with a known peak, the better-accuracy variant is one config knob:
+`objective.target_debias_peak: <peak>` (the `avgdebias` objective). `runctl`
+orchestrates only the `ddim` flow, so this pipeline runs through its own CLI
+as above.
+
 ---
 
 ## 5. Workflow C — `ddim`: the original DDIM entry point
