@@ -40,6 +40,45 @@ def test_denoiser_is_deterministic(tmp_path: Path) -> None:
     assert torch.equal(denoiser.denoise(frames), denoiser.denoise(frames))
 
 
+def test_denoise_full_preserves_frame_size(tmp_path: Path) -> None:
+    checkpoint = _train_checkpoint(tmp_path)
+    denoiser = Denoiser.from_checkpoint(checkpoint, device="cpu")
+    frame01 = np.random.default_rng(0).random((40, 33))
+    out = denoiser.denoise_full(frame01, stride=8)
+    assert out.shape == (40, 33)
+    assert np.isfinite(out).all() and out.min() >= 0.0 and out.max() <= 1.0
+
+
+def test_denoise_full_at_training_resolution_matches_the_direct_pass(tmp_path: Path) -> None:
+    """A frame exactly at the training resolution is one tile, so the blended
+    path must reproduce the plain forward pass (window weights cancel)."""
+    checkpoint = _train_checkpoint(tmp_path)
+    denoiser = Denoiser.from_checkpoint(checkpoint, device="cpu")
+    frame01 = np.random.default_rng(1).random((16, 16))
+    direct = denoiser.denoise(
+        torch.from_numpy((frame01 * 2.0 - 1.0)[None, None]).to(torch.float32)
+    )
+    direct01 = (direct.numpy()[0, 0] + 1.0) / 2.0
+    assert np.allclose(denoiser.denoise_full(frame01), direct01, atol=1e-6)
+
+
+def test_load_measurement01_reads_8_and_16_bit_whole_frames(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from edge_denoise.infer import load_measurement01
+
+    eight = tmp_path / "m8.png"
+    Image.fromarray(np.array([[0, 128], [255, 64]], dtype=np.uint8)).save(eight)
+    arr8 = load_measurement01(eight)
+    assert arr8.shape == (2, 2)  # whole frame, no crop
+    assert arr8[1, 0] == 1.0 and abs(arr8[0, 1] - 128.0 / 255.0) < 1e-12
+
+    sixteen = tmp_path / "m16.png"
+    Image.fromarray(np.array([[0, 32768], [65535, 257]], dtype=np.uint16)).save(sixteen)
+    arr16 = load_measurement01(sixteen)
+    assert arr16[1, 0] == 1.0 and abs(arr16[0, 1] - 32768.0 / 65535.0) < 1e-12
+
+
 def test_denoise01_preserves_format_and_order(tmp_path: Path) -> None:
     checkpoint = _train_checkpoint(tmp_path)
     denoiser = Denoiser.from_checkpoint(checkpoint, device="cpu")

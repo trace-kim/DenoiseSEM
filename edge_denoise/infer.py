@@ -2,9 +2,13 @@
 
 The estimator is deterministic by construction -- no sampler, no injected
 noise -- so repeated calls on the same frame return the same image and every
-bit of output variation is transmitted input noise.  Inputs must be at the
-training resolution (crops only, never resizes: resampling a noisy frame
-partially denoises it and changes the statistics the model was trained on).
+bit of output variation is transmitted input noise.  :meth:`Denoiser.denoise`
+takes batches at the training resolution; a measurement of any larger size
+(e.g. a full 512x512 frame) goes through :meth:`Denoiser.denoise_full`, which
+covers it with overlapping training-resolution tiles and blends them -- the
+same full-frame protocol every study evaluation uses.  Nothing is ever
+resized: resampling a noisy frame partially denoises it and changes the
+statistics the model was trained on.
 """
 
 from __future__ import annotations
@@ -13,12 +17,30 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 from burst_diffusion.ema import EMAHelper
 
 from .config import Config
+from .distill import denoise_full_frame
 from .model import EdgeDenoiser, build_model
 from .train import load_checkpoint, resolve_device
+
+_SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B", "I;16N", "I")
+
+
+def load_measurement01(path: str | Path) -> np.ndarray:
+    """Load a grayscale measurement as a full ``[H, W]`` float64 array in [0, 1].
+
+    The whole frame, uncropped and unresized; 16-bit images are scaled into
+    the same [0, 1] range the 8-bit training data occupies (matching
+    ``BurstCache``'s 16-bit handling).
+    """
+    with Image.open(Path(path)) as image:
+        if image.mode in _SIXTEEN_BIT_MODES:
+            array = np.asarray(image, dtype=np.float64)
+            return np.clip(array / 65535.0, 0.0, 1.0)
+        return np.asarray(image.convert("L"), dtype=np.float64) / 255.0
 
 
 class Denoiser:
@@ -65,6 +87,25 @@ class Denoiser:
             batch = frames.to(device=self.device, dtype=torch.float32)
             denoised = self.model.predict_image(batch)
         return denoised.clamp(-1.0, 1.0).cpu()
+
+    def denoise_full(
+        self, frame01: np.ndarray, *, stride: int = 48, tile_batch: int = 64
+    ) -> np.ndarray:
+        """Denoise a full ``[H, W]`` float frame in [0, 1] of any size >= the
+        training resolution; returns the same format.
+
+        The backbone carries attention blocks whose placement is fixed by the
+        training resolution, so a larger frame cannot go through in one pass;
+        it is covered with overlapping training-resolution tiles blended by
+        the shared windowed blender (:func:`edge_denoise.distill.denoise_full_frame`).
+        """
+        return denoise_full_frame(
+            self.denoise,
+            np.asarray(frame01, dtype=np.float64),
+            tile=self.image_size,
+            stride=min(stride, self.image_size),
+            tile_batch=tile_batch,
+        )
 
     def denoise01(self, frames01: list[np.ndarray], *, max_batch: int = 10) -> list[np.ndarray]:
         """Denoise a list of ``[H, W, C]`` float arrays in [0, 1] (the exchange

@@ -171,19 +171,35 @@ def distill_targets(
 def denoise(
     checkpoint: Path = typer.Option(..., help="Checkpoint (.pt) to denoise with."),
     out: Path = typer.Option(..., help="Output directory for PNGs."),
-    input: Optional[Path] = typer.Option(None, help="A noisy measurement image (center-cropped)."),
+    input: Optional[Path] = typer.Option(
+        None, help="A noisy measurement image of any size >= the training crop."
+    ),
     dataset: Optional[Path] = typer.Option(None, help="Burst dataset to pull a frame from."),
     source_index: int = typer.Option(0, min=0, help="Dataset source to denoise."),
     replica: int = typer.Option(0, min=0, help="Which burst frame is the measurement."),
+    full: bool = typer.Option(
+        True,
+        "--full/--center-crop",
+        help=(
+            "Denoise the WHOLE frame with blended overlapping tiles (default); "
+            "--center-crop processes a single training-resolution center tile instead."
+        ),
+    ),
+    stride: int = typer.Option(
+        48, min=1, help="Tile stride in pixels for the full frame (tile size = the training crop)."
+    ),
+    tile_batch: int = typer.Option(64, min=1, help="Tiles per forward pass for the full frame."),
     ema: bool = typer.Option(True, "--ema/--no-ema", help="Use the EMA weights."),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
-    """Denoise one measurement with a single deterministic forward pass."""
+    """Denoise one measurement deterministically (the whole frame by default)."""
+    import torch
+
     from burst_diffusion.data import resolve_burst_dir
     from burst_diffusion.metrics import psnr
     from burst_diffusion.sample import load_input_image, save_model_image
 
-    from .infer import Denoiser
+    from .infer import Denoiser, load_measurement01
 
     if (input is None) == (dataset is None):
         raise typer.BadParameter("provide exactly one of --input or --dataset")
@@ -204,16 +220,32 @@ def denoise(
         clean_path = candidate if candidate.is_file() else None
         stem = f"src{source_index:05d}_rep{replica:05d}"
 
-    measurement = load_input_image(measurement_path, image_size=image_size, channels=channels)
-    denoised = denoiser.denoise(measurement)
-    save_model_image(measurement[0], out / f"{stem}_input.png")
-    save_model_image(denoised[0], out / f"{stem}_denoised.png")
+    def to_model(frame01: "np.ndarray") -> torch.Tensor:  # [H, W] in [0, 1] -> [1, H, W] in [-1, 1]
+        return torch.from_numpy(frame01 * 2.0 - 1.0).to(torch.float32)[None]
+
+    if full:
+        frame01 = load_measurement01(measurement_path)
+        denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch)
+        measurement_chw, denoised_chw = to_model(frame01), to_model(denoised01)
+        typer.echo(
+            f"denoised the full {frame01.shape[0]}x{frame01.shape[1]} frame "
+            f"(tile {image_size}, stride {min(stride, image_size)})"
+        )
+    else:
+        measurement = load_input_image(measurement_path, image_size=image_size, channels=channels)
+        measurement_chw = measurement[0]
+        denoised_chw = denoiser.denoise(measurement)[0]
+    save_model_image(measurement_chw, out / f"{stem}_input.png")
+    save_model_image(denoised_chw, out / f"{stem}_denoised.png")
     typer.echo(f"wrote 2 PNG(s) to {out}")
 
     if clean_path is not None:
-        clean = load_input_image(clean_path, image_size=image_size, channels=channels)
-        clean01 = ((clean[0] + 1) / 2).numpy().transpose(1, 2, 0)
-        for label, tensor in (("input", measurement[0]), ("denoised", denoised[0])):
+        if full:
+            clean_chw = to_model(load_measurement01(clean_path))
+        else:
+            clean_chw = load_input_image(clean_path, image_size=image_size, channels=channels)[0]
+        clean01 = ((clean_chw + 1) / 2).numpy().transpose(1, 2, 0)
+        for label, tensor in (("input", measurement_chw), ("denoised", denoised_chw)):
             value01 = ((tensor.clamp(-1, 1) + 1) / 2).numpy().transpose(1, 2, 0)
             typer.echo(f"PSNR vs clean [{label}]: {psnr(clean01, value01):.2f} dB")
 
