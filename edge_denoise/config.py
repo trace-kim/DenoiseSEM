@@ -251,6 +251,7 @@ class ModelConfig(_StrictModel):
     ch: int = Field(default=64, ge=4)
     ch_mult: list[int] = Field(default=[1, 2, 2, 2], min_length=1)
     num_res_blocks: int = Field(default=2, ge=1)
+    attention: bool = True  # includes the bottleneck attention block
     attn_resolutions: list[int] = Field(default=[16])
     dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
     resamp_with_conv: bool = True
@@ -385,7 +386,7 @@ class Config(_StrictModel):
                 f"model.num_groups ({groups}) must divide model.ch ({self.model.ch})"
             )
         level_resolutions = {image_size >> level for level in range(num_levels)}
-        for resolution in self.model.attn_resolutions:
+        for resolution in self.model.attn_resolutions if self.model.attention else ():
             if resolution not in level_resolutions:
                 raise ValueError(
                     f"model.attn_resolutions entry {resolution} is not one of the "

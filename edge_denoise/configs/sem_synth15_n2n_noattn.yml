@@ -1,0 +1,40 @@
+# Copy of sem_synth15_n2n.yml; only attention and the output directory differ.
+# Point dataset_dir at the SAME stored noisy dataset used for the attention run.
+# Train from scratch, then use your usual inference command on the L/S image.
+# python -m edge_denoise train --config edge_denoise/configs/sem_synth15_n2n_noattn.yml
+data:
+  dataset_dir: data/SEM-synth-15x100
+  image_size: 512
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  lambda_image: 1.0
+  lambda_gradient: 0.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 1, 2, 2, 4, 4]
+  num_res_blocks: 2
+  attention: false
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_synth15_n2n_noattn
+  batch_size: 4
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 4
+  checkpoint_every: 5000

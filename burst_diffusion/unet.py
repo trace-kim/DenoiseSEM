@@ -12,10 +12,12 @@ package. Differences from the original, kept intentionally small:
 - Shape checks raise ``ValueError`` instead of ``assert`` (message survives
   ``python -O`` and is testable).
 
-Everything else -- sinusoidal timestep embedding (accepts arbitrary float t,
+With default options, everything else -- sinusoidal timestep embedding (accepts arbitrary float t,
 which matters because our t values live in {1..T} for small T), ResNet blocks,
 single-head attention, up/downsampling, and the always-on middle attention --
 matches the original computation exactly.
+``attention=False`` removes all attention, including the middle block,
+without altering the default architecture.
 """
 
 from __future__ import annotations
@@ -194,6 +196,7 @@ class UNet(nn.Module):
         resamp_with_conv: bool,
         resolution: int,
         num_groups: int | None = None,
+        attention: bool = True,
     ):
         super().__init__()
         ch_mult = tuple(ch_mult)
@@ -243,7 +246,7 @@ class UNet(nn.Module):
                     )
                 )
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                if attention and curr_res in attn_resolutions:
                     attn.append(AttnBlock(block_in, num_groups))
             down = nn.Module()
             down.block = block
@@ -262,7 +265,7 @@ class UNet(nn.Module):
             dropout=dropout,
             num_groups=num_groups,
         )
-        self.mid.attn_1 = AttnBlock(block_in, num_groups)
+        self.mid.attn_1 = AttnBlock(block_in, num_groups) if attention else nn.Identity()
         self.mid.block_2 = ResnetBlock(
             in_channels=block_in,
             out_channels=block_in,
@@ -291,7 +294,7 @@ class UNet(nn.Module):
                     )
                 )
                 block_in = block_out
-                if curr_res in attn_resolutions:
+                if attention and curr_res in attn_resolutions:
                     attn.append(AttnBlock(block_in, num_groups))
             up = nn.Module()
             up.block = block

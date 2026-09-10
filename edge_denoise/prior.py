@@ -221,6 +221,7 @@ def build_prior_unet(config: PriorConfig) -> UNet:
         resamp_with_conv=config.model.resamp_with_conv,
         resolution=config.data.image_size,
         num_groups=config.model.effective_num_groups,
+        attention=config.model.attention,
     )
 
 

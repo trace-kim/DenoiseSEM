@@ -62,6 +62,7 @@ class EdgeDenoiser(nn.Module):
             resamp_with_conv=config.model.resamp_with_conv,
             resolution=config.data.image_size,
             num_groups=config.model.effective_num_groups,
+            attention=config.model.attention,
         )
 
     def forward(self, frames: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:

@@ -29,6 +29,39 @@ CHECKPOINT_KEYS = {
 }
 
 
+@pytest.mark.parametrize("attention", [True, False])
+def test_attention_setting_survives_training_and_inference(tmp_path: Path, monkeypatch, attention: bool) -> None:
+    from burst_diffusion.unet import AttnBlock
+    from edge_denoise.infer import Denoiser
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    dataset = write_burst(tmp_path / "data")
+    raw = make_config(dataset, tmp_path / "run", representation="image", max_steps=1).model_dump(mode="json")
+    raw["model"].update(attention=attention, attn_resolutions=[8, 16])
+    trainer = Trainer(Config.model_validate(raw))
+    checkpoint = trainer.run()
+    denoiser = Denoiser.from_checkpoint(checkpoint, device="cpu")
+    for model in (trainer.model, denoiser.model):
+        assert any(isinstance(layer, AttnBlock) for layer in model.modules()) == attention
+    prediction = denoiser.denoise(torch.zeros(1, 1, 16, 16))
+    assert prediction.shape == (1, 1, 16, 16)
+    assert torch.isfinite(prediction).all()
+
+
+def test_no_attention_recipe_changes_only_attention_and_run_dir() -> None:
+    from edge_denoise.config import load_config
+
+    directory = Path(__file__).resolve().parents[2] / "edge_denoise/configs"
+    baseline = load_config(directory / "sem_synth15_n2n.yml").model_dump()
+    experiment = load_config(directory / "sem_synth15_n2n_noattn.yml").model_dump()
+    assert baseline["model"]["attention"] is True
+    assert experiment["model"]["attention"] is False
+    assert baseline["training"]["run_dir"] != experiment["training"]["run_dir"]
+    experiment["model"]["attention"] = baseline["model"]["attention"]
+    experiment["training"]["run_dir"] = baseline["training"]["run_dir"]
+    assert experiment == baseline
+
+
 @pytest.mark.parametrize("representation", ["image", "gradient", "hybrid"])
 def test_training_runs_and_checkpoints_for_every_representation(
     tmp_path: Path, representation: str
