@@ -23,9 +23,9 @@ PROVENANCE_NAME = "provenance.json"
 SCHEMA_VERSION = 1
 
 
-def dataset_fingerprint(config: Config) -> dict:
-    """Content digest of the dataset's clean sources plus split composition."""
-    cache = BurstCache(
+def dataset_fingerprint(config: Config, *, cache: BurstCache | None = None) -> dict:
+    """Content identity and fixed split composition for synthetic or real data."""
+    cache = cache if cache is not None else BurstCache(
         config.data.dataset_dir,
         channels=config.data.channels,
         min_replicas=1,
@@ -34,6 +34,15 @@ def dataset_fingerprint(config: Config) -> dict:
         test_fraction=config.data.test_fraction,
         split_seed=config.data.split_seed,
     )
+    if cache.real_metadata is not None:
+        return {
+            "kind": "real_sem", "manifest_sha256": cache.real_fingerprint,
+            "sources": len(cache.all_sources),
+            "normalization": cache.real_metadata["normalization"],
+            "registration": cache.real_metadata["registration"],
+            "split": {split: [source.source_index for source in cache.sources_for_split(split)]
+                      for split in ("train", "val", "test")},
+        }
     keys = sorted(content_key(source.clean) for source in cache.all_sources)
     digest = hashlib.sha256("".join(keys).encode("ascii")).hexdigest()
     return {
@@ -76,6 +85,7 @@ def write_provenance(
     checkpoint: str | Path | None = None,
     command: str | None = None,
     repo: str | Path | None = None,
+    cache: BurstCache | None = None,
 ) -> Path:
     """Write ``provenance.json`` into ``run_dir``; returns its path."""
     destination = Path(run_dir)
@@ -98,7 +108,7 @@ def write_provenance(
             json.dumps(config_json, sort_keys=True).encode("utf-8")
         ).hexdigest(),
         "git": git_state(repo_root),
-        "dataset": dataset_fingerprint(config),
+        "dataset": dataset_fingerprint(config, cache=cache),
         "environment": environment_state(),
         "checkpoint": checkpoint_record,
         "init_checkpoint": init_record,

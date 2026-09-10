@@ -37,9 +37,16 @@ class DataConfig(_StrictModel):
     val_fraction: float = Field(default=0.1, ge=0.0, lt=1.0)
     test_fraction: float = Field(default=0.0, ge=0.0, lt=1.0)
     split_seed: int = Field(default=2019, ge=0)
+    # Filled from a prepared real dataset and persisted in its checkpoint.
+    black_level: float | None = Field(default=None, allow_inf_nan=False)
+    white_level: float | None = Field(default=None, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _check_holdout_fractions(self) -> "DataConfig":
+        if (self.black_level is None) != (self.white_level is None):
+            raise ValueError("provide both data.black_level and data.white_level, or neither")
+        if self.white_level is not None and self.white_level <= self.black_level:
+            raise ValueError("data.white_level must exceed data.black_level")
         if self.val_fraction + self.test_fraction >= 1.0:
             raise ValueError(
                 f"data.val_fraction + data.test_fraction must be < 1, got "
@@ -309,9 +316,11 @@ class TrainingConfig(_StrictModel):
     # initialized from this checkpoint's EMA weights (falling back to the live
     # weights) before step 0.  Accepts edge_denoise checkpoints and
     # burst_diffusion checkpoints with a matching backbone.  Optimizer, EMA,
-    # RNG, and data-stream state all start fresh; incompatible with --resume.
+    # RNG, and data-stream state all start fresh. Ignored when resuming a run.
     init_checkpoint: Path | None = None
     batch_size: int = Field(default=8, ge=1)
+    accumulation_steps: int = Field(default=1, ge=1)
+    precision: Literal["fp32", "bf16"] = "fp32"
     max_steps: int = Field(default=30000, ge=1)
     lr: float = Field(default=2.0e-4, gt=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)

@@ -123,6 +123,31 @@ def test_stop_file_halts_training_and_still_saves(tmp_path: Path) -> None:
     assert checkpoint.is_file()
 
 
+def test_checkpoint_failure_restores_signal_handlers_and_closes_writer(tmp_path: Path, monkeypatch) -> None:
+    import signal
+    from unittest.mock import Mock
+
+    dataset = write_burst(tmp_path / "data")
+    trainer = Trainer(make_config(dataset, tmp_path / "run"))
+    trainer.stop_file.write_text("stop", encoding="utf-8")
+    handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+    writer = Mock()
+    monkeypatch.setattr("edge_denoise.train.SummaryWriter", lambda **kwargs: writer)
+    monkeypatch.setattr(trainer, "_save", Mock(side_effect=OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        trainer.run()
+    writer.close.assert_called_once()
+    assert {number: signal.getsignal(number) for number in handlers} == handlers
+
+
+def test_synthetic_training_rejects_real_intensity_levels(tmp_path: Path) -> None:
+    dataset = write_burst(tmp_path / "data")
+    raw = make_config(dataset, tmp_path / "run").model_dump()
+    raw["data"].update(black_level=0, white_level=4095)
+    with pytest.raises(ValueError, match="prepared real SEM"):
+        Trainer(Config.model_validate(raw))
+
+
 def test_burst_checkpoints_are_rejected(tmp_path: Path) -> None:
     payload = {"format": 1, "step": 1, "config": {}, "model": {}}
     path = tmp_path / "burst.pt"
@@ -164,7 +189,7 @@ def test_init_checkpoint_warm_starts_from_a_burst_payload(tmp_path: Path) -> Non
         Trainer(Config.model_validate(hybrid_raw))  # 3-channel conv_in vs 1-channel donor
 
 
-def test_init_checkpoint_accepts_edge_checkpoints_and_rejects_resume(tmp_path: Path) -> None:
+def test_init_checkpoint_accepts_edge_checkpoints_and_resumes_the_finetune(tmp_path: Path) -> None:
     dataset = write_burst(tmp_path / "data")
     first = make_config(dataset, tmp_path / "run_a", representation="image", max_steps=1)
     checkpoint = Trainer(first).run()
@@ -177,8 +202,12 @@ def test_init_checkpoint_accepts_edge_checkpoints_and_rejects_resume(tmp_path: P
     reference = load_checkpoint(checkpoint)
     for name, parameter in warm.model.named_parameters():
         assert torch.equal(parameter.data, reference["ema"][name]), name
-    with pytest.raises(ValueError, match="warm start"):
-        Trainer(warm_config, resume_from=checkpoint)
+    fine_checkpoint = warm.run()
+    checkpoint.unlink()  # Resume must not need to reload the original teacher.
+    resumed = Trainer(warm_config, resume_from=fine_checkpoint)
+    assert resumed.step == warm.step
+    for name, parameter in resumed.model.named_parameters():
+        assert torch.equal(parameter.data, warm.model.state_dict()[name]), name
 
 
 def test_training_runs_with_each_gradient_target_mode(tmp_path: Path) -> None:

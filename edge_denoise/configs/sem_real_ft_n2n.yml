@@ -1,0 +1,43 @@
+# Stage 2 control: continue Noise2Noise from the common teacher.
+# First run prepare-real; see edge_denoise/docs/real_sem_training.md.
+# batch_size is PER GPU. Effective batch also includes accumulation_steps.
+# Prepared site splits are fixed; the fractions below concern legacy data only.
+data:
+  dataset_dir: data/SEM-real
+  image_size: 512
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 0.0
+  lambda_consistency: 0.0
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 1, 2, 2, 4, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_real_ft_n2n
+  init_checkpoint: runs/edge_denoise/sem_real_n2n/ckpt_latest.pt
+  batch_size: 4
+  accumulation_steps: 1
+  precision: fp32
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: cuda
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 5000

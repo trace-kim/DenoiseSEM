@@ -7,6 +7,8 @@ Design notes (see docs in the package README):
   at once. Frames are decoded once into an in-RAM uint8 cache
   (:class:`BurstCache`) and batches are assembled by a seeded
   :class:`BatchFactory` -- deterministic, resumable, and trivially testable.
+- Prepared real SEM repeats use native integer memory maps; edge_denoise
+  supplies their registration-aware sampler and clean-free validation.
 - Noisy frames are NEVER resized (resampling partially denoises and correlates
   the noise). Batches use aligned random crops: one window per sample, shared
   by every frame of that source.
@@ -48,7 +50,7 @@ def content_key(array: np.ndarray) -> str:
 
 
 def resolve_burst_dir(dataset_dir: str | Path) -> Path:
-    """Return the directory that holds ``manifest.jsonl`` + ``clean/`` + ``noisy/``.
+    """Return the synthetic burst directory or prepared real SEM cache.
 
     Accepts either the burst directory itself or a dataset root produced by
     ``generate_burst_dataset`` (which nests the pipeline output under
@@ -56,22 +58,22 @@ def resolve_burst_dir(dataset_dir: str | Path) -> Path:
     """
     root = Path(dataset_dir)
     for candidate in (root, root / "burst"):
-        if (candidate / "manifest.jsonl").is_file():
+        if (candidate / "manifest.jsonl").is_file() or (candidate / "real_dataset.json").is_file():
             return candidate
     raise FileNotFoundError(
-        f"no manifest.jsonl under {root} or {root / 'burst'}; "
-        "expected a burst dataset produced by 'python -m burst_diffusion generate' "
-        "or noising_pipeline.create_noisy_dataset"
+        f"no manifest.jsonl or real_dataset.json under {root} or {root / 'burst'}; "
+        "expected a synthetic burst dataset or real repeats prepared with "
+        "'python -m edge_denoise prepare-real'"
     )
 
 
 @dataclass
 class BurstSource:
-    """One clean image with all of its noisy burst frames, cached as uint8."""
+    """One site's frames; synthetic sites also provide a clean reference."""
 
     source_index: int
-    clean: np.ndarray
-    frames: list[np.ndarray]
+    clean: np.ndarray | None
+    frames: list[np.ndarray] | np.ndarray
 
 
 @dataclass(frozen=True)
@@ -130,7 +132,7 @@ class RolloutPairBatch:
 
 
 class BurstCache:
-    """Load a burst dataset's manifest and cache every frame in RAM as uint8."""
+    """Cache synthetic uint8 frames or open prepared real native memory maps."""
 
     def __init__(
         self,
@@ -158,6 +160,12 @@ class BurstCache:
             )
         self.burst_dir = resolve_burst_dir(dataset_dir)
         self.channels = channels
+        self.real_metadata: dict | None = None
+        if (self.burst_dir / "real_dataset.json").is_file():
+            from .real_data import load_real_cache
+
+            load_real_cache(self, min_replicas=min_replicas, min_size=min_size)
+            return
 
         grouped = self._parse_manifest(self.burst_dir / "manifest.jsonl")
 
@@ -332,7 +340,8 @@ class BurstCache:
 
     def summary(self) -> dict:
         ram_bytes = sum(
-            source.clean.nbytes + sum(frame.nbytes for frame in source.frames)
+            (source.clean.nbytes if source.clean is not None else 0)
+            + (0 if isinstance(source.frames, np.memmap) else sum(frame.nbytes for frame in source.frames))
             for source in self.all_sources
         )
         return {
@@ -374,6 +383,8 @@ class BatchFactory:
         antithetic: bool = True,
         seed: int = 0,
     ):
+        if cache.real_metadata is not None:
+            raise ValueError("Prepared real repeats need edge_denoise train (registration-aware pairs)")
         if target_mode not in ("fresh", "included"):
             raise ValueError(f"target_mode must be 'fresh' or 'included', got {target_mode!r}")
         if batch_size < 1:

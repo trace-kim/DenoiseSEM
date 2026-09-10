@@ -3,15 +3,16 @@
 Commands cover the experiment loop: ``train``, ``denoise`` (one measurement),
 ``evaluate`` (accuracy vs classical baselines), and ``repeatability`` (the
 metrology-precision table, optionally holding burst_diffusion arms so every
-method lands in one comparison).  Dataset generation is deliberately NOT
-duplicated here -- edge_denoise trains on the same burst datasets produced by
-``python -m burst_diffusion generate``.
+method lands in one comparison). ``prepare-real`` imports measured repeats
+and ``evaluate-real`` compares them against disjoint reference averages.
+Synthetic datasets still come from ``python -m burst_diffusion generate``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +31,7 @@ def _configure_logging(
     verbose: bool = typer.Option(True, "--verbose/--quiet", help="Log progress to stderr."),
 ) -> None:
     logging.basicConfig(
-        level=logging.INFO if verbose else logging.WARNING,
+        level=logging.INFO if verbose and int(os.environ.get("RANK", "0")) == 0 else logging.WARNING,
         format="%(levelname)s - %(name)s - %(message)s",
     )
 
@@ -60,15 +61,29 @@ def train(
             "this flag (or --resume) an occupied run_dir is refused."
         ),
     ),
+    run_dir: Optional[Path] = typer.Option(None, help="Override training.run_dir."),
+    max_steps: Optional[int] = typer.Option(None, min=1, help="Total optimizer steps, including resumed steps."),
+    batch_size: Optional[int] = typer.Option(None, min=1, help="Samples per GPU per microstep."),
+    accumulation_steps: Optional[int] = typer.Option(None, min=1, help="Microsteps per optimizer update."),
+    precision: Optional[str] = typer.Option(None, help="fp32 | bf16 (CUDA only)."),
+    device: Optional[str] = typer.Option(None, help="auto | cpu | cuda."),
+    seed: Optional[int] = typer.Option(None, min=0, help="Base training seed."),
+    init_checkpoint: Optional[Path] = typer.Option(None, help="Weights-only initialization for a fresh run."),
 ) -> None:
     """Train an edge_denoise model as described by a config file."""
     import sys
 
-    from .config import load_config
+    from .config import Config, load_config
     from .provenance import write_provenance
     from .train import LATEST_CHECKPOINT_NAME, Trainer
 
     loaded = load_config(config)
+    raw = loaded.model_dump()
+    overrides = {"run_dir": run_dir, "max_steps": max_steps, "batch_size": batch_size,
+                 "accumulation_steps": accumulation_steps, "precision": precision,
+                 "device": device, "seed": seed, "init_checkpoint": init_checkpoint}
+    raw["training"].update({name: value for name, value in overrides.items() if value is not None})
+    loaded = Config.model_validate(raw)
     checkpoint: Path | None = resume_from
     if resume and checkpoint is None:
         checkpoint = Path(loaded.training.run_dir) / LATEST_CHECKPOINT_NAME
@@ -78,16 +93,78 @@ def train(
         trainer = Trainer(loaded, resume_from=checkpoint, overwrite=overwrite)
     except FileExistsError as error:
         raise typer.BadParameter(str(error)) from error
-    final = trainer.run()
-    provenance = write_provenance(
-        loaded.training.run_dir,
-        loaded,
-        config_path=config,
-        checkpoint=final,
-        command=" ".join(sys.argv),
+    try:
+        final = trainer.run()
+        provenance = trainer.runtime.on_primary(lambda: write_provenance(
+            trainer.config.training.run_dir, trainer.config, config_path=config,
+            checkpoint=final, command=" ".join(sys.argv), cache=trainer.cache,
+        ))
+        if trainer.runtime.primary:
+            typer.echo(f"finished at step {trainer.step}; latest checkpoint: {final}")
+            typer.echo(f"provenance written to {provenance}")
+    finally:
+        trainer.runtime.close()
+
+
+@app.command("prepare-real")
+def prepare_real(
+    source_dir: Path = typer.Option(..., help="One subfolder per site, one grayscale image per frame."),
+    out: Path = typer.Option(..., help="New prepared dataset directory, outside source-dir."),
+    image_size: int = typer.Option(512, min=8, help="Required native crop size."),
+    black_level: float = typer.Option(0.0, help="Fixed detector black level; never estimated per frame."),
+    white_level: Optional[float] = typer.Option(None, help="Fixed white level; default 255/65535 from storage dtype."),
+    val_fraction: float = typer.Option(0.1, min=0, max=0.99),
+    test_fraction: float = typer.Option(0.1, min=0, max=0.99),
+    split_seed: int = typer.Option(2019, min=0),
+    split_file: Optional[Path] = typer.Option(None, help="Optional JSON mapping every site folder to train/val/test."),
+    align: str = typer.Option("translation", help="translation | none (only for already aligned data)."),
+    sigma: float = typer.Option(2.0, min=0, help="Smoothing used to estimate shifts, not to train inputs."),
+    radius: int = typer.Option(6, min=1, help="Shift search radius around the previous frame estimate."),
+    max_shift: float = typer.Option(32.0, min=0.01, help="Reject larger absolute shifts in either axis."),
+    frame_start: int = typer.Option(0, min=0, help="First frame after natural filename sorting (zero based)."),
+    frame_stop: Optional[int] = typer.Option(None, min=1, help="Exclusive final frame after sorting."),
+    device: str = typer.Option("cpu", help="cpu | cuda | auto; registration only."),
+) -> None:
+    """Prepare native real repeats, registration, QC previews, and locked site splits."""
+    from .real_data import prepare_real_dataset
+    from .train import resolve_device
+
+    manifest = prepare_real_dataset(
+        source_dir, out, image_size=image_size, black_level=black_level, white_level=white_level,
+        val_fraction=val_fraction, test_fraction=test_fraction, split_seed=split_seed,
+        split_file=split_file, align=align, sigma=sigma, radius=radius, max_shift=max_shift,
+        frame_start=frame_start, frame_stop=frame_stop, device=str(resolve_device(device)),
+        progress=lambda message: typer.echo(message),
     )
-    typer.echo(f"finished at step {trainer.step}; latest checkpoint: {final}")
-    typer.echo(f"provenance written to {provenance}")
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    for split in ("train", "val", "test"):
+        names = [site["name"] for site in metadata["sites"] if site["split"] == split]
+        typer.echo(f"{split}: {len(names)} sites: {', '.join(names)}")
+    typer.echo(f"Prepared {manifest}; inspect qc.csv and previews/ before training.")
+
+
+@app.command("evaluate-real")
+def evaluate_real_command(
+    config: Path = typer.Option(..., help="YAML config selecting the prepared dataset and crop size."),
+    checkpoint: list[str] = typer.Option(..., help="Repeat NAME=checkpoint.pt for each model."),
+    out: Path = typer.Option(..., help="Results JSON and comparison previews."),
+    split: str = typer.Option("val", help="val | test | train; prepared site splits are fixed."),
+    input_frames: int = typer.Option(32, min=2, help="Frames used as inference inputs; remaining frames form the reference."),
+    rois: int = typer.Option(5, min=1, max=5, help="Fixed center/corner crops per site."),
+    max_batch: int = typer.Option(4, min=1, help="Inference frames per forward pass."),
+    device: str = typer.Option("auto", help="auto | cpu | cuda."),
+) -> None:
+    """Compare real repeats using disjoint reference frames and fixed measurement boxes."""
+    from .config import load_config
+    from .real_evaluate import evaluate_real
+
+    result = evaluate_real(load_config(config), _parse_arms(checkpoint, default_name="model"),
+                           out_dir=out, split=split, input_frames=input_frames, rois=rois,
+                           max_batch=max_batch, device=device)
+    for name, metrics in result["methods"].items():
+        typer.echo(f"{name}: PSNR vs reference {metrics['psnr_vs_reference']:.2f} dB; "
+                   f"CD 3-sigma {metrics['cd_3sigma_px']} px; CD failure fraction {metrics['cd_failure_fraction']}")
+    typer.echo(f"Reference-based results for {result['site_count']} sites written to {out}")
 
 
 @app.command("train-prior")
@@ -170,7 +247,7 @@ def distill_targets(
 @app.command()
 def denoise(
     checkpoint: Path = typer.Option(..., help="Checkpoint (.pt) to denoise with."),
-    out: Path = typer.Option(..., help="Output directory for PNGs."),
+    out: Path = typer.Option(..., help="Output directory for PNG previews and a float32 TIFF."),
     input: Optional[Path] = typer.Option(
         None, help="A noisy measurement image of any size >= the training crop."
     ),
@@ -185,19 +262,21 @@ def denoise(
             "--center-crop processes a single training-resolution center tile instead."
         ),
     ),
-    stride: int = typer.Option(
-        48, min=1, help="Tile stride in pixels for the full frame (tile size = the training crop)."
+    stride: Optional[int] = typer.Option(
+        None, min=1, help="Tile stride (default 48 for small models, half the tile for 512px models)."
     ),
-    tile_batch: int = typer.Option(64, min=1, help="Tiles per forward pass for the full frame."),
+    tile_batch: int = typer.Option(4, min=1, help="Tiles per forward pass for the full frame."),
     ema: bool = typer.Option(True, "--ema/--no-ema", help="Use the EMA weights."),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
     """Denoise one measurement deterministically (the whole frame by default)."""
+    import numpy as np
     import torch
+    from PIL import Image
 
     from burst_diffusion.data import resolve_burst_dir
     from burst_diffusion.metrics import psnr
-    from burst_diffusion.sample import load_input_image, save_model_image
+    from burst_diffusion.sample import save_model_image
 
     from .infer import Denoiser, load_measurement01
 
@@ -205,26 +284,41 @@ def denoise(
         raise typer.BadParameter("provide exactly one of --input or --dataset")
     denoiser = Denoiser.from_checkpoint(checkpoint, device=device, use_ema=ema)
     image_size = denoiser.image_size
-    channels = denoiser.config.data.channels
+    stride = stride if stride is not None else (min(48, image_size) if image_size <= 64 else image_size // 2)
 
     clean_path: Path | None = None
+    frame01 = None
     if input is not None:
         measurement_path = input
         stem = input.stem
     else:
         burst_dir = resolve_burst_dir(dataset)
-        measurement_path = burst_dir / "noisy" / f"{source_index:05d}_{replica:05d}.png"
-        if not measurement_path.is_file():
-            raise typer.BadParameter(f"no such burst frame: {measurement_path}")
-        candidate = burst_dir / "clean" / f"{source_index:05d}.png"
-        clean_path = candidate if candidate.is_file() else None
+        if (burst_dir / "real_dataset.json").is_file():
+            from burst_diffusion.data import BurstCache
+            from burst_diffusion.real_data import normalize_native
+
+            cache = BurstCache(burst_dir, min_replicas=1)
+            source = next((item for item in cache.all_sources if item.source_index == source_index), None)
+            if source is None or replica >= len(source.frames):
+                raise typer.BadParameter("no such prepared site/frame")
+            levels = cache.real_metadata["normalization"]
+            if denoiser.config.data.white_level is not None and (
+                    denoiser.config.data.white_level != levels["white"] or denoiser.config.data.black_level != levels["black"]):
+                raise typer.BadParameter("checkpoint and prepared dataset normalization differ")
+            frame01 = normalize_native(source.frames[replica], levels["black"], levels["white"])
+        else:
+            measurement_path = burst_dir / "noisy" / f"{source_index:05d}_{replica:05d}.png"
+            if not measurement_path.is_file():
+                raise typer.BadParameter(f"no such burst frame: {measurement_path}")
+            candidate = burst_dir / "clean" / f"{source_index:05d}.png"
+            clean_path = candidate if candidate.is_file() else None
         stem = f"src{source_index:05d}_rep{replica:05d}"
 
     def to_model(frame01: "np.ndarray") -> torch.Tensor:  # [H, W] in [0, 1] -> [1, H, W] in [-1, 1]
         return torch.from_numpy(frame01 * 2.0 - 1.0).to(torch.float32)[None]
 
     if full:
-        frame01 = load_measurement01(measurement_path)
+        frame01 = denoiser.load_measurement(measurement_path) if frame01 is None else frame01
         denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch)
         measurement_chw, denoised_chw = to_model(frame01), to_model(denoised01)
         typer.echo(
@@ -232,18 +326,25 @@ def denoise(
             f"(tile {image_size}, stride {min(stride, image_size)})"
         )
     else:
-        measurement = load_input_image(measurement_path, image_size=image_size, channels=channels)
-        measurement_chw = measurement[0]
-        denoised_chw = denoiser.denoise(measurement)[0]
+        frame01 = denoiser.load_measurement(measurement_path) if frame01 is None else frame01
+        if min(frame01.shape) < image_size:
+            raise typer.BadParameter(f"input must be at least {image_size}x{image_size}")
+        y, x = (frame01.shape[0] - image_size) // 2, (frame01.shape[1] - image_size) // 2
+        measurement_chw = to_model(frame01[y:y + image_size, x:x + image_size])
+        denoised_chw = denoiser.denoise(measurement_chw[None])[0]
     save_model_image(measurement_chw, out / f"{stem}_input.png")
     save_model_image(denoised_chw, out / f"{stem}_denoised.png")
-    typer.echo(f"wrote 2 PNG(s) to {out}")
+    quantitative = ((denoised_chw[0].clamp(-1, 1).numpy() + 1) / 2).astype(np.float32)
+    Image.fromarray(quantitative).save(out / f"{stem}_denoised.tif")
+    typer.echo(f"wrote 2 preview PNG(s) and normalized float32 TIFF to {out}")
 
     if clean_path is not None:
         if full:
             clean_chw = to_model(load_measurement01(clean_path))
         else:
-            clean_chw = load_input_image(clean_path, image_size=image_size, channels=channels)[0]
+            clean = load_measurement01(clean_path)
+            y, x = (clean.shape[0] - image_size) // 2, (clean.shape[1] - image_size) // 2
+            clean_chw = to_model(clean[y:y + image_size, x:x + image_size])
         clean01 = ((clean_chw + 1) / 2).numpy().transpose(1, 2, 0)
         for label, tensor in (("input", measurement_chw), ("denoised", denoised_chw)):
             value01 = ((tensor.clamp(-1, 1) + 1) / 2).numpy().transpose(1, 2, 0)

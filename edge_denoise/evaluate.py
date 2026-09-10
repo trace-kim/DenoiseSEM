@@ -66,6 +66,8 @@ def evaluate(
         split_seed=config.data.split_seed,
     )
     sources = cache.sources_for_split(split)
+    if cache.real_metadata is not None:
+        raise ValueError("Real SEM has no clean ground truth; use edge_denoise evaluate-real")
     if not sources:
         raise ValueError(f"no sources in the {split!r} split")
     if limit is not None:

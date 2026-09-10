@@ -29,14 +29,24 @@ from .train import load_checkpoint, resolve_device
 _SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B", "I;16N", "I")
 
 
-def load_measurement01(path: str | Path) -> np.ndarray:
+def load_measurement01(
+    path: str | Path, *, black_level: float | None = None, white_level: float | None = None,
+) -> np.ndarray:
     """Load a grayscale measurement as a full ``[H, W]`` float64 array in [0, 1].
 
-    The whole frame, uncropped and unresized; 16-bit images are scaled into
-    the same [0, 1] range the 8-bit training data occupies (matching
-    ``BurstCache``'s 16-bit handling).
+    The whole frame, uncropped and unresized. Real checkpoints supply fixed
+    detector levels; legacy callers use the storage range (255 or 65535).
     """
     with Image.open(Path(path)) as image:
+        if (black_level is None) != (white_level is None):
+            raise ValueError("supply both black_level and white_level")
+        if white_level is not None:
+            if getattr(image, "n_frames", 1) != 1:
+                raise ValueError("export one measurement frame per image file")
+            array = np.asarray(image, dtype=np.float64)
+            if array.ndim != 2 or not np.isfinite([black_level, white_level]).all() or white_level <= black_level:
+                raise ValueError("expected a grayscale image and finite black_level < white_level")
+            return np.clip((array - black_level) / (white_level - black_level), 0, 1)
         if image.mode in _SIXTEEN_BIT_MODES:
             array = np.asarray(image, dtype=np.float64)
             return np.clip(array / 65535.0, 0.0, 1.0)
@@ -77,6 +87,11 @@ class Denoiser:
     @property
     def image_size(self) -> int:
         return self.config.data.image_size
+
+    def load_measurement(self, path: str | Path) -> np.ndarray:
+        """Load native measurements with the training checkpoint's normalization."""
+        return load_measurement01(path, black_level=self.config.data.black_level,
+                                  white_level=self.config.data.white_level)
 
     def denoise(self, frames: torch.Tensor) -> torch.Tensor:
         """``[B, 1, S, S]`` noisy frames in [-1, 1] -> denoised images, clamped,

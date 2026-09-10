@@ -96,6 +96,8 @@ class PairBatch:
     targets: torch.Tensor  # [B, 1, S, S] float32 in [-1, 1]
     second: torch.Tensor | None  # [B, 1, S, S] float32 in [-1, 1]
     gradient_targets: torch.Tensor | None = None  # [B, 1, S, S]; None for mode "target"
+    second_shifts: torch.Tensor | None = None
+    loss_margin: int = 0
 
 
 @dataclass
@@ -103,8 +105,10 @@ class ValPairBatch:
     inputs: torch.Tensor
     targets: torch.Tensor
     second: torch.Tensor
-    clean: torch.Tensor
+    clean: torch.Tensor | None
     gradient_targets: torch.Tensor | None = None
+    second_shifts: torch.Tensor | None = None
+    loss_margin: int = 0
 
 
 def _to_model_chw(crop: np.ndarray) -> np.ndarray:
@@ -131,6 +135,8 @@ class PairFactory:
         defect_augment: DefectAugmentConfig | None = None,
         target_debias_peak: float | None = None,
     ):
+        if cache.real_metadata is not None:
+            raise ValueError("Prepared real repeats require RealPairFactory")
         if target not in TARGET_MODES:
             raise ValueError(f"target must be one of {TARGET_MODES}, got {target!r}")
         if gradient_target not in GRADIENT_TARGET_MODES:

@@ -184,6 +184,12 @@ Docs: [user guide](../burst_diffusion/docs/burst_diffusion_guide.md) ·
 
 ## 4b. Workflow B2 — `edge_denoise`: edge-preserving metrology denoisers
 
+For real noisy-only SEM repeats, start with the
+[real SEM training and inference guide](../edge_denoise/docs/real_sem_training.md).
+It covers `prepare-real`, fixed site splits, native 512-pixel patches,
+N2N/mean-target comparisons, 1–4 GPU training, `evaluate-real`, and full-frame
+inference with quantitative float32 output.
+
 Deterministic single-pass denoisers aimed at metrology *precision* (CD and
 registration repeatability), not just PSNR: plain Noise2Noise (`image`), the
 pure Sobel-gradient-domain variant (`gradient`, with exact FFT least-squares

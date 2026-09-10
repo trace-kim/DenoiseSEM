@@ -195,10 +195,12 @@ def warp_frame(
     *,
     mode: str = "bicubic",
     device: torch.device | str = "cpu",
+    clip: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Bring a drifted frame INTO frame-0 coordinates (the inverse of
     :func:`warp_scene`); returns ``(aligned, valid)`` where ``valid`` marks
-    pixels whose sample point lies inside the frame."""
+    pixels whose sample point lies inside the frame. Set ``clip=False`` to
+    preserve linear interpolation when building leave-one-out targets."""
     device = torch.device(device)
     image = _as_batch(frame, device)
     height, width = image.shape[-2:]
@@ -210,9 +212,9 @@ def warp_frame(
     sample_x = (xs[None, :] + dx[:, None]).expand(height, width)
     out = _grid_sample(image, sample_y, sample_x, mode=mode)
     valid = (sample_y >= 0) & (sample_y <= height - 1) & (sample_x >= 0) & (sample_x <= width - 1)
-    # Bicubic overshoot on noise-like frames is an interpolation artefact:
-    # keep aligned frames inside the stored range (training crops do the same).
-    return out[0, 0].clamp(0.0, 1.0).cpu().numpy().astype(np.float64), valid.cpu().numpy()
+    # Legacy callers clamp bicubic overshoot; real target sums must stay linear.
+    result = out[0, 0].clamp(0.0, 1.0) if clip else out[0, 0]
+    return result.cpu().numpy().astype(np.float64), valid.cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
