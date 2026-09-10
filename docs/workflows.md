@@ -1,13 +1,14 @@
 # Running every workflow from this repository root
 
-This repository holds five independent pieces of work that used to share one
-folder. They are now separated by ownership, and **every command below is run
+This repository holds six independent pieces of work, separated by ownership.
+The original packages used to share one folder. **Every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).
 
 | Package | What it is | Depends on |
 |---|---|---|
 | `ddim/` | The original DDIM implementation (Song, Meng & Ermon), namespaced as a package | nothing in this repo |
 | `noising_pipeline/` | Standalone generator of paired clean/noisy microscopy images | nothing in this repo |
+| `sem_noise/` | Noise, drift, and temporal stability of repeated real SEM acquisitions | nothing in this repo |
 | `burst_diffusion/` | Burst-averaging diffusion denoiser (own U-Net, trainer, sampler, CLI) | `noising_pipeline` |
 | `edge_denoise/` | Edge-preserving deterministic denoisers for metrology precision (N2N, gradient, hybrid) | `burst_diffusion` |
 | `runctl/` | Flow-agnostic reproducible-run orchestrator (bundles, executors, tracking) | a *flow* plugin, loaded lazily |
@@ -83,14 +84,31 @@ Install a CUDA-enabled PyTorch build matching the target machine's driver
 
 ---
 
+## 1b. Characterize real SEM acquisitions before training
+
+Real repeated SEM data can be characterized before training with the independent
+`sem_noise` package. Install `python -m pip install -e ".[analysis]"`, then:
+
+```powershell
+python -m sem_noise inventory --input data/sem-real --output tmp/sem-order.csv
+# Edit the CSV to confirm site grouping and acquisition order.
+python -m sem_noise analyze --input data/sem-real --manifest tmp/sem-order.csv --output output/sem-noise-01
+```
+
+Open `output/sem-noise-01/index.html`. See the
+[SEM noise guide](../sem_noise/README.md) for timing, ROI, clipping bounds,
+registration diagnostics, estimator definitions, and the synthetic demo.
+This command uses a fresh output directory and does not launch training.
+
 ## 2. Tests
 
 ```powershell
-python -m pytest                          # whole suite (257 tests)
+python -m pytest                          # whole suite
 python -m pytest tests/runctl -q          # orchestration only
 python -m pytest tests/ddim -q            # DDIM flow, spec, legacy entry points
 python -m pytest tests/burst_diffusion -q # burst pipeline
 python -m pytest tests/noising_pipeline -q
+python -m pytest tests/sem_noise -q       # optional .[analysis] dependencies
 python -m pytest tests/runctl/test_runctl_cli.py::test_canonical_command_exposes_every_varying_setting
 ```
 

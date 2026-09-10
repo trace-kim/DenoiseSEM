@@ -1,0 +1,27 @@
+# All statistics retain exported pixel units (DN). No intensity normalization.
+expected_frames: 128
+min_frames: 8
+# Crop out labels/scale bars BEFORE registration: [y0, y1, x0, x1], stops exclusive.
+roi: null
+frame_interval_s: null
+pixel_size_nm: null
+# Set actual detector/export clipping bounds if known, e.g. 0 and 4095 for
+# unscaled 12-bit values in a 16-bit PNG. Otherwise integer dtype limits apply.
+black_level: null
+white_level: null
+registration: translation
+max_shift_px: 12.0
+upsample_factor: 20
+registration_sigma: 1.0
+registration_max_side: 768
+min_correlation: 0.2
+local_grid: 3
+local_frames: 16
+sample_pixels: 8192
+distribution_samples: 100000
+intensity_bins: 12
+flat_fraction: 0.5
+max_lag: 32
+spatial_pairs: 16
+spatial_max_side: 512
+seed: 17
