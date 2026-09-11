@@ -187,10 +187,29 @@ blank site is retained with all shifts zero. The check applies to whole frames;
 a blank area within an otherwise patterned frame does not itself trigger a skip.
 
 `qc.csv` records `registration_contrast` and `registration_status` (`reference`,
-`registered`, `skipped_low_contrast`, or `disabled`). Skipped frames have empty
+`registered`, `skipped_low_contrast`, `skipped_failed_registration`, or `disabled`). Skipped frames have empty
 uncertainty fields because their shift was not measured. Per-frame statuses and
 the threshold are also saved in `real_dataset.json`, and preparation reports
-skip counts. Implausible shifts on frames above the threshold still fail.
+skip counts. By default, implausible shifts on frames above the threshold still fail.
+
+Featureless real acquisitions with speckle noise can pass the contrast check.
+To continue preparation when the estimator subsequently rejects a shift, add
+`--registration-failure skip` to the preparation command. This leaves that
+frame at zero shift, records `skipped_failed_registration`, and continues
+without updating the previous accepted search guess. It handles nonfinite or
+out-of-range shifts and nonfinite covariance. It does not suppress unrelated
+runtime errors. The default `--registration-failure error` stops on these
+rejected estimates.
+
+Failed estimates are not proof that a frame is blank: this explicit policy
+also skips rejected estimates on patterned frames. Conversely, a noisy blank
+frame that produces a finite in-range shift can still pass. Inspect the
+reported skips and previews. `qc.csv` includes `registration_reason`,
+`estimated_dy/dx`, and `estimated_uncertainty_dy/dx`; these preserve the rejected
+estimate separately from the applied zero shift. The manifest records the
+same diagnostics and failure policy. Preparation prints each failed skip
+immediately, including contrast and estimated uncertainty.
+
 If a single repeat loses patterns visible in other repeats, inspect the
 acquisition: skipping alignment does not make different specimen content a
 valid training pair. Prepare into a new output directory to apply this behavior

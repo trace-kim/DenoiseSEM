@@ -123,6 +123,8 @@ def prepare_real(
     max_shift: float = typer.Option(32.0, min=0.01, help="Reject larger absolute shifts in either axis."),
     min_registration_contrast: float = typer.Option(
         0.005, min=0.0, help="Skip frames below this std of 16px block means in [0,1]; 0 disables the check."),
+    registration_failure: str = typer.Option(
+        "error", help="error | skip: stop on rejected shift estimates, or keep those frames with zero shift and report in QC."),
     frame_start: int = typer.Option(0, min=0, help="First frame after natural filename sorting (zero based)."),
     frame_stop: Optional[int] = typer.Option(None, min=1, help="Exclusive final frame after sorting."),
     device: str = typer.Option("cpu", help="cpu | cuda | auto; registration only."),
@@ -137,6 +139,7 @@ def prepare_real(
         split_file=split_file, align=align, sigma=sigma, radius=radius, max_shift=max_shift,
         frame_start=frame_start, frame_stop=frame_stop, device=str(resolve_device(device)),
         min_registration_contrast=min_registration_contrast,
+        registration_failure=registration_failure,
         progress=lambda message: typer.echo(message),
     )
     metadata = json.loads(manifest.read_text(encoding="utf-8"))

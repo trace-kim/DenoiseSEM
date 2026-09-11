@@ -115,6 +115,7 @@ def estimate_translations(
     raw: np.ndarray, *, black: float, white: float, sigma: float,
     radius: int, max_shift: float, device: str,
     min_contrast: float = 0.005, diagnostics: list[dict] | None = None,
+    failure_policy: str = "error", progress: Callable[[str], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Register textured frames; leave low-contrast frames at zero shift.
 
@@ -125,6 +126,8 @@ def estimate_translations(
     """
     if not np.isfinite(min_contrast) or min_contrast < 0:
         raise ValueError("min_contrast must be finite and nonnegative")
+    if failure_policy not in ("error", "skip"):
+        raise ValueError("registration failure policy must be error or skip")
     resolved = torch.device(device)
     reference = None
     shifts, uncertainty = np.zeros((len(raw), 2)), np.zeros((len(raw), 2))
@@ -148,10 +151,29 @@ def estimate_translations(
                 continue
             initial = coarse_shift(reference, moving, radius=radius, guess=guess)
             shift, covariance = refine_shift(reference, moving, initial)
+            record["estimated_shift"] = [float(v) if np.isfinite(v) else None for v in shift]
+            estimated_uncertainty = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+            record["estimated_uncertainty"] = [
+                float(v) if np.isfinite(v) else None for v in estimated_uncertainty
+            ]
+            reason = None
             if not np.isfinite(shift).all() or np.abs(shift).max() > max_shift:
-                raise ValueError(f"frame {index}: implausible shift {shift}; inspect acquisition or increase --max-shift")
+                reason = "implausible_shift"
+            elif not np.isfinite(covariance).all():
+                reason = "nonfinite_covariance"
+            if reason is not None:
+                detail = (f"frame {index}: {reason.replace('_', ' ')} {shift}; "
+                          f"contrast={contrast:.6g}, uncertainty={estimated_uncertainty}")
+                if failure_policy == "error":
+                    raise ValueError(f"{detail}; inspect acquisition; use --registration-failure skip "
+                                     "to leave rejected frames unregistered")
+                record.update(status="skipped_failed_registration", reason=reason)
+                uncertainty[index] = np.nan
+                if progress:
+                    progress(f"{detail}; skipped registration (zero shift)")
+                continue
             shifts[index] = shift
-            uncertainty[index] = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+            uncertainty[index] = estimated_uncertainty
             guess = tuple(int(round(value)) for value in shift)
     return shifts, uncertainty
 
@@ -176,6 +198,7 @@ def prepare_real_dataset(
     split_file: str | Path | None = None, align: str = "translation",
     sigma: float = 2.0, radius: int = 6, max_shift: float = 32.0,
     min_registration_contrast: float = 0.005,
+    registration_failure: str = "error",
     frame_start: int = 0, frame_stop: int | None = None,
     device: str = "cpu", progress: Callable[[str], None] | None = None,
 ) -> Path:
@@ -198,6 +221,8 @@ def prepare_real_dataset(
         raise ValueError("invalid registration settings")
     if not np.isfinite(min_registration_contrast) or min_registration_contrast < 0:
         raise ValueError("min_registration_contrast must be finite and nonnegative")
+    if registration_failure not in ("error", "skip"):
+        raise ValueError("registration_failure must be error or skip")
     folders = sorted((p for p in source_root.iterdir() if p.is_dir()), key=_natural_key)
     if not folders:
         raise ValueError("expected one subfolder per SEM site")
@@ -245,13 +270,15 @@ def prepare_real_dataset(
             shifts, uncertainty = (
                 estimate_translations(raw, black=black_level, white=white, sigma=sigma, radius=radius,
                                       max_shift=max_shift, device=device,
-                                      min_contrast=min_registration_contrast, diagnostics=registration)
+                                      min_contrast=min_registration_contrast, diagnostics=registration,
+                                      failure_policy=registration_failure,
+                                      progress=(lambda message: progress(f"{folder.name}: {message}")) if progress else None)
                 if align == "translation" else (np.zeros((len(raw), 2)), np.zeros((len(raw), 2))))
             if align == "none":
                 registration = [{"status": "disabled", "contrast": None} for _ in raw]
-            skipped = sum(record["status"] == "skipped_low_contrast" for record in registration)
+            skipped = sum(record["status"].startswith("skipped_") for record in registration)
             if skipped and progress:
-                progress(f"{folder.name}: skipped registration for {skipped}/{len(raw)} low-contrast frames; see qc.csv")
+                progress(f"{folder.name}: skipped registration for {skipped}/{len(raw)} frames; see qc.csv")
             lower = np.ceil(4 - shifts.min(axis=0)).astype(int)
             upper = np.floor(np.array(first.shape) - 4 - shifts.max(axis=0)).astype(int)
             if (upper - lower < image_size).any():
@@ -271,6 +298,11 @@ def prepare_real_dataset(
                     "dy": shifts[index, 0], "dx": shifts[index, 1],
                     "registration_status": registration[index]["status"],
                     "registration_contrast": registration[index]["contrast"],
+                    "registration_reason": registration[index].get("reason"),
+                    "estimated_dy": registration[index].get("estimated_shift", [None, None])[0],
+                    "estimated_dx": registration[index].get("estimated_shift", [None, None])[1],
+                    "estimated_uncertainty_dy": registration[index].get("estimated_uncertainty", [None, None])[0],
+                    "estimated_uncertainty_dx": registration[index].get("estimated_uncertainty", [None, None])[1],
                     "uncertainty_dy": float(uncertainty[index, 0]) if np.isfinite(uncertainty[index, 0]) else None,
                     "uncertainty_dx": float(uncertainty[index, 1]) if np.isfinite(uncertainty[index, 1]) else None,
                     "mean01": float(unit.mean()), "std01": float(unit.std()),
@@ -298,6 +330,7 @@ def prepare_real_dataset(
             "normalization": {"black": black_level, "white": white},
             "registration": {"mode": align, "sigma": sigma, "radius": radius, "max_shift": max_shift,
                              "min_contrast": min_registration_contrast, "contrast_block_size": 16,
+                             "failure_policy": registration_failure,
                              "interpolation": "bicubic", "row_deformation": False},
             "split_seed": split_seed, "duplicate_groups": duplicates,
             "val_fraction": val_fraction, "test_fraction": test_fraction,

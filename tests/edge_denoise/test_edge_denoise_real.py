@@ -430,6 +430,76 @@ def test_zero_contrast_threshold_disables_skip(monkeypatch) -> None:
     assert [r["status"] for r in records] == ["reference", "registered"]
 
 
+@pytest.mark.parametrize("bad_shift,bad_covariance,reason", [
+    ([3.9672, 32.963], np.eye(2), "implausible_shift"),
+    ([float("nan"), 0], np.eye(2), "implausible_shift"),
+    ([0, 0], np.full((2, 2), float("nan")), "nonfinite_covariance"),
+])
+def test_rejected_estimate_skip_preserves_next_search_guess(monkeypatch, bad_shift, bad_covariance, reason) -> None:
+    yy, xx = np.mgrid[:96, :96]
+    raw = np.stack([((yy + xx + i) % 256).astype(np.uint8) for i in range(4)])
+    estimates = iter([(np.array([2., 1.]), np.eye(2)),
+                      (np.array(bad_shift), bad_covariance),
+                      (np.array([3., 2.]), np.eye(2))])
+    guesses = []
+
+    def coarse(*args, **kwargs):
+        guesses.append(kwargs["guess"])
+        return (0, 0)
+
+    monkeypatch.setattr("edge_denoise.real_data.coarse_shift", coarse)
+    monkeypatch.setattr("edge_denoise.real_data.refine_shift", lambda *args: next(estimates))
+    records, messages = [], []
+    shifts, uncertainty = estimate_translations(
+        raw, black=0, white=255, sigma=2, radius=6, max_shift=32, device="cpu",
+        failure_policy="skip", diagnostics=records, progress=messages.append,
+    )
+    assert records[2]["contrast"] > 0.005  # Reproduces bypassing the old blank check.
+    assert records[2]["status"] == "skipped_failed_registration"
+    assert records[2]["reason"] == reason
+    np.testing.assert_array_equal(shifts, [[0, 0], [2, 1], [0, 0], [3, 2]])
+    assert np.isnan(uncertainty[2]).all()
+    assert guesses == [(0, 0), (2, 1), (2, 1)]
+    assert "skipped registration" in messages[0]
+    json.dumps(records, allow_nan=False)
+
+
+def test_cli_skip_failed_registration_reports_rejected_estimate(tmp_path: Path, monkeypatch) -> None:
+    import csv
+
+    raw = write_raw(tmp_path / "raw", sites=1, frames=3)
+    monkeypatch.setattr("edge_denoise.real_data.coarse_shift", lambda *args, **kwargs: (0, 0))
+    monkeypatch.setattr("edge_denoise.real_data.refine_shift",
+                        lambda *args: (np.array([3.9672, 32.963]), np.eye(2)))
+    prepared = tmp_path / "prepared"
+    result = CliRunner().invoke(app, [
+        "prepare-real", "--source-dir", str(raw), "--out", str(prepared),
+        "--image-size", "16", "--white-level", "4095", "--val-fraction", "0",
+        "--test-fraction", "0", "--registration-failure", "skip",
+    ])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "site_0: frame 1: implausible shift" in result.output
+    metadata = json.loads((prepared / REAL_MANIFEST).read_text())
+    assert metadata["registration"]["failure_policy"] == "skip"
+    assert metadata["sites"][0]["registration"][1]["estimated_shift"] == [3.9672, 32.963]
+    with (prepared / "qc.csv").open(newline="") as stream:
+        row = list(csv.DictReader(stream))[1]
+    assert row["registration_status"] == "skipped_failed_registration"
+    assert float(row["estimated_dx"]) == 32.963
+    assert float(row["dx"]) == 0 and row["uncertainty_dx"] == ""
+    cache = BurstCache(prepared, min_size=16)
+    aligned = np.load(prepared / metadata["sites"][0]["aligned"]["path"])
+    np.testing.assert_array_equal(aligned, normalize_native(cache.train_sources[0].frames, 0, 4095))
+
+
+def test_invalid_registration_failure_policy_rejected(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    with pytest.raises(ValueError, match="registration_failure"):
+        prepare_real_dataset(raw, tmp_path / "prepared", registration_failure="ignore")
+    assert not (tmp_path / "prepared").exists()
+
+
 def test_real_recipes_share_teacher_backbone_and_expected_objectives() -> None:
     from edge_denoise.config import load_config
 
