@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Five independently owned packages. `ddim/` is the original DDIM implementation
+Six independently owned packages. `ddim/` is the original DDIM implementation
 (models, runners, functions, datasets, configs, legacy `main.py`) namespaced as a
 package; it imports nothing else here. `runctl/` is the flow-agnostic
 orchestrator — schemas, run bundles, executors, checkpoints, tracking, and the
@@ -14,7 +14,10 @@ deterministic metrology-precision denoisers (N2N, gradient, hybrid) and imports
 harness. YAML recipes live inside the package that owns them (`ddim/configs/`,
 `burst_diffusion/configs/`, `edge_denoise/configs/`), and docs likewise
 (`ddim/docs/`, `runctl/docs/`, `burst_diffusion/docs/`, `edge_denoise/docs/`),
-with `docs/workflows.md` at the root as the cross-cutting how-to-run guide. Tests
+with `docs/workflows.md` at the root as the cross-cutting how-to-run guide.
+`sem_noise/` independently analyzes real repeated SEM acquisitions, with its
+own configs, README guide, and optional analysis dependencies; it imports no
+training packages. Tests
 mirror the split under `tests/<package>/`; utilities are in `tools/`. Treat
 `runs/`, `experiments/`, `output/`, `data/`, `tmp/`, and checkpoints as generated
 artifacts.

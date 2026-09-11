@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+analysis = [
+    "scipy>=1.11,<2",
+    "scikit-image>=0.22,<1",
+    "matplotlib>=3.8,<4",
+    "tifffile>=2023.7.10",
+]
 tracking = [
     "mlflow>=3,<4",
     "nvidia-ml-py>=12",
@@ -39,6 +45,7 @@ dev = [
 runctl = "runctl.cli:app"
 burst-diffusion = "burst_diffusion.cli:app"
 edge-denoise = "edge_denoise.cli:app"
+sem-noise = "sem_noise.cli:main"
 
 # Flow plugins discovered by runctl.registry.  A new pipeline registers itself
 # here instead of being hard-coded into the orchestrator.
@@ -47,13 +54,14 @@ ddim = "ddim.flow"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["burst_diffusion*", "ddim*", "edge_denoise*", "noising_pipeline*", "runctl*"]
+include = ["burst_diffusion*", "ddim*", "edge_denoise*", "noising_pipeline*", "runctl*", "sem_noise*"]
 namespaces = true
 
 [tool.setuptools.package-data]
 ddim = ["configs/*.yml"]
 burst_diffusion = ["configs/*.yml"]
 edge_denoise = ["configs/*.yml"]
+sem_noise = ["configs/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

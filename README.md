@@ -8,7 +8,7 @@ environment and run every workflow from this directory.
 
 ## Layout
 
-Five independent pieces of work, separated by ownership rather than sharing one
+Six independent pieces of work, separated by ownership rather than sharing one
 folder:
 
 ```
@@ -28,6 +28,9 @@ edge_denoise/         Edge-preserving deterministic denoisers for metrology (own
   docs/               Feasibility study & method derivations, experiment report
 
 noising_pipeline/     Standalone paired clean/noisy image generator
+
+sem_noise/            Real repeated-SEM noise, registration, and stability analysis
+  configs/            Analysis settings (original detector units)
 
 runctl/               Flow-agnostic reproducible-run orchestrator
   docs/               Training workflow spec + EN/KR quick start
@@ -51,6 +54,11 @@ runctl  <-  ddim/flow.py  (loaded lazily, via a `runctl.flows` entry point)
 until you ask it for a flow, so `runctl --help` never imports PyTorch.
 
 ## The four ways to train
+
+For real repeated acquisitions, start with the
+[SEM noise analysis guide](sem_noise/README.md). It produces offline reports for
+noise distributions, signal dependence, drift, spatial structure, and temporal
+stability before choosing training pairs or targets.
 
 | | Command | Use it for |
 |---|---|---|
