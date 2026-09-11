@@ -153,9 +153,19 @@ def read_frame(frame: Frame, roi: tuple[int, int, int, int] | None = None) -> np
         if frame.page != 0:
             raise ValueError("page must be zero for single-frame images")
         with Image.open(frame.path) as image:
-            if image.mode not in {"L", "I", "F", "I;16", "I;16B", "I;16L"}:
+            if image.mode not in {"L", "I", "F", "I;16", "I;16B", "I;16L", "RGB"}:
                 raise ValueError(f"{frame.relative_path}: grayscale images required; no color conversion is performed")
             array = np.asarray(image).copy()
+            if image.mode == "RGB":
+                if not (np.array_equal(array[..., 0], array[..., 1])
+                        and np.array_equal(array[..., 0], array[..., 2])):
+                    raise ValueError(
+                        f"{frame.relative_path}: grayscale images required; "
+                        "RGB channels must be identical at every pixel"
+                    )
+                # Repeated grayscale channels carry one signal. Select it exactly,
+                # without luminance conversion or changing decoded detector units.
+                array = array[..., 0]
     if array.ndim != 2 or array.dtype.kind not in "uif":
         raise ValueError(f"{frame.relative_path}: expected a real numeric HxW grayscale image")
     if not np.isfinite(array).all():

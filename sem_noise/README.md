@@ -240,7 +240,10 @@ not downsampled; bounded samples/crops are used for temporal, distribution,
 spectral, and registration calculations. Disk also holds every site's maps.
 
 PNG (8/16-bit grayscale) is the intended input. Grayscale TIFF/multipage TIFF,
-BMP, JPEG (flagged as lossy), and numeric H×W/T×H×W NPY also work. Color/palette
+BMP, JPEG (flagged as lossy), and numeric H×W/T×H×W NPY also work. RGB PNG,
+BMP, and JPEG are accepted when all three decoded channels are exactly equal
+at every pixel; one channel is used directly without conversion or normalization.
+RGB images with unequal channels, color TIFFs, alpha/palette
 images, nonfinite values, mixed within-site shape/dtype, unsupported TIFF page
 shapes, and integer intensities outside ±2²⁴ are rejected. Some compressed TIFFs
 need `imagecodecs`. Preserve original PNGs; screenshots or processed exports

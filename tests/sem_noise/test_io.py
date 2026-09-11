@@ -87,11 +87,34 @@ def test_stack_pages_and_roi(tmp_path: Path) -> None:
         read_frame(frames[0], (0, 33, 0, 40))
 
 
-def test_rejects_color_and_nonfinite_inputs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suffix", [".jpg", ".jpeg", ".png", ".bmp"])
+def test_identical_rgb_channels_preserve_decoded_grayscale(tmp_path: Path, suffix: str) -> None:
+    gray = np.random.default_rng(42).integers(0, 256, (32, 40), dtype=np.uint8)
+    path = tmp_path / f"scan{suffix}"
+    Image.fromarray(np.repeat(gray[..., None], 3, axis=2)).save(path)
+    with Image.open(path) as image:
+        assert image.mode == "RGB"
+        expected = np.asarray(image)[..., 0].copy()
+    frame = discover_sites(path)["scan"][0]
+    actual = read_frame(frame)
+    assert actual.dtype == np.uint8
+    assert actual.flags.c_contiguous
+    np.testing.assert_array_equal(actual, expected)
+    assert pixel_hash(actual) == pixel_hash(expected)
+    np.testing.assert_array_equal(read_frame(frame, (3, 25, 5, 30)), expected[3:25, 5:30])
+
+
+@pytest.mark.parametrize("channel", [1, 2])
+def test_rejects_rgb_channel_difference_even_outside_roi(tmp_path: Path, channel: int) -> None:
     color = tmp_path / "color.png"
-    Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8)).save(color)
-    with pytest.raises(ValueError, match="grayscale"):
-        read_frame(Frame("site", color, "color.png", 0))
+    array = np.zeros((32, 32, 3), dtype=np.uint8)
+    array[0, 0, channel] = 1
+    Image.fromarray(array).save(color)
+    with pytest.raises(ValueError, match="RGB channels must be identical"):
+        read_frame(Frame("site", color, "color.png", 0), (3, 25, 5, 30))
+
+
+def test_rejects_nonfinite_inputs(tmp_path: Path) -> None:
     path = tmp_path / "bad.npy"
     np.save(path, np.full((32, 32), np.nan))
     with pytest.raises(ValueError, match="NaN"):
