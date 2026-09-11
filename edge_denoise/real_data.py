@@ -27,18 +27,20 @@ from burst_diffusion.real_data import (
 
 from .config import Config
 from .data import PairBatch, PairFactory, PairInfo, ValPairBatch
+from .image_io import collapse_grayscale_rgb
 from .register import coarse_shift, gaussian_smooth, refine_shift, warp_frame
 
-IMAGE_EXTENSIONS = {".png", ".tif", ".tiff", ".bmp"}
+IMAGE_EXTENSIONS = {".png", ".tif", ".tiff", ".bmp", ".jpg", ".jpeg"}
 LOSS_MARGIN = 3
 
 
 def read_native(path: Path) -> np.ndarray:
-    """Read one grayscale 8/16-bit frame without conversion or resizing."""
+    """Read decoded grayscale 8/16-bit pixels, accepting identical RGB channels."""
     with Image.open(path) as image:
         if getattr(image, "n_frames", 1) != 1:
             raise ValueError(f"export one frame per file (multi-page image): {path}")
         array = np.asarray(image).copy()
+        array = collapse_grayscale_rgb(array, mode=image.mode, path=path)
         if image.mode == "I" and array.min() >= 0 and array.max() <= 65535:
             array = array.astype(np.uint16)
     if array.ndim != 2 or array.dtype.kind != "u" or array.dtype.itemsize not in (1, 2):

@@ -23,6 +23,7 @@ from burst_diffusion.ema import EMAHelper
 
 from .config import Config
 from .distill import denoise_full_frame
+from .image_io import collapse_grayscale_rgb
 from .model import EdgeDenoiser, build_model
 from .train import load_checkpoint, resolve_device
 
@@ -44,6 +45,7 @@ def load_measurement01(
             if getattr(image, "n_frames", 1) != 1:
                 raise ValueError("export one measurement frame per image file")
             array = np.asarray(image, dtype=np.float64)
+            array = collapse_grayscale_rgb(array, mode=image.mode, path=path)
             if array.ndim != 2 or not np.isfinite([black_level, white_level]).all() or white_level <= black_level:
                 raise ValueError("expected a grayscale image and finite black_level < white_level")
             return np.clip((array - black_level) / (white_level - black_level), 0, 1)

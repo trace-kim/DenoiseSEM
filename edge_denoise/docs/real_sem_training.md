@@ -1,7 +1,7 @@
 # Train and evaluate denoisers on real SEM repeats
 
 This guide covers real noisy SEM data: approximately 15–30 sites, 128 repeats
-per site, 2048×2048 frames, and native 512×512 training patches. No clean
+per site, 1024×1024 frames, and native 512×512 training patches. No clean
 images or simulator manifest are required. Every model in this guide takes
 **one raw frame at inference**.
 
@@ -45,20 +45,26 @@ Place one acquisition site in each folder:
 ```text
 data/SEM-raw/
   site_01/
-    frame_000.tif
-    frame_001.tif
+    frame_000.jpg
+    frame_001.jpg
     ...
-    frame_127.tif
+    frame_127.jpg
   site_02/
-    frame_000.tif
+    frame_000.jpg
     ...
 ```
 
-Supported inputs are grayscale uint8 or uint16 PNG, TIFF, or BMP files, with
-one frame per file. Export multi-page TIFFs as individual frames before this
-step. Color and floating-point acquisitions need an explicit conversion
-decision and are rejected by the preparation command. Images within a site
-must have matching dimensions; the dataset must use one storage bit depth.
+Supported inputs are grayscale uint8 or uint16 PNG, TIFF, or BMP files, and
+8-bit JPEG (`.jpg`/`.jpeg`) files, with one frame per file. RGB images are
+accepted only when all three decoded channels match exactly; one channel is
+extracted without averaging or resizing. Unequal RGB channels and
+floating-point acquisitions are rejected by preparation. Export multi-page
+TIFFs as individual frames before this step. Images within a site must have
+matching dimensions; the dataset must use one storage bit depth.
+
+The same identical-channel RGB handling applies to inference with real SEM
+checkpoints. The cached pixels preserve the decoded JPEG values; preparation
+does not re-encode them as JPEG.
 
 Filenames are sorted naturally (`frame_2` before `frame_10`). Ensure that this
 order is the actual acquisition order: registration uses the preceding shift
@@ -93,24 +99,34 @@ level if appropriate. The QC report records clipping and endpoint fractions.
 
 ## 3. Prepare the dataset once
 
-Example for true 16-bit intensity values, using one allocated GPU for registration:
+Example for 1024×1024 8-bit JPEG frames, using one allocated GPU for registration:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m edge_denoise prepare-real \
   --source-dir data/SEM-raw \
   --out data/SEM-real \
   --image-size 512 \
-  --white-level 65535 \
+  --white-level 255 \
   --align translation \
   --device cuda
 ```
 
-Use `--white-level 4095` for an appropriate 12-bit export, or omit the option
+Use `--white-level 65535` for true 16-bit values or `--white-level 4095`
+for an appropriate 12-bit export, or omit the option
 to use the storage range. Preparation also works with `--device cpu`.
 
 The output directory must be new and outside the raw site folders. A failed
 preparation does not publish a partial dataset. Reprepare into a new directory
 when changing the data, normalization, registration settings, or splits.
+
+Preparation stores full 1024×1024 frames, not a fixed set of patches.
+`--image-size 512` checks that the common registration overlap can fit a
+512×512 crop. Keep `data.image_size: 512` and `data.channels: 1` in all five
+training recipes. Each training example draws a fresh random site, window,
+and repeat selection, including each accumulation microbatch. Targets use
+the corresponding registered region; raw inputs are not resized. Crops stay
+inside the valid registration overlap, excluding its border margins.
+Validation and evaluation retain fixed center/corner regions for comparison.
 
 Output:
 
@@ -133,8 +149,8 @@ There is no fake clean image and no need to run `noising_pipeline`. The real
 dataset has its own small metadata file; the legacy synthetic
 `manifest.jsonl` format remains supported separately.
 
-For 15–30 sites with 128 grayscale 2048×2048 uint16 frames, the prepared raw
-and aligned arrays occupy approximately **45–90 GiB**, plus sums and previews.
+For 15–30 sites with 128 grayscale 1024×1024 uint8 frames, the prepared raw
+and aligned arrays occupy approximately **9.4–18.8 GiB**, plus sums and previews.
 The original inputs and checkpoints need additional disk space. Put the
 prepared directory on fast local storage when available. Training opens the
 arrays read-only through memory mapping, allowing processes to share OS file
@@ -170,7 +186,7 @@ To use a stable interval shared by all sites, for example frames 8–95:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m edge_denoise prepare-real \
   --source-dir data/SEM-raw --out data/SEM-real-stable \
-  --image-size 512 --white-level 65535 \
+  --image-size 512 --white-level 255 \
   --frame-start 8 --frame-stop 96 --device cuda
 ```
 
@@ -448,12 +464,12 @@ and measurement settings fixed for that final comparison. The historical
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m edge_denoise denoise \
   --checkpoint runs/edge_denoise/sem_real_ft_avgfull_consist/ckpt_latest.pt \
-  --input data/SEM-raw/site_01/frame_000.tif \
+  --input data/SEM-raw/site_01/frame_000.jpg \
   --out output/sem_real_inference \
   --stride 256 --tile-batch 4 --device cuda
 ```
 
-The 2048×2048 image is processed in overlapping 512×512 tiles and blended
+The 1024×1024 image is processed in overlapping 512×512 tiles and blended
 back to the original dimensions. It is not downscaled. The checkpoint
 supplies the intensity scale, and inference requires only this one raw frame.
 It does not need the prepared dataset, registration files, or additional

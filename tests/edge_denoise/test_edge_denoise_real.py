@@ -14,9 +14,85 @@ from burst_diffusion.data import BurstCache, BatchFactory
 from burst_diffusion.real_data import REAL_MANIFEST, normalize_native
 from edge_denoise.cli import app
 from edge_denoise.config import Config
-from edge_denoise.real_data import RealPairFactory, estimate_translations, prepare_real_dataset, sample_region
+from edge_denoise.real_data import RealPairFactory, estimate_translations, prepare_real_dataset, read_native, sample_region
 from edge_denoise.real_evaluate import _metrics, frame_pools
 from edge_denoise.train import Trainer, load_checkpoint
+
+
+@pytest.mark.parametrize("extension", [".jpg", ".jpeg", ".JPG", ".png"])
+def test_identical_rgb_preparation_and_real_inference(tmp_path: Path, extension: str) -> None:
+    from edge_denoise.infer import load_measurement01
+
+    folder = tmp_path / "raw" / "site"
+    folder.mkdir(parents=True)
+    rng = np.random.default_rng(12)
+    for index in range(3):
+        gray = rng.integers(0, 256, (40, 48), dtype=np.uint8)
+        Image.fromarray(np.repeat(gray[..., None], 3, axis=2)).save(folder / f"{index}{extension}")
+    path = folder / f"0{extension}"
+    with Image.open(path) as image:
+        decoded = np.asarray(image).copy()
+    np.testing.assert_array_equal(read_native(path), decoded[..., 0])
+    np.testing.assert_array_equal(
+        load_measurement01(path, black_level=0, white_level=255), decoded[..., 0] / 255.0,
+    )
+    prepare_real_dataset(folder.parent, tmp_path / "prepared", image_size=16,
+                         align="none", val_fraction=0, test_fraction=0)
+    cache = BurstCache(tmp_path / "prepared", min_size=16)
+    assert cache.real_metadata["normalization"] == {"black": 0, "white": 255}
+    assert cache.train_sources[0].frames.dtype == np.uint8
+    np.testing.assert_array_equal(cache.train_sources[0].frames[0], decoded[..., 0])
+
+
+@pytest.mark.parametrize("extension", [".jpg", ".png"])
+def test_unequal_rgb_channels_rejected_for_preparation_and_real_inference(tmp_path: Path, extension: str) -> None:
+    from edge_denoise.infer import load_measurement01
+
+    path = tmp_path / f"color{extension}"
+    pixels = np.zeros((16, 16, 3), dtype=np.uint8)
+    pixels[..., 0] = 255
+    Image.fromarray(pixels).save(path)
+    with pytest.raises(ValueError, match="identical RGB channels"):
+        read_native(path)
+    with pytest.raises(ValueError, match="identical RGB channels"):
+        load_measurement01(path, black_level=0, white_level=255)
+
+
+def test_full_1024_frames_supply_fresh_aligned_512_crops(tmp_path: Path) -> None:
+    folder = tmp_path / "raw" / "site"
+    folder.mkdir(parents=True)
+    yy, xx = np.mgrid[:1024, :1024]
+    for index in range(3):
+        gray = ((yy + xx * 3 + index * 17) % 256).astype(np.uint8)
+        Image.fromarray(np.repeat(gray[..., None], 3, axis=2)).save(folder / f"{index}.jpg")
+    prepared = tmp_path / "prepared"
+    prepare_real_dataset(folder.parent, prepared, image_size=512, align="none",
+                         val_fraction=0, test_fraction=0)
+    cache = BurstCache(prepared, min_size=512)
+    source = cache.train_sources[0]
+    assert source.frames.shape == (3, 1024, 1024)
+    cfg = real_config(prepared, tmp_path / "run")
+    cfg.data.image_size = 512
+    factory = RealPairFactory(cache, cfg, seed=10)
+    coordinates = []
+    for _ in range(3):
+        batch, infos = factory.sample_batch(return_info=True)
+        assert batch.inputs.shape == batch.targets.shape == (2, 1, 512, 512)
+        for index, info in enumerate(infos):
+            y, x = info.crop_yx
+            assert 4 <= y <= 508 and 4 <= x <= 508
+            coordinates.append((y, x))
+            for tensor, replica in ((batch.inputs, info.input_replica), (batch.targets, info.target_replica)):
+                expected = normalize_native(source.frames[replica, y:y + 512, x:x + 512], 0, 255) * 2 - 1
+                np.testing.assert_array_equal(tensor[index, 0], expected)
+    assert len(set(coordinates)) > 1
+    state = factory.state_dict()
+    expected, expected_info = factory.sample_batch(return_info=True)
+    factory.load_state_dict(state)
+    actual, actual_info = factory.sample_batch(return_info=True)
+    assert actual_info == expected_info
+    assert torch.equal(actual.inputs, expected.inputs)
+    assert torch.equal(actual.targets, expected.targets)
 
 
 def write_raw(root: Path, *, sites: int = 4, frames: int = 8, high: bool = False) -> Path:

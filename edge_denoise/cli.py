@@ -108,9 +108,9 @@ def train(
 
 @app.command("prepare-real")
 def prepare_real(
-    source_dir: Path = typer.Option(..., help="One subfolder per site, one grayscale image per frame."),
+    source_dir: Path = typer.Option(..., help="One subfolder per site; grayscale or identical-channel RGB images, including JPEG."),
     out: Path = typer.Option(..., help="New prepared dataset directory, outside source-dir."),
-    image_size: int = typer.Option(512, min=8, help="Required native crop size."),
+    image_size: int = typer.Option(512, min=8, help="Minimum required training crop size in the registration overlap; full frames are stored."),
     black_level: float = typer.Option(0.0, help="Fixed detector black level; never estimated per frame."),
     white_level: Optional[float] = typer.Option(None, help="Fixed white level; default 255/65535 from storage dtype."),
     val_fraction: float = typer.Option(0.1, min=0, max=0.99),
