@@ -188,7 +188,14 @@ def test_registered_pairs_keep_inputs_native_and_align_target_and_second(tmp_pat
     shifts = np.array([[0, 0], [0.25, -0.5], [-0.25, 0.5]])
     for index, (dy, dx) in enumerate(shifts):
         Image.fromarray(np.rint(10000 + 400 * (yy - dy) + 100 * (xx - dx)).astype(np.uint16)).save(raw / f"{index}.tif")
-    monkeypatch.setattr("edge_denoise.real_data.estimate_translations", lambda *args, **kwargs: (shifts, np.zeros_like(shifts)))
+    def estimated(*args, **kwargs):
+        kwargs["diagnostics"].extend([
+            {"status": "reference" if index == 0 else "registered", "contrast": 0.1}
+            for index in range(len(shifts))
+        ])
+        return shifts, np.zeros_like(shifts)
+
+    monkeypatch.setattr("edge_denoise.real_data.estimate_translations", estimated)
     prepare_real_dataset(raw.parent, tmp_path / "prepared", image_size=16, val_fraction=0, test_fraction=0)
     cache = BurstCache(tmp_path / "prepared")
     cfg = real_config(tmp_path / "prepared", tmp_path / "run", consistency=1)
@@ -349,6 +356,78 @@ def test_streamed_registration_recovers_known_motion() -> None:
     assert np.mean((aligned[interior] - scene[interior]) ** 2) < np.mean((unit[interior] - scene[interior]) ** 2) / 10
     with pytest.raises(ValueError, match="implausible shift"):
         estimate_translations(raw, black=0, white=65535, sigma=1.5, radius=4, max_shift=0.2, device="cpu")
+
+
+def test_blank_frames_skip_registration_without_resetting_search_guess(monkeypatch) -> None:
+    rng = np.random.default_rng(42)
+    blank = np.clip(128 + rng.normal(0, 8, (96, 96)), 0, 255).astype(np.uint8)
+    pattern = np.zeros((96, 96), dtype=np.uint8)
+    pattern[20:60, 30:70] = 200
+    raw = np.stack([blank, pattern, pattern, blank, pattern])
+    guesses = []
+
+    def coarse(reference, moving, *, radius, guess):
+        guesses.append(guess)
+        return (2, 1)
+
+    monkeypatch.setattr("edge_denoise.real_data.coarse_shift", coarse)
+    monkeypatch.setattr("edge_denoise.real_data.refine_shift",
+                        lambda *args: (np.array([2.0, 1.0]), np.eye(2)))
+    records = []
+    shifts, uncertainty = estimate_translations(raw, black=0, white=255, sigma=2,
+                                               radius=6, max_shift=32, device="cpu", diagnostics=records)
+    assert [r["status"] for r in records] == [
+        "skipped_low_contrast", "reference", "registered", "skipped_low_contrast", "registered",
+    ]
+    np.testing.assert_array_equal(shifts[[0, 1, 3]], np.zeros((3, 2)))
+    assert np.isnan(uncertainty[[0, 3]]).all()
+    assert guesses == [(0, 0), (2, 1)]
+
+
+def test_all_blank_site_is_preserved_and_reported(tmp_path: Path, monkeypatch) -> None:
+    import csv
+
+    def fail(*args, **kwargs):
+        pytest.fail("blank frames must not reach shift estimation or warping")
+
+    for name in ("coarse_shift", "refine_shift", "warp_frame"):
+        monkeypatch.setattr(f"edge_denoise.real_data.{name}", fail)
+    folder = tmp_path / "raw" / "site"
+    folder.mkdir(parents=True)
+    for index in range(3):
+        Image.fromarray(np.full((40, 48), 120 + index, dtype=np.uint8)).save(folder / f"{index}.png")
+    messages = []
+    manifest = prepare_real_dataset(folder.parent, tmp_path / "prepared", image_size=16,
+                                    val_fraction=0, test_fraction=0, progress=messages.append)
+    metadata = json.loads(manifest.read_text())
+    assert all(r["status"] == "skipped_low_contrast" for r in metadata["sites"][0]["registration"])
+    assert any("3/3" in message for message in messages)
+    with (manifest.parent / "qc.csv").open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert all(row["registration_status"] == "skipped_low_contrast" and row["uncertainty_dy"] == "" for row in rows)
+    cache = BurstCache(manifest.parent, min_size=16)
+    raw = cache.train_sources[0].frames
+    aligned = np.load(manifest.parent / metadata["sites"][0]["aligned"]["path"])
+    np.testing.assert_array_equal(aligned, normalize_native(raw, 0, 255))
+
+
+@pytest.mark.parametrize("threshold", [-1, float("nan"), float("inf")])
+def test_invalid_registration_contrast_fails_before_preparation(tmp_path: Path, threshold: float) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    with pytest.raises(ValueError, match="min_registration_contrast"):
+        prepare_real_dataset(raw, tmp_path / "prepared", min_registration_contrast=threshold)
+    assert not (tmp_path / "prepared").exists()
+
+
+def test_zero_contrast_threshold_disables_skip(monkeypatch) -> None:
+    monkeypatch.setattr("edge_denoise.real_data.coarse_shift", lambda *args, **kwargs: (0, 0))
+    monkeypatch.setattr("edge_denoise.real_data.refine_shift",
+                        lambda *args: (np.array([0.0, 0.0]), np.eye(2)))
+    records = []
+    estimate_translations(np.zeros((2, 40, 48), dtype=np.uint8), black=0, white=255,
+                          sigma=2, radius=6, max_shift=32, device="cpu", min_contrast=0, diagnostics=records)
+    assert [r["status"] for r in records] == ["reference", "registered"]
 
 
 def test_real_recipes_share_teacher_backbone_and_expected_objectives() -> None:

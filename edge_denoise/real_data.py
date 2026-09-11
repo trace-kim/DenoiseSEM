@@ -114,19 +114,38 @@ def _assign_splits(
 def estimate_translations(
     raw: np.ndarray, *, black: float, white: float, sigma: float,
     radius: int, max_shift: float, device: str,
+    min_contrast: float = 0.005, diagnostics: list[dict] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reuse existing shift estimators, streaming one full frame at a time."""
+    """Register textured frames; leave low-contrast frames at zero shift.
+
+    Contrast is the standard deviation of nonoverlapping 16px block means
+    in normalized intensity units. This suppresses pixel noise, but remains
+    a configurable heuristic. Zero disables the check. The first usable
+    frame defines the reference coordinate system.
+    """
+    if not np.isfinite(min_contrast) or min_contrast < 0:
+        raise ValueError("min_contrast must be finite and nonnegative")
     resolved = torch.device(device)
-    reference = gaussian_smooth(
-        torch.from_numpy(normalize_native(raw[0], black, white))[None, None].to(resolved), sigma
-    )
+    reference = None
     shifts, uncertainty = np.zeros((len(raw), 2)), np.zeros((len(raw), 2))
     guess = (0, 0)
     with torch.no_grad():
-        for index in range(1, len(raw)):
-            moving = gaussian_smooth(
-                torch.from_numpy(normalize_native(raw[index], black, white))[None, None].to(resolved), sigma
-            )
+        for index in range(len(raw)):
+            unit = torch.from_numpy(normalize_native(raw[index], black, white))[None, None].to(resolved)
+            block = min(16, max(1, min(unit.shape[-2:]) // 2))
+            contrast = float(F.avg_pool2d(unit, block, ceil_mode=True).std(correction=0))
+            record = {"status": "registered", "contrast": contrast}
+            if diagnostics is not None:
+                diagnostics.append(record)
+            if min_contrast > 0 and contrast < min_contrast:
+                record["status"] = "skipped_low_contrast"
+                uncertainty[index] = np.nan  # Unmeasured, not a confident zero.
+                continue
+            moving = gaussian_smooth(unit, sigma)
+            if reference is None:
+                reference = moving
+                record["status"] = "reference"
+                continue
             initial = coarse_shift(reference, moving, radius=radius, guess=guess)
             shift, covariance = refine_shift(reference, moving, initial)
             if not np.isfinite(shift).all() or np.abs(shift).max() > max_shift:
@@ -156,6 +175,7 @@ def prepare_real_dataset(
     val_fraction: float = 0.1, test_fraction: float = 0.1, split_seed: int = 2019,
     split_file: str | Path | None = None, align: str = "translation",
     sigma: float = 2.0, radius: int = 6, max_shift: float = 32.0,
+    min_registration_contrast: float = 0.005,
     frame_start: int = 0, frame_stop: int | None = None,
     device: str = "cpu", progress: Callable[[str], None] | None = None,
 ) -> Path:
@@ -176,6 +196,8 @@ def prepare_real_dataset(
         raise ValueError("invalid patch size or frame interval")
     if align not in ("translation", "none") or sigma < 0 or radius < 1 or max_shift <= 0:
         raise ValueError("invalid registration settings")
+    if not np.isfinite(min_registration_contrast) or min_registration_contrast < 0:
+        raise ValueError("min_registration_contrast must be finite and nonnegative")
     folders = sorted((p for p in source_root.iterdir() if p.is_dir()), key=_natural_key)
     if not folders:
         raise ValueError("expected one subfolder per SEM site")
@@ -219,9 +241,17 @@ def prepare_real_dataset(
             raw.flush()
             if progress:
                 progress(f"{folder.name}: {len(files)} native {first.shape[0]}x{first.shape[1]} {dtype} frames; registering")
+            registration = []
             shifts, uncertainty = (
-                estimate_translations(raw, black=black_level, white=white, sigma=sigma, radius=radius, max_shift=max_shift, device=device)
+                estimate_translations(raw, black=black_level, white=white, sigma=sigma, radius=radius,
+                                      max_shift=max_shift, device=device,
+                                      min_contrast=min_registration_contrast, diagnostics=registration)
                 if align == "translation" else (np.zeros((len(raw), 2)), np.zeros((len(raw), 2))))
+            if align == "none":
+                registration = [{"status": "disabled", "contrast": None} for _ in raw]
+            skipped = sum(record["status"] == "skipped_low_contrast" for record in registration)
+            if skipped and progress:
+                progress(f"{folder.name}: skipped registration for {skipped}/{len(raw)} low-contrast frames; see qc.csv")
             lower = np.ceil(4 - shifts.min(axis=0)).astype(int)
             upper = np.floor(np.array(first.shape) - 4 - shifts.max(axis=0)).astype(int)
             if (upper - lower < image_size).any():
@@ -239,7 +269,10 @@ def prepare_real_dataset(
                 qc_rows.append({
                     "site": folder.name, "frame": index, "file": frames[index]["name"],
                     "dy": shifts[index, 0], "dx": shifts[index, 1],
-                    "uncertainty_dy": uncertainty[index, 0], "uncertainty_dx": uncertainty[index, 1],
+                    "registration_status": registration[index]["status"],
+                    "registration_contrast": registration[index]["contrast"],
+                    "uncertainty_dy": float(uncertainty[index, 0]) if np.isfinite(uncertainty[index, 0]) else None,
+                    "uncertainty_dx": float(uncertainty[index, 1]) if np.isfinite(uncertainty[index, 1]) else None,
                     "mean01": float(unit.mean()), "std01": float(unit.std()),
                     "clipped_fraction": float(((frame < black_level) | (frame > white)).mean()),
                     "endpoint_fraction": float(((unit == 0) | (unit == 1)).mean()),
@@ -248,7 +281,8 @@ def prepare_real_dataset(
             np.save(staging / f"{base}_sum.npy", total.astype(np.float32), allow_pickle=False)
             _preview(raw, total / len(raw), black_level, white, staging / "previews" / f"{source_index:05d}.png")
             site = {"name": folder.name, "source_index": source_index, "frames": frames,
-                    "shifts": shifts.tolist(), "bounds": [*lower.tolist(), *upper.tolist()]}
+                    "shifts": shifts.tolist(), "bounds": [*lower.tolist(), *upper.tolist()],
+                    "registration": registration}
             # Release Windows mmap handles before the atomic directory rename.
             del frame
             aligned._mmap.close()
@@ -263,6 +297,7 @@ def prepare_real_dataset(
             "format": REAL_FORMAT, "kind": "real_sem", "sites": sites,
             "normalization": {"black": black_level, "white": white},
             "registration": {"mode": align, "sigma": sigma, "radius": radius, "max_shift": max_shift,
+                             "min_contrast": min_registration_contrast, "contrast_block_size": 16,
                              "interpolation": "bicubic", "row_deformation": False},
             "split_seed": split_seed, "duplicate_groups": duplicates,
             "val_fraction": val_fraction, "test_fraction": test_fraction,

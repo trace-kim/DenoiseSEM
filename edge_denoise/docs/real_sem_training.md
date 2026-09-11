@@ -171,6 +171,31 @@ TIFFs**. Check multiple parts of each site at native scale:
   directions that parallel line patterns cannot constrain?
 - Are significant values clipped by the selected intensity scale?
 
+With `--align translation` (the default), each frame is checked for structure
+before estimating its shift. Frames with contrast below
+`--min-registration-contrast 0.005` are kept with zero shift and are not warped
+when building registered arrays. Contrast is the standard deviation of 16-pixel
+block means in normalized `[0,1]` intensity units, which reduces sensitivity to
+pixel noise. This is a heuristic: inspect QC for weak patterns or strong noise,
+and lower or raise the threshold as appropriate. `--min-registration-contrast 0`
+disables this check. `--align none` still disables registration for every frame.
+
+The first frame above the threshold defines the reference coordinates. A blank
+first frame therefore does not prevent registration of later patterned frames.
+Skipped frames do not update the previous shift used for the search. An entirely
+blank site is retained with all shifts zero. The check applies to whole frames;
+a blank area within an otherwise patterned frame does not itself trigger a skip.
+
+`qc.csv` records `registration_contrast` and `registration_status` (`reference`,
+`registered`, `skipped_low_contrast`, or `disabled`). Skipped frames have empty
+uncertainty fields because their shift was not measured. Per-frame statuses and
+the threshold are also saved in `real_dataset.json`, and preparation reports
+skip counts. Implausible shifts on frames above the threshold still fail.
+If a single repeat loses patterns visible in other repeats, inspect the
+acquisition: skipping alignment does not make different specimen content a
+valid training pair. Prepare into a new output directory to apply this behavior
+to an existing dataset.
+
 Registration currently fits translations. It uses smoothed copies to estimate
 motion; training inputs remain unsmoothed. It does not correct local charging
 distortion, raster shear, rotation, or specimen changes. A plausible shift
