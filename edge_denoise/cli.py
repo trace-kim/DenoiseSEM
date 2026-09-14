@@ -269,9 +269,25 @@ def denoise(
         ),
     ),
     stride: Optional[int] = typer.Option(
-        None, min=1, help="Tile stride (default 48 for small models, half the tile for 512px models)."
+        None,
+        min=1,
+        help=(
+            "Tile stride (default 48 for small models, half the tile for 512px models; "
+            "clamped to tile - 2 * margin)."
+        ),
     ),
-    tile_batch: int = typer.Option(4, min=1, help="Tiles per forward pass for the full frame."),
+    tile_batch: int = typer.Option(
+        4, min=1, help="Tiles per forward pass for the full frame (memory only; does not change the result)."
+    ),
+    margin: Optional[int] = typer.Option(
+        None,
+        min=0,
+        help=(
+            "Outer pixels of every tile excluded from the full-frame blend (sides flush with the "
+            "frame border keep them). Default: the pixels the training loss never supervised -- "
+            "3 for real-data checkpoints, 0 for synthetic ones."
+        ),
+    ),
     ema: bool = typer.Option(True, "--ema/--no-ema", help="Use the EMA weights."),
     device: str = typer.Option("auto", help="auto | cpu | cuda"),
 ) -> None:
@@ -325,11 +341,13 @@ def denoise(
 
     if full:
         frame01 = denoiser.load_measurement(measurement_path) if frame01 is None else frame01
-        denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch)
+        margin = denoiser.default_margin if margin is None else margin
+        stride = max(1, min(stride, image_size - 2 * margin))
+        denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch, margin=margin)
         measurement_chw, denoised_chw = to_model(frame01), to_model(denoised01)
         typer.echo(
             f"denoised the full {frame01.shape[0]}x{frame01.shape[1]} frame "
-            f"(tile {image_size}, stride {min(stride, image_size)})"
+            f"(tile {image_size}, stride {stride}, margin {margin})"
         )
     else:
         frame01 = denoiser.load_measurement(measurement_path) if frame01 is None else frame01

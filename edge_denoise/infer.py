@@ -105,8 +105,25 @@ class Denoiser:
             denoised = self.model.predict_image(batch)
         return denoised.clamp(-1.0, 1.0).cpu()
 
+    @property
+    def default_margin(self) -> int:
+        """Outer tile pixels the full-frame blend excludes by default: the ones
+        the training loss never supervised.  A real-data checkpoint (detector
+        levels persisted from ``prepare-real``) trained with a ``LOSS_MARGIN``-
+        pixel loss border; synthetic checkpoints supervised every pixel."""
+        if self.config.data.white_level is None:
+            return 0
+        from .real_data import LOSS_MARGIN
+
+        return LOSS_MARGIN
+
     def denoise_full(
-        self, frame01: np.ndarray, *, stride: int = 48, tile_batch: int = 64
+        self,
+        frame01: np.ndarray,
+        *,
+        stride: int = 48,
+        tile_batch: int = 64,
+        margin: int | None = None,
     ) -> np.ndarray:
         """Denoise a full ``[H, W]`` float frame in [0, 1] of any size >= the
         training resolution; returns the same format.
@@ -115,13 +132,18 @@ class Denoiser:
         training resolution, so a larger frame cannot go through in one pass;
         it is covered with overlapping training-resolution tiles blended by
         the shared windowed blender (:func:`edge_denoise.distill.denoise_full_frame`).
+        ``margin`` (``None`` = :attr:`default_margin`) excludes that many outer
+        pixels of every tile except on sides flush with the frame border, and
+        ``stride`` is clamped to the valid region ``tile - 2 * margin``.
         """
+        margin = self.default_margin if margin is None else margin
         return denoise_full_frame(
             self.denoise,
             np.asarray(frame01, dtype=np.float64),
             tile=self.image_size,
-            stride=min(stride, self.image_size),
+            stride=max(1, min(stride, self.image_size - 2 * margin)),
             tile_batch=tile_batch,
+            margin=margin,
         )
 
     def denoise01(self, frames01: list[np.ndarray], *, max_batch: int = 10) -> list[np.ndarray]:

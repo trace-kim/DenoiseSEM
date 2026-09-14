@@ -14,15 +14,28 @@ clean image.  The unbiased siblings (``gradient_target: clean`` /
 ``noisy_mean``) exist precisely to price that bias; see
 docs/edge_denoise_method.md and the target-ladder report.
 
-The backbone carries attention blocks, so full 512x512 frames cannot go
-through in one pass (and the estimator is only trusted at its training
-resolution anyway -- see infer.py).  Frames are therefore covered with
-overlapping training-resolution tiles blended by a separable raised-cosine
-window with a floor (the floor keeps frame borders, covered only by tile
-edges where a plain Hann window is zero, at nonzero total weight).  With any
-stride < tile the blend is seam-free in the sense that every pixel is a convex
-combination of tile predictions; an identity denoiser round-trips exactly
-(unit-tested).
+The backbone carries attention blocks, so full frames cannot go through in
+one pass (and the estimator is only trusted at its training resolution anyway
+-- see infer.py).  Frames are therefore covered with overlapping
+training-resolution tiles blended by a separable raised-cosine window that
+VANISHES at the tile edges.  A tile's outermost pixels are its least reliable
+ones: every convolution in the backbone zero-pads, so they are predicted with
+half their context missing, and on real data the loss never supervised the
+outer ``LOSS_MARGIN`` pixels at all.  They must therefore fade in from nothing
+wherever another tile overlaps.  The previous window had a 0.1 floor, which
+let them enter abruptly at ~9% weight and drew visible lines along every tile
+boundary of a 1024x1024 frame (2026-09-14).
+
+``margin`` additionally excludes an outer ring outright, frame-aware: a tile
+side flush with the frame border keeps the tile's own edge predictions, the
+only estimate of those pixels.  The frame itself is never padded -- mirrored
+or replicated extensions are out of distribution for a network trained on
+zero-padded crops and measured WORSE in the frame's outer band than the
+network's own border behavior.  With ``stride <= tile - 2 * margin`` every
+pixel is a convex combination of tile predictions, an identity denoiser
+round-trips exactly, and a denoiser that corrupts its tile borders leaves no
+step behind (unit-tested); ``stride = tile // 2`` is the balanced
+constant-overlap-add cross-fade.
 """
 
 from __future__ import annotations
@@ -78,8 +91,16 @@ def build_teacher(
 
 
 def _window1d(tile: int) -> np.ndarray:
-    """Raised cosine with a 0.1 floor (see module docstring for why a floor)."""
-    return 0.1 + 0.9 * np.hanning(tile)
+    """Raised cosine that vanishes at the tile edges but stays positive.
+
+    ``np.hanning(tile + 2)[1:-1]``: the first and last weight are
+    ``~(pi / (tile + 1))^2`` -- 4e-5 for a 512 tile -- so a tile's outermost
+    pixels contribute nothing visible wherever another tile overlaps, yet a
+    frame-border pixel covered only by a tile edge still normalizes to that
+    tile's own prediction instead of 0/0.  Two such windows offset by half a
+    tile sum to ~1 (constant overlap-add), the balanced cross-fade.
+    """
+    return np.hanning(tile + 2)[1:-1]
 
 
 def _positions(extent: int, tile: int, stride: int) -> list[int]:
@@ -89,6 +110,28 @@ def _positions(extent: int, tile: int, stride: int) -> list[int]:
     return stops
 
 
+def _axis_profile(tile: int, margin: int, *, flush_low: bool, flush_high: bool) -> np.ndarray:
+    """1-D weights along one axis of a tile.
+
+    ``margin`` pixels at either end get weight 0 (excluded outright) and the
+    remaining span a raised cosine that vanishes at the margin -- unless that
+    end is flush with the frame border, where the tile's own edge predictions
+    are the only estimate available and keep the full-tile profile.  Both
+    profiles peak at ~1 mid-tile, so the halves join continuously.
+    """
+    full = _window1d(tile)
+    if margin == 0:
+        return full
+    profile = np.zeros(tile, dtype=np.float64)
+    profile[margin : tile - margin] = _window1d(tile - 2 * margin)
+    half = tile // 2
+    if flush_low:
+        profile[:half] = full[:half]
+    if flush_high:
+        profile[half:] = full[half:]
+    return profile
+
+
 def denoise_full_frame(
     denoise_fn: DenoiseFn,
     frame01: np.ndarray,
@@ -96,16 +139,40 @@ def denoise_full_frame(
     tile: int,
     stride: int,
     tile_batch: int = 64,
+    margin: int = 0,
 ) -> np.ndarray:
-    """Denoise a full ``[H, W]`` float frame in [0, 1] by blended tiling."""
+    """Denoise a full ``[H, W]`` float frame in [0, 1] by blended tiling.
+
+    ``stride`` is the tile spacing (``tile // 2`` recommended); ``tile_batch``
+    only sets how many tiles share one forward pass and does not change the
+    result; ``margin`` excludes that many outer pixels of every tile from the
+    blend except on sides flush with the frame border (see module docstring).
+    ``stride`` may not exceed ``tile - 2 * margin``, or some pixels would fall
+    in no tile's valid region.
+    """
     if frame01.ndim != 2:
         raise ValueError(f"frame01 must be [H, W], got shape {frame01.shape}")
     height, width = frame01.shape
     if min(height, width) < tile:
         raise ValueError(f"frame {frame01.shape} is smaller than the tile size {tile}")
-    if not 1 <= stride <= tile:
-        raise ValueError(f"stride must be in [1, tile], got {stride} (tile {tile})")
-    window = np.outer(_window1d(tile), _window1d(tile))
+    if margin < 0:
+        raise ValueError(f"margin must be >= 0, got {margin}")
+    if not 1 <= stride <= tile - 2 * margin:
+        raise ValueError(
+            f"stride must be in [1, tile - 2 * margin] = [1, {tile - 2 * margin}] so every "
+            f"pixel lies in some tile's valid region, got {stride} (tile {tile}, margin {margin})"
+        )
+    windows: dict[tuple[bool, bool, bool, bool], np.ndarray] = {}
+
+    def window_for(top: int, left: int) -> np.ndarray:
+        flush = (top == 0, top + tile == height, left == 0, left + tile == width)
+        if flush not in windows:
+            windows[flush] = np.outer(
+                _axis_profile(tile, margin, flush_low=flush[0], flush_high=flush[1]),
+                _axis_profile(tile, margin, flush_low=flush[2], flush_high=flush[3]),
+            )
+        return windows[flush]
+
     accumulator = np.zeros((height, width), dtype=np.float64)
     weight_sum = np.zeros((height, width), dtype=np.float64)
     coordinates = [
@@ -121,8 +188,11 @@ def denoise_full_frame(
         prediction = denoise_fn(torch.from_numpy(tiles[:, None] * 2.0 - 1.0))
         tiles01 = ((prediction.numpy()[:, 0] + 1.0) / 2.0).astype(np.float64)
         for (top, left), tile01 in zip(chunk, tiles01):
+            window = window_for(top, left)
             accumulator[top : top + tile, left : left + tile] += tile01 * window
             weight_sum[top : top + tile, left : left + tile] += window
+    if not (weight_sum > 0.0).all():
+        raise RuntimeError("tile blend left pixels with zero weight; this is a bug")
     return accumulator / weight_sum
 
 

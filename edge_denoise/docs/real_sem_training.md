@@ -532,10 +532,17 @@ with `output * (white_level - black_level) + black_level` using the checkpoint
 normalization if your measurement software expects detector units. Keep the
 float result for analysis; the PNG is only a preview.
 
-Check dimensions, intensity range, tile boundaries, edge widths, and small
-features. Try `--stride 384` only after confirming it gives acceptable seams
-and measurements. Reduce `--tile-batch` if inference runs out of memory.
-`--center-crop` explicitly tests one 512×512 tile instead of the full frame.
+Check dimensions, intensity range, edge widths, and small features. Tiles are
+glued with a cross-fade that gives a tile's outermost pixels no visible
+weight where another tile overlaps, and `--margin` (default 3 for real-data
+checkpoints: the loss border that training never supervised) excludes them
+outright, except along the frame border where a tile's own edge prediction is
+the only estimate. The frame is never padded. Keep `--stride` at half the
+tile or less (256 for 512-px tiles; it is clamped to `tile - 2 * margin`); a
+larger stride only reduces how many tiles vote for each pixel. Reduce
+`--tile-batch` if inference runs out of memory; it does not change the
+result. `--center-crop` explicitly tests one 512×512 tile instead of the full
+frame.
 
 For example, inspect the quantitative output:
 

@@ -62,6 +62,36 @@ def test_denoise_full_at_training_resolution_matches_the_direct_pass(tmp_path: P
     assert np.allclose(denoiser.denoise_full(frame01), direct01, atol=1e-6)
 
 
+def test_denoise_full_defaults_to_the_training_loss_margin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real-data checkpoint (detector levels persisted) trained with a
+    LOSS_MARGIN-pixel loss border, so the blend excludes those pixels by
+    default and clamps the stride to the valid region; a synthetic checkpoint
+    supervised every pixel and keeps margin 0."""
+    from edge_denoise import infer as infer_module
+    from edge_denoise.real_data import LOSS_MARGIN
+
+    checkpoint = _train_checkpoint(tmp_path, "image")
+    denoiser = Denoiser.from_checkpoint(checkpoint, device="cpu")
+    captured: dict = {}
+
+    def fake_blend(fn, frame01, **kwargs):
+        captured.update(kwargs)
+        return frame01
+
+    monkeypatch.setattr(infer_module, "denoise_full_frame", fake_blend)
+    frame01 = np.zeros((32, 32))
+    denoiser.denoise_full(frame01, stride=12)
+    assert captured["margin"] == 0 and captured["stride"] == 12
+    denoiser.config.data.black_level, denoiser.config.data.white_level = 0.0, 255.0
+    denoiser.denoise_full(frame01, stride=12)
+    assert captured["margin"] == LOSS_MARGIN
+    assert captured["stride"] == denoiser.image_size - 2 * LOSS_MARGIN
+    denoiser.denoise_full(frame01, stride=12, margin=1)
+    assert captured["margin"] == 1 and captured["stride"] == 12
+
+
 def test_load_measurement01_reads_8_and_16_bit_whole_frames(tmp_path: Path) -> None:
     from PIL import Image
 

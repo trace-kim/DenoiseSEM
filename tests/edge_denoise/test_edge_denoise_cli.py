@@ -103,11 +103,13 @@ def test_denoise_covers_the_whole_frame_by_default(tmp_path: Path) -> None:
             "--input", str(measurement),
             "--out", str(tmp_path / "out_full"),
             "--stride", "8",
+            "--margin", "2",
             "--device", "cpu",
         ],
     )
     assert result.exit_code == 0, result.output
     assert "denoised the full 40x48 frame" in result.output
+    assert "stride 8, margin 2" in result.output
     with Image.open(tmp_path / "out_full" / "frame_denoised.png") as image:
         assert image.size == (48, 40)  # PIL size is (W, H): the whole frame
 
