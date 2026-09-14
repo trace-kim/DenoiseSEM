@@ -517,7 +517,9 @@ The 1024×1024 image is processed in overlapping 512×512 tiles and blended
 back to the original dimensions. It is not downscaled. The checkpoint
 supplies the intensity scale, and inference requires only this one raw frame.
 It does not need the prepared dataset, registration files, or additional
-acquisitions.
+acquisitions. To run this over every image in a folder and then analyze the
+noise of the results, see
+[real_sem_batch_inference.md](real_sem_batch_inference.md).
 
 Outputs are:
 

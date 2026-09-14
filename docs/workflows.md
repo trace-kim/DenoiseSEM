@@ -206,7 +206,11 @@ For real noisy-only SEM repeats, start with the
 [real SEM training and inference guide](../edge_denoise/docs/real_sem_training.md).
 It covers `prepare-real`, fixed site splits, native 512-pixel patches,
 N2N/mean-target comparisons, 1–4 GPU training, `evaluate-real`, and full-frame
-inference with quantitative float32 output.
+inference with quantitative float32 output. To denoise a whole folder of real
+noisy frames with an existing checkpoint and characterize the noise before and
+after, see the
+[batch inference runbook](../edge_denoise/docs/real_sem_batch_inference.md) —
+it needs no data preparation.
 
 Deterministic single-pass denoisers aimed at metrology *precision* (CD and
 registration repeatability), not just PSNR: plain Noise2Noise (`image`), the
