@@ -167,26 +167,22 @@ at least 8 frames per site by default (`min_frames`, see
 python -m pip install -e ".[analysis]"
 
 SRC="data/SEM-test"
-PX_NM=1.5      # pixel size in nm        -- edit to your acquisition
-DT_S=2.4       # seconds between frames  -- NOT pixel dwell time
 
 # denoised
 python -m sem_noise analyze \
-  --input output/test-noise-in --output output/noise-denoised \
-  --pixel-size-nm "$PX_NM" --frame-interval-s "$DT_S"
+  --input output/test-noise-in --output output/noise-denoised
 
 # raw, for the before/after comparison
 python -m sem_noise analyze \
-  --input "$SRC" --output output/noise-raw \
-  --pixel-size-nm "$PX_NM" --frame-interval-s "$DT_S"
+  --input "$SRC" --output output/noise-raw
 ```
 
 Open `output/noise-denoised/index.html`. Reports are offline and self-contained.
 
-- `--frame-interval-s` is the time between acquisitions, **not** pixel dwell
-  time. Drop both options entirely if you do not have those numbers. You lose
-  seconds-based Allan curves and temporal FFTs; frame-lag results still
-  describe the ordered sequence.
+No acquisition metadata is required. Nothing above needs a pixel size, a frame
+interval, or anything produced by `prepare-real` — those belong to other
+commands and are not part of this procedure.
+
 - If filenames do not encode acquisition order, build an inventory and edit the
   site labels and frame indices to match the acquisition record:
 
@@ -198,6 +194,25 @@ Open `output/noise-denoised/index.html`. Reports are offline and self-contained.
 
 - Exit code 1 means some sites failed and the index identifies them; exit code 2
   is a command, input, or configuration error.
+
+### Optional: physical units
+
+Both of the following are optional and default to unset. Every result above is
+produced without them; supplying them only relabels axes and adds columns.
+
+```bash
+python -m sem_noise analyze \
+  --input output/test-noise-in --output output/noise-denoised-units \
+  --pixel-size-nm 1.5 --frame-interval-s 2.4
+```
+
+- `--pixel-size-nm` adds `drift_dy_nm` and `drift_dx_nm` columns to the drift
+  table. Every other distance stays in native pixels either way.
+- `--frame-interval-s` is the time between acquisitions, **not** pixel dwell
+  time, and it is used only when the manifest carries no `timestamp_s` column.
+  Without it the time axis is the frame index: Allan curves are in frames rather
+  than seconds and FFT frequency is cycles per frame. Noise, registration, and
+  stability results are unchanged.
 
 Full option reference: [sem_noise/README.md](../../sem_noise/README.md).
 
