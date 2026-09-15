@@ -169,17 +169,24 @@ def download_weights(
     model_id: str = typer.Option("facebook/sam3", help="Hugging Face repository id."),
     dest: Path | None = typer.Option(None, help="Download into this directory instead of the cache."),
     revision: str | None = typer.Option(None, help="Pin a specific revision."),
+    all_files: bool = typer.Option(
+        False, help="Mirror the whole repo, including the original-format checkpoint."
+    ),
 ) -> None:
     """Fetch model weights explicitly.
 
     Nothing in this package downloads implicitly. A run either finds the weights
     already present or tells you exactly how to get them, so a pipeline never
     silently pulls gigabytes in the middle of a batch.
+
+    The original-format checkpoint is skipped by default: facebook/sam3 ships
+    the model twice and transformers only reads the safetensors copy, so this
+    halves the transfer from 6.9 GB to 3.4 GB.
     """
     from .weights import GatedRepositoryError, MissingDependency, fetch_weights
 
     try:
-        path = fetch_weights(model_id, dest=dest, revision=revision)
+        path = fetch_weights(model_id, dest=dest, revision=revision, all_files=all_files)
     except (GatedRepositoryError, MissingDependency) as error:
         raise typer.BadParameter(str(error)) from error
     typer.echo(f"weights ready at: {path}")

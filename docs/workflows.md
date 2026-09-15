@@ -387,9 +387,10 @@ for the maths and the measured biases.
 
 ### 4c.1 Getting SAM 3 weights onto the remote server
 
-`facebook/sam3` is gated (0.9 B parameters), weights cannot be committed
-(`.gitignore` excludes `*.safetensors`), and the target machine may have no
-internet access. Nothing downloads implicitly; a run either finds the weights or
+`facebook/sam3` is **manually** gated (0.9 B parameters) — a person at Meta
+reviews the access request, so plan for it not being instant. Weights cannot be
+committed (`.gitignore` excludes `*.safetensors`), and the target machine may
+have no internet access. Nothing downloads implicitly; a run either finds the weights or
 prints the exact remedy.
 
 On a connected machine, after accepting the licence at
@@ -397,8 +398,8 @@ On a connected machine, after accepting the licence at
 
 ```bash
 export HF_TOKEN=hf_...
-python -m sem_segment download-weights
-python -m sem_segment backends          # should now report ready
+python -m sem_segment download-weights   # 3.4 GB (skips the redundant sam3.pt)
+python -m sem_segment backends           # should now report ready
 ```
 
 For an air-gapped host, fetch as above and copy the cache across:

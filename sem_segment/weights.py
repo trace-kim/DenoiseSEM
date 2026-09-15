@@ -105,10 +105,25 @@ def resolve_model_source(model_id: str, model_path: Path | None = None) -> str:
     return model_id
 
 
+#: Original-format checkpoints that ``from_pretrained`` never reads.
+#: ``facebook/sam3`` ships the model twice - ``model.safetensors`` (3.44 GB,
+#: which transformers loads) and ``sam3.pt`` (3.45 GB, Meta's own format) - so
+#: fetching everything doubles the transfer for no benefit.
+ORIGINAL_CHECKPOINT_PATTERNS = ["*.pt"]
+
+
 def fetch_weights(
-    model_id: str, *, dest: Path | None = None, revision: str | None = None
+    model_id: str,
+    *,
+    dest: Path | None = None,
+    revision: str | None = None,
+    all_files: bool = False,
 ) -> Path:
-    """Download a snapshot explicitly. Never called implicitly by a run."""
+    """Download a snapshot explicitly. Never called implicitly by a run.
+
+    By default the original-format checkpoint is skipped, halving the download.
+    Pass ``all_files=True`` to mirror the repository exactly.
+    """
     try:
         from huggingface_hub import snapshot_download
     except ImportError as error:
@@ -117,6 +132,8 @@ def fetch_weights(
         ) from error
 
     kwargs: dict = {"repo_id": model_id, "revision": revision}
+    if not all_files:
+        kwargs["ignore_patterns"] = ORIGINAL_CHECKPOINT_PATTERNS
     if dest is not None:
         kwargs["local_dir"] = str(Path(dest))
     token = _token()

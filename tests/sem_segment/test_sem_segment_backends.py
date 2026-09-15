@@ -288,6 +288,46 @@ def test_local_model_path_bypasses_the_hub(tmp_path, monkeypatch):
     assert resolve_model_source("facebook/sam3", local) == str(local)
 
 
+def test_download_skips_the_redundant_original_checkpoint(monkeypatch):
+    """facebook/sam3 ships the model twice; transformers reads only one copy.
+
+    model.safetensors is 3.44 GB and sam3.pt is another 3.45 GB in Meta's own
+    format, which from_pretrained never loads. Fetching both doubles the
+    transfer for no benefit, which matters on a slow link to an HPC host.
+    """
+    import sem_segment.weights as weights
+
+    captured = {}
+
+    def fake_snapshot_download(**kwargs):
+        captured.update(kwargs)
+        return "/fake/snapshot"
+
+    module = types.ModuleType("huggingface_hub")
+    module.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+
+    weights.fetch_weights("facebook/sam3")
+    assert captured["ignore_patterns"] == ["*.pt"]
+
+    captured.clear()
+    weights.fetch_weights("facebook/sam3", all_files=True)
+    assert "ignore_patterns" not in captured
+
+
+def test_download_passes_the_token_when_one_is_set(monkeypatch):
+    import sem_segment.weights as weights
+
+    captured = {}
+    module = types.ModuleType("huggingface_hub")
+    module.snapshot_download = lambda **kw: (captured.update(kw), "/fake")[1]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+    monkeypatch.setenv("HF_TOKEN", "hf_example")
+
+    weights.fetch_weights("facebook/sam3")
+    assert captured["token"] == "hf_example"
+
+
 def test_missing_model_path_is_reported_clearly(tmp_path):
     from sem_segment.weights import GatedRepositoryError, resolve_model_source
 

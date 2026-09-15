@@ -83,7 +83,8 @@ anything on a given image.
 
 ## Getting the weights onto a remote machine
 
-`facebook/sam3` is gated (0.9 B parameters, licence "other"), weights cannot be
+`facebook/sam3` is **manually** gated (0.9 B parameters, licence "other") — a
+person at Meta reviews the request, so access is not instant. Weights cannot be
 committed — `.gitignore` excludes `*.safetensors` globally — and the target
 machine may have no internet at all. Nothing here downloads implicitly; a run
 either finds weights or tells you exactly how to get them.
@@ -93,9 +94,14 @@ either finds weights or tells you exactly how to get them.
 
 ```bash
 export HF_TOKEN=hf_...
-python -m sem_segment download-weights
-python -m sem_segment backends          # should now say ready
+python -m sem_segment download-weights   # 3.4 GB
+python -m sem_segment backends           # should now say ready
 ```
+
+The download skips `sam3.pt`, Meta's original-format checkpoint: the repo ships
+the model twice and `from_pretrained` only reads `model.safetensors`, so the
+default fetch is 3.4 GB rather than 6.9 GB. Pass `--all-files` to mirror the
+repository exactly.
 
 **Air-gapped machine.** Fetch on a connected machine as above, then copy the
 cache directory across and pin it:
