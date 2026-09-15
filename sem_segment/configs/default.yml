@@ -1,0 +1,40 @@
+# Default recipe: SAM 3 automatic mask generation on a grid of point prompts.
+#
+# sam3_auto needs no semantic understanding of the image, which is why it is the
+# default for SEM: the concept ("text") head of SAM 3 was trained on natural
+# images, and micrographs are far outside that distribution. Switch to
+# sam3_text when a phrase demonstrably works on your imagery.
+#
+# facebook/sam3 is a gated repository. Fetch weights once with
+#   python -m sem_segment download-weights
+# and check readiness with
+#   python -m sem_segment backends
+input:
+  pixel_size_nm: null       # set to report nanometres alongside pixels
+  crop: null                # [y0, y1, x0, x1] to exclude a databar or overlay
+segmentation:
+  backend: sam3_auto
+  model_id: facebook/sam3
+  device: auto
+  contrast_stretch: [1.0, 99.0]   # model input only; never affects measurement
+  points_per_batch: 64
+  points_per_crop: 32
+  score_threshold: 0.5
+  large_frame:
+    mode: resize            # resize is seam-free and usually better than tiling
+masks:
+  min_area_px: 25.0
+  max_area_fraction: 0.25
+  iou_dedupe: 0.7
+  containment_dedupe: 0.9
+  containment_keep: larger  # keep the feature, not its higher-scoring inner core
+refine:
+  enabled: true
+  estimator: threshold
+  search_px: 6.0
+  step_px: 0.25
+metrology:
+  cd_definition: equivalent_diameter
+  chord_angles: 36
+report:
+  enabled: true

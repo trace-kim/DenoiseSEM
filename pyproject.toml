@@ -37,6 +37,11 @@ tracking = [
     "nvidia-ml-py>=12",
     "psutil>=5.9",
 ]
+segment = [
+    "transformers>=5,<6",
+    "huggingface-hub>=1,<2",
+    "accelerate>=1,<2",
+]
 dev = [
     "pytest>=8,<10",
 ]
@@ -46,6 +51,7 @@ runctl = "runctl.cli:app"
 burst-diffusion = "burst_diffusion.cli:app"
 edge-denoise = "edge_denoise.cli:app"
 sem-noise = "sem_noise.cli:main"
+sem-segment = "sem_segment.cli:app"
 
 # Flow plugins discovered by runctl.registry.  A new pipeline registers itself
 # here instead of being hard-coded into the orchestrator.
@@ -54,7 +60,7 @@ ddim = "ddim.flow"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["burst_diffusion*", "ddim*", "edge_denoise*", "noising_pipeline*", "runctl*", "sem_noise*"]
+include = ["burst_diffusion*", "ddim*", "edge_denoise*", "noising_pipeline*", "runctl*", "sem_noise*", "sem_segment*"]
 namespaces = true
 
 [tool.setuptools.package-data]
@@ -62,6 +68,7 @@ ddim = ["configs/*.yml"]
 burst_diffusion = ["configs/*.yml"]
 edge_denoise = ["configs/*.yml"]
 sem_noise = ["configs/*.yml"]
+sem_segment = ["configs/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

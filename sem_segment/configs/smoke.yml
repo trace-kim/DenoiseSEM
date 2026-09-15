@@ -1,0 +1,25 @@
+# CPU smoke recipe: no model download, no GPU, seconds to run.
+# Exercises the full pipeline (segment -> contours -> refine -> metrology ->
+# report) using the classical backend, so CI and a fresh remote checkout can
+# verify the package before any gated weights are fetched.
+#
+#   python -m sem_segment segment --config sem_segment/configs/smoke.yml \
+#       --input <image-or-folder> --out output/sem_segment/smoke
+segmentation:
+  backend: classical
+  contrast_stretch: null
+  split_touching: true
+masks:
+  min_area_px: 32.0
+  max_area_fraction: 0.5
+contours:
+  spacing_px: 1.0
+refine:
+  enabled: true
+  estimator: threshold
+  search_px: 6.0
+  step_px: 0.25
+report:
+  enabled: true
+  zoom_insets: 2
+  profile_samples: 4
