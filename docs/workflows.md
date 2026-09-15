@@ -1,6 +1,6 @@
 # Running every workflow from this repository root
 
-This repository holds six independent pieces of work, separated by ownership.
+This repository holds seven independent pieces of work, separated by ownership.
 The original packages used to share one folder. **Every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).
 
@@ -9,6 +9,7 @@ from the repository root** (`E:\PythonProjects\DenoiseSEM`).
 | `ddim/` | The original DDIM implementation (Song, Meng & Ermon), namespaced as a package | nothing in this repo |
 | `noising_pipeline/` | Standalone generator of paired clean/noisy microscopy images | nothing in this repo |
 | `sem_noise/` | Noise, drift, and temporal stability of repeated real SEM acquisitions | nothing in this repo |
+| `sem_segment/` | SAM 3 feature segmentation, contour extraction, and metrology on SEM images | nothing in this repo |
 | `burst_diffusion/` | Burst-averaging diffusion denoiser (own U-Net, trainer, sampler, CLI) | `noising_pipeline` |
 | `edge_denoise/` | Edge-preserving deterministic denoisers for metrology precision (N2N, gradient, hybrid) | `burst_diffusion` |
 | `runctl/` | Flow-agnostic reproducible-run orchestrator (bundles, executors, tracking) | a *flow* plugin, loaded lazily |
@@ -109,6 +110,7 @@ python -m pytest tests/ddim -q            # DDIM flow, spec, legacy entry points
 python -m pytest tests/burst_diffusion -q # burst pipeline
 python -m pytest tests/noising_pipeline -q
 python -m pytest tests/sem_noise -q       # optional .[analysis] dependencies
+python -m pytest tests/sem_segment -q     # segmentation, contours, metrology (CPU only)
 python -m pytest tests/runctl/test_runctl_cli.py::test_canonical_command_exposes_every_varying_setting
 ```
 
@@ -337,6 +339,81 @@ Poisson with a known peak, the better-accuracy variant is one config knob:
 `objective.target_debias_peak: <peak>` (the `avgdebias` objective). `runctl`
 orchestrates only the `ddim` flow, so this pipeline runs through its own CLI
 as above.
+
+---
+
+## 4c. Workflow B3 — `sem_segment`: segment features and measure them
+
+Segments meaningful features in an SEM image with SAM 3, extracts the contours
+that wrap them by two methods, measures those contours, and writes a
+self-contained HTML report. Imports nothing else in this repository.
+
+The two contour methods are not alternatives. SAM 3's vision tower is fixed at
+1008 px, so on a larger frame its mask boundary is quantised to roughly two
+original pixels: good for deciding *which pixels are which feature*, useless as
+a measurement. Method 1 is that mask boundary — a region proposal. Method 2
+re-measures each vertex by fitting an edge model to the **original, unmodified**
+pixels along the contour normal, and is unbiased to better than 0.001 px on
+analytic edges. Both are always computed and both are reported.
+
+Quickest check that everything is wired up (CPU, no GPU, no model download):
+
+```powershell
+python -m pip install -e ".[dev,analysis]"
+python -m sem_segment backends
+python -m sem_segment segment --config sem_segment/configs/smoke.yml `
+    --input data/public_sem_kriss_inspection/30us_001.tif `
+    --out output/sem_segment/smoke --crop 2,441,2,511 --pixel-size-nm 5.82812
+```
+
+`--crop` is not optional on that file. Those TIFFs carry a green 1-px frame and
+a 29-row instrument databar; the crop selects the imaging region, and it is
+applied *before* the grayscale-consistency check for exactly that reason.
+
+The full run with SAM 3 (`sem_segment/configs/default.yml`, backend
+`sam3_auto`) needs the gated `facebook/sam3` weights — see the remote section
+below. `backend: classical` needs nothing and is the control arm: running both
+on the same image is how you find out whether SAM 3 bought anything.
+
+Each input image produces one directory holding `index.html` (self-contained,
+figures embedded), `metrology.csv` (both methods side by side), `contours.json`,
+`masks.npz`, `summary.json` and `provenance.json`. There is deliberately **no**
+cross-image rollup — two SEM images in a folder may be unrelated, so a wrapper
+that knows they are related is the right place to aggregate.
+
+Docs: [`sem_segment/README.md`](../sem_segment/README.md) for use,
+[`sem_segment/docs/sem_segment_method.md`](../sem_segment/docs/sem_segment_method.md)
+for the maths and the measured biases.
+
+### 4c.1 Getting SAM 3 weights onto the remote server
+
+`facebook/sam3` is gated (0.9 B parameters), weights cannot be committed
+(`.gitignore` excludes `*.safetensors`), and the target machine may have no
+internet access. Nothing downloads implicitly; a run either finds the weights or
+prints the exact remedy.
+
+On a connected machine, after accepting the licence at
+<https://huggingface.co/facebook/sam3>:
+
+```bash
+export HF_TOKEN=hf_...
+python -m sem_segment download-weights
+python -m sem_segment backends          # should now report ready
+```
+
+For an air-gapped host, fetch as above and copy the cache across:
+
+```bash
+scp -r ~/.cache/huggingface/hub/models--facebook--sam3 <host>:~/.cache/huggingface/hub/
+# then on that host
+export HF_HOME=~/.cache/huggingface HF_HUB_OFFLINE=1
+python -m sem_segment backends
+```
+
+`python -m sem_segment backends` is the triage command: it reports per backend
+whether imports resolve, whether weights are cached, and whether a token is
+set — turning an authentication failure buried in a batch run into one line
+before the run starts.
 
 ---
 

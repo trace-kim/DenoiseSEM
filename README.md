@@ -8,7 +8,7 @@ environment and run every workflow from this directory.
 
 ## Layout
 
-Six independent pieces of work, separated by ownership rather than sharing one
+Seven independent pieces of work, separated by ownership rather than sharing one
 folder:
 
 ```
@@ -31,6 +31,10 @@ noising_pipeline/     Standalone paired clean/noisy image generator
 
 sem_noise/            Real repeated-SEM noise, registration, and stability analysis
   configs/            Analysis settings (original detector units)
+
+sem_segment/          SAM 3 feature segmentation, contours, and metrology (own CLI)
+  configs/            Backend and measurement recipes
+  docs/               Method: edge estimators, roughness, seam handling
 
 runctl/               Flow-agnostic reproducible-run orchestrator
   docs/               Training workflow spec + EN/KR quick start

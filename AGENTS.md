@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Six independently owned packages. `ddim/` is the original DDIM implementation
+Seven independently owned packages. `ddim/` is the original DDIM implementation
 (models, runners, functions, datasets, configs, legacy `main.py`) namespaced as a
 package; it imports nothing else here. `runctl/` is the flow-agnostic
 orchestrator — schemas, run bundles, executors, checkpoints, tracking, and the
@@ -17,7 +17,11 @@ harness. YAML recipes live inside the package that owns them (`ddim/configs/`,
 with `docs/workflows.md` at the root as the cross-cutting how-to-run guide.
 `sem_noise/` independently analyzes real repeated SEM acquisitions, with its
 own configs, README guide, and optional analysis dependencies; it imports no
-training packages. Tests
+training packages. `sem_segment/` segments features with SAM 3, extracts
+contours by two methods (mask boundary, and a gradient-refined boundary measured
+on the original pixels), and computes metrology; it also imports no other
+package here, and ships a no-download `classical` backend so its numerical core
+is testable without gated weights. Tests
 mirror the split under `tests/<package>/`; utilities are in `tools/`. Treat
 `runs/`, `experiments/`, `output/`, `data/`, `tmp/`, and checkpoints as generated
 artifacts.

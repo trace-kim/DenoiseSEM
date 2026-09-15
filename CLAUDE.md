@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-Five independently owned packages, separated so that the original DDIM research
+Seven independently owned packages, separated so that the original DDIM research
 code and the add-ons built on top of it do not share a namespace:
 
 1. **`ddim/`** — the original Song/Meng/Ermon DDIM implementation, namespaced as
@@ -30,6 +30,15 @@ code and the add-ons built on top of it do not share a namespace:
    arms: `edge_denoise/docs/burst_fusion_report.md`.
 5. **`noising_pipeline/`** — standalone paired clean/noisy image generator.
    Depends on nothing in this repo.
+6. **`sem_noise/`** — noise, drift and temporal stability of repeated real SEM
+   acquisitions. Analysis tier (`[analysis]` extra, argparse CLI, no GPU);
+   imports nothing else in this repo.
+7. **`sem_segment/`** — SAM 3 feature segmentation, contour extraction and
+   metrology. Analysis tier; imports nothing else in this repo. The two contour
+   methods are *not* alternatives: SAM 3 runs at a fixed 1008 px so its mask
+   boundary is quantised to ~2 original px, making it a region proposal, while
+   method 2 measures the edge by fitting a 1-D model to the **original**
+   pixels along each contour normal. Method: `sem_segment/docs/sem_segment_method.md`.
 
 `docs/workflows.md` is the entry point for running anything.
 `docs/denoising_qna.md` is the design-review Q&A (burst diffusion, single-frame
@@ -66,6 +75,11 @@ python -m edge_denoise train --config edge_denoise/configs/miic_p10_drift_fuse.y
 python -m edge_denoise fuse --checkpoint <pt> --dataset data/MIIC-burst-p10-drift --source-index 48 --frames 1,4,16 --out <dir>
 #   --fusion-checkpoint NAME=PATH --fusion-frames 1,2,4,8,16 --fusion-predenoise <pt> on repeatability / fine-features adds fuse{K}/regavg{K} rows
 python -m ddim.main --config <name>.yml --exp <path> --doc <name> --ni
+
+python -m sem_segment backends                     # which backends can run here, and why not
+python -m sem_segment download-weights             # explicit, opt-in SAM 3 fetch (gated repo)
+python -m sem_segment segment --config sem_segment/configs/default.yml --input <img-or-dir> --out <dir>
+#   --crop y0,y1,x0,x1 --pixel-size-nm F --backend classical   (classical needs no weights)
 ```
 
 The environment is the re-pointed venv at `E:\PythonProjects\ddim\.venv`
@@ -74,6 +88,10 @@ The environment is the re-pointed venv at `E:\PythonProjects\ddim\.venv`
 `E:\PythonProjects\ddim` checkout is no longer importable through it.
 
 There is no configured linter/formatter — match the style of nearby code.
+
+**Analysis-tier packages.** `sem_noise/` and `sem_segment/` may import
+scipy/scikit-image/matplotlib (the `[analysis]` extra); the core packages
+(`burst_diffusion`, `edge_denoise`) deliberately may not — see Gotchas.
 
 ## Architecture: the flow boundary
 
@@ -190,6 +208,17 @@ inside a retake.
   `--max-steps` (not `n_epochs`) to bound a run. Note `snapshot_freq` is a
   *step* interval and each SEM checkpoint is ~144 MB — a small `snapshot_freq`
   over a long budget fills a disk fast.
+- **Test modules share one flat namespace.** There is no `__init__.py` anywhere
+  under `tests/`, so every test file and every `conftest.py` registers as a
+  *top-level* module by its bare basename. Two `tests/<pkg>/test_pipeline.py`
+  files collide ("import file mismatch"), and a second `conftest.py` shadows the
+  first for any module doing `from conftest import ...` — which is the
+  convention `tests/edge_denoise/` uses, so adding one silently breaks those
+  tests. Both happened while adding `sem_segment`. Name test files
+  `tests/<pkg>/test_<pkg>_<area>.py`, and put shared helpers in a uniquely named
+  module (`tests/sem_segment/synthetic_images.py`), not in `conftest.py`.
+  Running one directory at a time hides this; only the full `python -m pytest`
+  catches it.
 - Multi-GPU: `runctl` isolates one GPU per run via `gpu_index` before the worker
   imports PyTorch (single-GPU-per-run by design). The legacy `ddim.main` path
   instead wraps the model in `DataParallel` across every visible GPU — set
