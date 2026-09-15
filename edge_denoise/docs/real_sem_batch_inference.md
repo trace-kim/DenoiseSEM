@@ -1,248 +1,141 @@
-# Batch inference and noise analysis on a real noisy-only folder
+﻿# Denoise real SEM images and analyze the PNG outputs
 
-You have trained checkpoints and a folder of real noisy SEM frames with no
-matched clean images and no `manifest.json`. This page is the runbook for
-denoising every frame in that folder and characterizing the noise before and
-after. Commands are bash, for the RHEL training server; run them from the
-repository root inside the container.
+Use this workflow for uint8 images and trained `edge_denoise` checkpoints
+(ordinary N2N, registration-aligned N2N, `ft_avgfull_consist`, etc.).
+Run commands in **bash on the remote server**, from the repository root inside
+your Python environment/container. No `prepare-real` step is needed.
 
-## Verdict first
+Analyze repeated acquisitions of **one site at a time**, with at least eight
+frames by default. Keep filenames in acquisition order. Use separate output
+folders for each site and checkpoint.
 
-**No data preparation is needed.** `prepare-real` exists to build *training*
-data — registered repeats, locked site splits, fixed detector levels. Inference
-needs none of it. The checkpoint stores `data.black_level` and
-`data.white_level`, so `denoise --input` applies the exact normalization the
-model was trained with, straight from one raw file. See
-[real_sem_training.md](real_sem_training.md) §9.
+## 1. Set paths and run inference
 
-Run `prepare-real` on this folder only if you later want reference-based CD and
-sigma numbers from `evaluate-real`, which needs repeats of the same site in
-per-site subfolders.
-
-Three steps, all below:
-
-```text
-data/SEM-test/*.jpg          raw noisy frames
-      |
-      |  (2) python -m edge_denoise denoise, once per file
-      v
-output/test-infer/           *_input.png  *_denoised.png  *_denoised.tif
-      |
-      |  (3) copy only the float32 TIFFs into one site folder
-      v
-output/test-noise-in/site_01/
-      |
-      |  (4) python -m sem_noise analyze   (also run it on the raw folder)
-      v
-output/noise-denoised/index.html
-```
-
-## Layout
-
-Substitute your own paths; these placeholders are used throughout.
-
-```text
-data/SEM-test/                                 <- your folder of real noisy frames
-  frame_000.jpg
-  frame_001.jpg
-  ...
-runs/edge_denoise/<run_name>/ckpt_latest.pt    <- the checkpoint you pick
-```
-
-Supported inputs are grayscale uint8 or uint16 PNG, TIFF, BMP, and 8-bit JPEG,
-one frame per file. RGB is accepted only when all three decoded channels match
-exactly.
-
-## 1. Check one frame first
-
-Confirm the checkpoint loads and the output looks sane before spending an hour
-on the whole folder.
+`SRC` should contain only the raw frames for one site, directly in that folder.
+Give every frame a unique filename stem (do not mix `frame_001.jpg` and
+`frame_001.png`). If inference is already complete, set the paths and skip
+the loop.
 
 ```bash
 CKPT="runs/edge_denoise/<run_name>/ckpt_latest.pt"
+SRC="data/SEM-test/site_01"
+OUT="output/<run_name>/site_01-infer"
+PNG="output/<run_name>/site_01-png"
+RAW_REPORT="output/<run_name>/noise-raw"
+PNG_REPORT="output/<run_name>/noise-png"
 
-CUDA_VISIBLE_DEVICES=0 python -m edge_denoise denoise \
-  --checkpoint "$CKPT" \
-  --input data/SEM-test/frame_000.jpg \
-  --out output/test-infer-smoke \
-  --tile-batch 4 --device cuda
-```
-
-It prints the frame size, tile, stride, and margin it used. Inspect the
-quantitative output:
-
-```bash
-python -c "from PIL import Image; import numpy as np; a=np.asarray(Image.open('output/test-infer-smoke/frame_000_denoised.tif')); print(a.shape, a.dtype, a.min(), a.max())"
-```
-
-## 2. Denoise every image in the folder
-
-`denoise` takes one measurement per invocation, so the batch is a shell loop.
-Each file's exit code is captured and the loop continues past a failure, with
-the failures listed at the end — no silent skips.
-
-```bash
-CKPT="runs/edge_denoise/<run_name>/ckpt_latest.pt"
-SRC="data/SEM-test"
-OUT="output/test-infer"
 mkdir -p "$OUT"
 : > "$OUT/failed.txt"
-
-find "$SRC" -type f \( -iname '*.png' -o -iname '*.tif' -o -iname '*.tiff' \
-     -o -iname '*.bmp' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 \
+find "$SRC" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.tif' \
+    -o -iname '*.tiff' -o -iname '*.bmp' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print0 \
 | sort -z \
 | while IFS= read -r -d '' f; do
-    CUDA_VISIBLE_DEVICES=0 python -m edge_denoise denoise \
-      --checkpoint "$CKPT" --input "$f" --out "$OUT" \
-      --tile-batch 4 --device cuda
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      echo "$rc  $f" >> "$OUT/failed.txt"
+    if ! CUDA_VISIBLE_DEVICES=0 python -m edge_denoise denoise \
+        --checkpoint "$CKPT" --input "$f" --out "$OUT" \
+        --tile-batch 4 --device cuda; then
+        echo "$f" >> "$OUT/failed.txt"
     fi
   done
-
-wc -l < "$OUT/failed.txt"   # 0 means every frame succeeded
-cat "$OUT/failed.txt"
+cat "$OUT/failed.txt"   # Empty means no inference failures were recorded.
 ```
 
-To detach a long run, put the block in a script and keep its log:
+Resolve failures before comparing reports. On GPU memory errors, lower
+`--tile-batch`. Leave stride and margin at their defaults.
+
+Each frame produces:
+
+| File | Contents |
+|---|---|
+| `*_input.png` | Input preview, uint8 |
+| `*_denoised.png` | Denoised preview, uint8 |
+| `*_denoised.tif` | Denoised values, float32 in [0, 1] |
+
+## 2. Make PNGs in the original intensity units
+
+Normalization uses **fixed black/white levels**, not each frame's minimum and
+maximum. With levels 0 and 255, an input range of 60–180 stays 60–180 after
+scaling back; it is not stretched to fill the range. A decreasing brightness
+trend is preserved by this scaling, although the model may alter it.
+
+**If the checkpoint uses black = 0 and white = 255, the existing denoised
+PNGs already have the correct scale.** Copy only those files into a new folder:
 
 ```bash
-nohup bash denoise_folder.sh > output/test-infer/infer.log 2>&1 &
+mkdir "$PNG" && cp "$OUT"/*_denoised.png "$PNG"/
 ```
 
-Each input produces three files in `$OUT`:
-
-```text
-<stem>_input.png       8-bit preview of the input
-<stem>_denoised.png    8-bit preview of the output
-<stem>_denoised.tif    float32 in [0, 1] -- the only quantitative output
-```
-
-Convert the TIFF back to detector units with
-`value * (white_level - black_level) + black_level` if your metrology software
-expects counts. Keep the float result for analysis; the PNGs are previews only.
-
-### Notes and limits
-
-- **Tiling defaults are already correct.** Stride is half the tile (256 for a
-  512-px model) and `--margin` defaults to 3 for real-data checkpoints — the
-  loss border training never supervised. The frame is never padded or resized.
-  Only lower `--stride`; a larger one just reduces how many tiles vote per
-  pixel.
-- **`--tile-batch` is memory only.** Reduce it on OOM; the result is identical.
-- **Filename collisions.** Outputs are keyed on the file stem alone, so two
-  files named `frame_000.jpg` in different subfolders overwrite each other.
-  Flatten or rename first if your folder is nested.
-- **Startup cost dominates.** Every iteration reloads the checkpoint and
-  re-initializes CUDA, several seconds each. On a 128-frame set that is minutes
-  of pure overhead. There is no `--input-dir` on `denoise` today; adding one is
-  a small change to `edge_denoise/cli.py` if the overhead becomes a problem.
-- **`--center-crop`** processes a single training-resolution center tile instead
-  of the full frame. Use it to test tiling, not for deliverables.
-
-## 3. Collect the quantitative outputs
-
-Required, not cosmetic. `sem_noise` reads *every* supported image in a
-directory, so pointing it at `$OUT` would pool inputs, previews, and denoised
-TIFFs into one meaningless "site".
+**If the levels differ or you are unsure, use this instead of the copy step.**
+It reads the levels from the same checkpoint used for inference, restores the
+original intensity units from the TIFFs, and rounds to uint8. It requires no
+original images. This conversion is specifically for originally uint8 data.
 
 ```bash
-SITE="output/test-noise-in/site_01"
-mkdir -p "$SITE"
-cp "$OUT"/*_denoised.tif "$SITE"/
-ls "$SITE" | head
+python - "$CKPT" "$OUT" "$PNG" <<'PY'
+import sys
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from edge_denoise.train import load_checkpoint
+
+checkpoint, source, destination = map(Path, sys.argv[1:])
+data = load_checkpoint(checkpoint, map_location="cpu")["config"]["data"]
+black, white = data.get("black_level"), data.get("white_level")
+if black is None and white is None:
+    black, white = 0.0, 255.0  # Legacy uint8 normalization.
+if black is None or white is None or not np.isfinite([black, white]).all() or white <= black:
+    raise ValueError("Checkpoint must have valid fixed normalization levels")
+files = sorted(source.glob("*_denoised.tif"))
+if not files:
+    raise ValueError(f"No denoised TIFFs in {source}")
+destination.mkdir(parents=True, exist_ok=False)  # Use a new folder.
+for path in files:
+    with Image.open(path) as image:
+        normalized = np.asarray(image, dtype=np.float32)
+    counts = normalized * (white - black) + black
+    pixels = np.rint(np.clip(counts, 0, 255)).astype(np.uint8)
+    Image.fromarray(pixels).save(destination / f"{path.stem}.png")
+print(f"Wrote {len(files)} PNGs; black={black}, white={white}")
+PY
 ```
 
-The constant `_denoised` suffix preserves natural filename order, so
-`frame_000_denoised.tif` still sorts before `frame_010_denoised.tif`.
+Do not use per-image auto-contrast or min/max scaling: that would change the
+brightness trend. Inverse scaling cannot recover clipped values or undo
+brightness changes caused by the model. Keep the TIFFs for future analysis.
 
-## 4. Noise analysis, before and after
-
-`sem_noise` characterizes repeated measurements of the **same site**. It needs
-at least 8 frames per site by default (`min_frames`, see
-`sem_noise/configs/default.yml`) and uses no GPU.
+## 3. Analyze raw frames and denoised PNGs
 
 ```bash
 python -m pip install -e ".[analysis]"
-
-SRC="data/SEM-test"
-
-# denoised
-python -m sem_noise analyze \
-  --input output/test-noise-in --output output/noise-denoised
-
-# raw, for the before/after comparison
-python -m sem_noise analyze \
-  --input "$SRC" --output output/noise-raw
+python -m sem_noise analyze --input "$SRC" --output "$RAW_REPORT"
+python -m sem_noise analyze --input "$PNG" --output "$PNG_REPORT"
 ```
 
-Open `output/noise-denoised/index.html`. Reports are offline and self-contained.
+Use new report directories on reruns. Open `index.html` in each report folder.
+Check that both reports contain the same acquisitions. **Do not analyze
+`$OUT` directly:** it mixes inputs, previews, and TIFFs.
 
-No acquisition metadata is required. Nothing above needs a pixel size, a frame
-interval, or anything produced by `prepare-real` — those belong to other
-commands and are not part of this procedure.
+Compare:
 
-- If filenames do not encode acquisition order, build an inventory and edit the
-  site labels and frame indices to match the acquisition record:
+- **Brightness over time:** did the denoiser preserve the decreasing intensity
+  trend, flatten it, or introduce an offset?
+- **Temporal sigma and adjacent-frame differences:** how much variation remains
+  between repeated denoised frames?
+- **Drift:** do estimated movements agree? Registration is estimated separately
+  for each report, so accepted frames and comparison regions can differ.
 
-  ```bash
-  python -m sem_noise inventory --input "$SRC" --output tmp/order.csv
-  python -m sem_noise analyze --input "$SRC" --manifest tmp/order.csv \
-    --output output/noise-raw
-  ```
+These PNG results measure the **final uint8 output**, including rounding.
+Rounding can hide or exaggerate small fluctuations; lower noise alone does
+not prove that edges or absolute intensity are accurate. For precise residual
+noise measurements, use float32 TIFF copies converted to the same original
+units (`normalized * (white - black) + black`), without rounding.
+`sem_noise` does not automatically rescale normalized TIFFs to match raw data.
 
-- Exit code 1 means some sites failed and the index identifies them; exit code 2
-  is a command, input, or configuration error.
+Treat mean–variance fits on denoised data as properties of the denoiser output,
+not detector calibration. A brightness trend or temporal correlation also
+affects noise estimates and averaging/Allan curves.
 
-### Optional: physical units
-
-Both of the following are optional and default to unset. Every result above is
-produced without them; supplying them only relabels axes and adds columns.
-
-```bash
-python -m sem_noise analyze \
-  --input output/test-noise-in --output output/noise-denoised-units \
-  --pixel-size-nm 1.5 --frame-interval-s 2.4
-```
-
-- `--pixel-size-nm` adds `drift_dy_nm` and `drift_dx_nm` columns to the drift
-  table. Every other distance stays in native pixels either way.
-- `--frame-interval-s` is the time between acquisitions, **not** pixel dwell
-  time, and it is used only when the manifest carries no `timestamp_s` column.
-  Without it the time axis is the frame index: Allan curves are in frames rather
-  than seconds and FFT frequency is cycles per frame. Noise, registration, and
-  stability results are unchanged.
-
-Full option reference: [sem_noise/README.md](../../sem_noise/README.md).
-
-### Reading the denoised report
-
-Two families of panels are meaningful; two are not.
-
-**Trust these.** Per-pixel temporal sigma and the adjacent-difference estimator
-on the denoised stack measure the residual noise the estimator transmitted from
-its input. That is the repeatability quantity this project optimizes, and it is
-directly comparable to the same panel in `output/noise-raw`.
-
-**Do not read these as detector physics.** The mean-variance affine fit and the
-1/sqrt(N) Allan reference assume spatially independent repeats. A denoiser
-correlates its output noise across pixels, so on the denoised stack those panels
-describe the estimator, not the detector. Read them only as a difference against
-the raw run.
-
-Registration also changes meaning: the denoised frames carry the same stage
-drift as their inputs, and `sem_noise` re-estimates translations from the
-denoised images, which are easier to register than raw ones. Compare drift
-curves between the two runs rather than treating either as truth.
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `no such file or directory ... ckpt_latest.pt` | The training stage that produces this checkpoint never finished | Check that run's own log; do not assume a chained stage ran |
-| `input must be at least NxN` | `--center-crop` on a frame smaller than the training crop | Drop `--center-crop`; full-frame tiling handles any size >= the tile |
-| CUDA out of memory | Too many tiles per forward pass | Lower `--tile-batch`; the result does not change |
-| `requires at least 8 frames, found N` | Fewer repeats than `min_frames` | Supply more repeats, or lower `min_frames` in a config passed with `--config` |
-| Noise report shows one site with 3x the expected frames | `sem_noise` was pointed at the raw `denoise` output directory | Run step 3 first; analyze only the `_denoised.tif` copies |
-| Denoised output looks tiled or seamed | Non-default `--stride` or `--margin` | Return to the defaults; keep stride at half the tile or less |
+Pixel size and frame interval are optional. For multiple sites, acquisition
+order manifests, regions of interest, and other options, see the
+[sem_noise guide](../../sem_noise/README.md).
