@@ -16,7 +16,7 @@ contours:
   spacing_px: 1.0
 refine:
   enabled: true
-  estimator: threshold
+  estimator: gradient_peak
   search_px: 6.0
   step_px: 0.25
 report:

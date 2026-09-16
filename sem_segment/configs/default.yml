@@ -30,9 +30,13 @@ masks:
   containment_keep: larger  # keep the feature, not its higher-scoring inner core
 refine:
   enabled: true
-  estimator: threshold
-  search_px: 6.0
+  # Gradient-based edge detection on the original pixels. Direction-free, so it
+  # is not misled by a feature no wider than its own search window.
+  estimator: gradient_peak
+  search_px: 6.0          # upper bound; shrunk per feature by adaptive_search
   step_px: 0.25
+  adaptive_search: true   # a window must never span the whole feature
+  coherence_mad: 3.0      # drop vertices that disagree with their neighbours
 metrology:
   cd_definition: equivalent_diameter
   chord_angles: 36

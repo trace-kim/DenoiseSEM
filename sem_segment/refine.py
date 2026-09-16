@@ -12,18 +12,23 @@ Three estimators are offered because they fail differently, and the method
 documentation states the bias of each rather than presenting them as
 interchangeable:
 
+``gradient_peak`` (the default)
+    Gradient-based edge detection: the |dI/dt| peak nearest the mask boundary,
+    refined by a parabola through the three samples around it.  The classical
+    CD-SEM estimator, and direction-free - it never asks whether intensity
+    rises or falls outward, so it cannot be misled by the polarity ambiguity a
+    level-crossing estimator suffers on a feature no wider than its own search
+    window.  It is biased on an asymmetric edge, where the steepest point is not
+    the midpoint.
+
 ``threshold``
     The 50 % level between robust plateau estimates (the 10th and 90th
-    percentiles of the profile), located by linear interpolation.  This is the
-    default, and matches the convention the rest of this repository's CD
-    measurements already use, so numbers stay comparable.  It is biased by a
-    sloped background, because a tilted profile moves the percentile plateaus
-    unequally.
-
-``gradient_peak``
-    The maximum of |dI/dt|, refined by a parabola through the three samples
-    around it.  The classical CD-SEM estimator.  It is biased on an asymmetric
-    edge, where the steepest point is not the midpoint.
+    percentiles of the profile), located by linear interpolation.  Matches the
+    convention the rest of this repository's CD measurements use, so numbers
+    stay comparable.  It is biased by a sloped background, and it takes its
+    threshold from the whole window, so a strong edge elsewhere in the window
+    moves the level itself - which is why the adaptive window matters more for
+    this estimator than for the gradient one.
 
 ``erf``
     Least squares fit of ``a + b erf((t - t0) / (sqrt(2) sigma))``.  Uses the
@@ -33,7 +38,17 @@ interchangeable:
     as a focus indicator.  It is biased when the edge is genuinely not
     symmetric, and it assumes a single edge inside the window.
 
-Two decisions are worth knowing about:
+Whichever estimator is used, the candidate chosen is the one **nearest the
+mask boundary**, never the strongest.  A window wide enough to be useful usually
+holds more than one edge - the feature's own, and a neighbour's a few pixels
+further out - and choosing by strength measures the neighbour whenever the
+neighbour is brighter.  The segmentation already answered where this feature's
+boundary is; strength only rejects noise.  The window is also sized to the
+feature (``adaptive_search``) so it cannot span the whole object, and a
+coherence filter drops vertices that disagree with their immediate neighbours,
+since a boundary cannot genuinely jump several pixels between adjacent vertices.
+
+Two further decisions are worth knowing about:
 
 *Polarity is decided once per contour, not per vertex.*  Whether material is
 brighter or darker than its surroundings is a property of the detector and the
@@ -66,6 +81,7 @@ REJECT_NO_CROSSING = 3
 REJECT_MULTIPLE_CROSSINGS = 4
 REJECT_AT_SEARCH_LIMIT = 5
 REJECT_POOR_FIT = 6
+REJECT_INCOHERENT = 7
 
 REJECT_NAMES = {
     REJECT_OK: "ok",
@@ -75,6 +91,7 @@ REJECT_NAMES = {
     REJECT_MULTIPLE_CROSSINGS: "multiple_crossings",
     REJECT_AT_SEARCH_LIMIT: "at_search_limit",
     REJECT_POOR_FIT: "poor_fit",
+    REJECT_INCOHERENT: "incoherent_with_neighbours",
 }
 
 
@@ -171,6 +188,45 @@ def sample_profiles(
     return profiles, offsets, in_bounds
 
 
+def _nearest_candidate(
+    strength: np.ndarray,
+    offsets: np.ndarray,
+    *,
+    min_height: float,
+    min_prominence: float,
+) -> int | None:
+    """Index of the edge candidate nearest the mask boundary, or None.
+
+    This is the rule the whole module turns on.  A profile window wide enough to
+    be useful usually contains more than one edge: the feature's own, and a
+    neighbour's a few pixels further out.  Choosing by *strength* - the steepest
+    gradient, or the only crossing in the polarity the window happens to imply -
+    picks the neighbour whenever the neighbour is brighter, which is exactly the
+    failure that pushed small dim particles onto their bright neighbours.
+
+    The segmentation already answered "where is this feature's boundary": it is
+    ``t = 0``.  So the right question is which candidate lies nearest that, and
+    strength is only used to reject noise ripples.
+    """
+    from scipy.signal import find_peaks
+
+    peaks, _ = find_peaks(strength, height=min_height, prominence=min_prominence)
+    if peaks.size == 0:
+        return None
+    return int(peaks[int(np.argmin(np.abs(offsets[peaks])))])
+
+
+def _parabolic_offset(values: np.ndarray, index: int) -> float:
+    """Sub-pixel correction from a parabola through three samples."""
+    if index <= 0 or index >= values.size - 1:
+        return 0.0
+    y0, y1, y2 = values[index - 1], values[index], values[index + 1]
+    denominator = y0 - 2.0 * y1 + y2
+    if abs(denominator) < 1e-12:
+        return 0.0
+    return float(np.clip(0.5 * (y0 - y2) / denominator, -1.0, 1.0))
+
+
 def _contour_polarity(profiles: np.ndarray, offsets: np.ndarray) -> float:
     """+1 when intensity rises outward, -1 when it falls, decided once per contour."""
     inner = profiles[:, offsets < 0.0]
@@ -198,13 +254,21 @@ def _crossings_at(
     oriented_threshold = threshold if polarity > 0 else -threshold
     delta = oriented - oriented_threshold[:, None]
 
+    # Crossings in EITHER direction are candidates. Filtering by the polarity the
+    # window implies is what broke small features: when the window spans a whole
+    # particle, the inner and outer halves both straddle it, the implied polarity
+    # can invert, and the only crossing in the "correct" direction then belongs to
+    # a neighbour. Nearest-to-the-mask-boundary is the reliable rule; polarity is
+    # kept only to break ties between two equidistant crossings.
     rising = (delta[:, :-1] <= 0.0) & (delta[:, 1:] > 0.0)
+    falling = (delta[:, :-1] >= 0.0) & (delta[:, 1:] < 0.0)
+    crossing = rising | falling
     step = float(offsets[1] - offsets[0])
 
     n = profiles.shape[0]
     positions = np.full(n, np.nan)
     reasons = np.full(n, REJECT_OK, dtype=np.int16)
-    counts = rising.sum(axis=1)
+    counts = crossing.sum(axis=1)
 
     for index in range(n):
         if contrast[index] < config.min_contrast:
@@ -213,14 +277,18 @@ def _crossings_at(
         if counts[index] == 0:
             reasons[index] = REJECT_NO_CROSSING
             continue
-        if counts[index] > 1 and not config.allow_multiple_crossings:
-            reasons[index] = REJECT_MULTIPLE_CROSSINGS
-            continue
         d = delta[index]
-        candidates = np.flatnonzero(rising[index])
+        candidates = np.flatnonzero(crossing[index])
         crossings = np.array([offsets[i] + step * (-d[i] / (d[i + 1] - d[i])) for i in candidates])
-        # The edge we want is the one nearest the segmentation's guess.
-        positions[index] = crossings[int(np.argmin(np.abs(crossings)))]
+        order = np.argsort(np.abs(crossings))
+        best = int(order[0])
+        if order.size > 1 and abs(abs(crossings[order[0]]) - abs(crossings[order[1]])) < step:
+            preferred = rising[index] if polarity > 0 else falling[index]
+            for k in order[:2]:
+                if preferred[candidates[k]]:
+                    best = int(k)
+                    break
+        positions[index] = crossings[best]
     return positions, reasons
 
 
@@ -293,7 +361,17 @@ def _estimate_gradient_peak(
     polarity: float,
     config: RefineConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sub-pixel maximum of |dI/dt| via a parabola through its three samples."""
+    """Gradient-based edge detection: the |dI/dt| peak nearest the boundary.
+
+    Direction-free by construction - it never asks whether intensity rises or
+    falls outward - so it cannot be misled by the polarity ambiguity that
+    afflicts a level-crossing estimator on a small feature.
+
+    Candidates are local maxima of |dI/dt| passing a height and prominence test,
+    and the one nearest ``t = 0`` wins.  Taking the global maximum instead is
+    wrong: on a dim particle beside a bright one the neighbour's edge is at
+    least as steep, so a global argmax silently measures the neighbour.
+    """
     from scipy.ndimage import gaussian_filter1d
 
     step = float(offsets[1] - offsets[0])
@@ -302,29 +380,33 @@ def _estimate_gradient_peak(
 
     sigma_samples = max(config.deriv_sigma_px / step, 1e-6)
     smoothed = gaussian_filter1d(profiles, sigma=sigma_samples, axis=1, mode="nearest")
-    derivative = np.gradient(smoothed, step, axis=1)
-    magnitude = np.abs(derivative)
+    magnitude = np.abs(np.gradient(smoothed, step, axis=1))
 
     n = profiles.shape[0]
     positions = np.full(n, np.nan)
     reasons = np.full(n, REJECT_OK, dtype=np.int16)
-    peak = np.argmax(magnitude, axis=1)
 
     for index in range(n):
         if contrast[index] < config.min_contrast:
             reasons[index] = REJECT_LOW_CONTRAST
             continue
-        i = int(peak[index])
-        if i == 0 or i == magnitude.shape[1] - 1:
-            # The true peak is outside the window, so a parabola here would
-            # extrapolate rather than interpolate.
-            reasons[index] = REJECT_AT_SEARCH_LIMIT
+        row = magnitude[index]
+        peak_value = float(row.max())
+        if peak_value <= 0.0:
+            reasons[index] = REJECT_NO_CROSSING
             continue
-        y0, y1, y2 = magnitude[index, i - 1], magnitude[index, i], magnitude[index, i + 1]
-        denominator = y0 - 2.0 * y1 + y2
-        shift = 0.0 if abs(denominator) < 1e-12 else 0.5 * (y0 - y2) / denominator
-        shift = float(np.clip(shift, -1.0, 1.0))
-        positions[index] = offsets[i] + shift * step
+        # Height and prominence are fractions of the strongest edge in this
+        # window, so the test adapts to local contrast instead of assuming one.
+        candidate = _nearest_candidate(
+            row,
+            offsets,
+            min_height=config.peak_height_fraction * peak_value,
+            min_prominence=config.peak_prominence_fraction * peak_value,
+        )
+        if candidate is None:
+            reasons[index] = REJECT_NO_CROSSING
+            continue
+        positions[index] = offsets[candidate] + _parabolic_offset(row, candidate) * step
     return positions, reasons, contrast
 
 
@@ -417,6 +499,49 @@ def _estimate_erf(
     return positions, reasons, contrast, widths
 
 
+def _coherence_filter(
+    displacement: np.ndarray,
+    valid: np.ndarray,
+    *,
+    window: int = 7,
+    threshold_mad: float = 3.0,
+) -> np.ndarray:
+    """Invalidate vertices whose shift disagrees with their neighbours'.
+
+    A boundary is a continuous thing: adjacent vertices, one pixel apart, cannot
+    genuinely disagree about where the edge is by several pixels.  A vertex that
+    does has almost certainly locked onto a different feature, and one such
+    vertex drags a visible spike across the contour.
+
+    Comparison is against a local median with a MAD scale, so a genuinely
+    curved or rough boundary is not penalised - only departures from what the
+    immediate neighbourhood agrees on.
+    """
+    if threshold_mad <= 0 or valid.sum() < max(8, window):
+        return valid
+
+    n = displacement.size
+    filled = np.where(valid, displacement, np.nan)
+    # Circular neighbourhood medians; the ring has no ends.
+    half = max(1, window // 2)
+    padded = np.concatenate([filled[-half:], filled, filled[:half]])
+    local = np.full(n, np.nan)
+    for i in range(n):
+        neighbourhood = np.concatenate([padded[i : i + half], padded[i + half + 1 : i + window]])
+        finite = neighbourhood[np.isfinite(neighbourhood)]
+        if finite.size:
+            local[i] = np.median(finite)
+
+    residual = np.abs(filled - local)
+    finite = residual[np.isfinite(residual)]
+    if finite.size < 4:
+        return valid
+    scale = 1.4826 * np.median(np.abs(finite - np.median(finite)))
+    limit = max(threshold_mad * scale, 0.5)
+    keep = ~(np.isfinite(residual) & (residual > limit))
+    return valid & keep
+
+
 def _interpolate_short_gaps(
     displacement: np.ndarray,
     valid: np.ndarray,
@@ -468,12 +593,36 @@ def _interpolate_short_gaps(
     return d[inverse], v[inverse]
 
 
+def adaptive_search_px(mask: np.ndarray, config: RefineConfig) -> float:
+    """Search radius that cannot span the feature it is measuring.
+
+    The window has to reach past the edge into background on one side and into
+    material on the other.  On a feature whose half-width is comparable to the
+    configured radius it does neither: it swallows the object and reaches the
+    next one, and every selection rule then has several edges to choose between.
+    The inscribed radius - the distance transform's maximum - is the right scale
+    because it tracks the *narrowest* part of an elongated shape, which the
+    equivalent circular radius does not.
+    """
+    if not config.adaptive_search:
+        return config.search_px
+    from scipy import ndimage
+
+    inscribed = float(ndimage.distance_transform_edt(mask).max()) if mask.any() else 0.0
+    if inscribed <= 0:
+        return config.search_px
+    return float(
+        np.clip(config.search_fraction * inscribed, config.min_search_px, config.search_px)
+    )
+
+
 def refine_contour(
     contour: Contour,
     image01: np.ndarray,
     config: RefineConfig,
     *,
     spacing_px: float = 1.0,
+    search_px: float | None = None,
 ) -> RefinedContour:
     """Measure the true edge position at every vertex of a coarse contour."""
     points = np.asarray(contour.points, dtype=np.float64)
@@ -495,11 +644,12 @@ def refine_contour(
             region_id=contour.region_id,
         )
 
+    radius = float(search_px) if search_px is not None else config.search_px
     profiles, offsets, in_bounds = sample_profiles(
         image01,
         points,
         normals,
-        search_px=config.search_px,
+        search_px=radius,
         step_px=config.step_px,
         interp_order=config.interp_order,
     )
@@ -521,7 +671,7 @@ def refine_contour(
 
     # Reject rather than clip at the search limit: clamping would censor the
     # distribution toward zero and flatter the refinement.
-    limit = config.max_shift_px if config.max_shift_px is not None else config.search_px
+    limit = config.max_shift_px if config.max_shift_px is not None else radius
     finite = np.isfinite(positions)
     at_limit = finite & (np.abs(positions) >= limit - 0.5 * config.step_px)
     reasons[(reasons == REJECT_OK) & at_limit] = REJECT_AT_SEARCH_LIMIT
@@ -529,6 +679,12 @@ def refine_contour(
 
     valid = reasons == REJECT_OK
     displacement = np.where(valid, positions, np.nan)
+    # A neighbour-locked vertex can pass every per-vertex test and still be
+    # obviously wrong relative to the rest of the contour.
+    coherent = _coherence_filter(displacement, valid, threshold_mad=config.coherence_mad)
+    reasons[valid & ~coherent] = REJECT_INCOHERENT
+    valid = coherent
+    displacement = np.where(valid, displacement, np.nan)
     displacement, valid = _interpolate_short_gaps(
         displacement, valid, spacing_px=spacing_px, max_gap_px=config.max_gap_px
     )
@@ -545,6 +701,7 @@ def refine_contour(
         region_id=contour.region_id,
         meta={
             "estimator": config.estimator,
+            "search_px": radius,
             "polarity": "rising_outward" if polarity > 0 else "falling_outward",
             "profiles_shape": tuple(profiles.shape),
         },
@@ -557,6 +714,11 @@ def refine_all(
     config: RefineConfig,
     *,
     spacing_px: float = 1.0,
+    search_px: list[float] | None = None,
 ) -> list[RefinedContour]:
     """Refine every contour against the same unmodified image."""
-    return [refine_contour(c, image01, config, spacing_px=spacing_px) for c in contours]
+    radii = search_px or [None] * len(contours)
+    return [
+        refine_contour(c, image01, config, spacing_px=spacing_px, search_px=r)
+        for c, r in zip(contours, radii)
+    ]

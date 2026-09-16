@@ -188,9 +188,15 @@ class ContoursConfig(_StrictModel):
 class RefineConfig(_StrictModel):
     """Method 2: where the edge really is, measured on the unmodified image.
 
-    ``threshold`` is the default because it is the same 50%-of-p10/p90
-    convention the repository's existing CD harness uses, which keeps
-    contour-derived numbers comparable with previously published measurements.
+    ``gradient_peak`` is the default: gradient-based edge detection on the
+    original pixels, which is what this stage is for.  It is direction-free -
+    it locates the |dI/dt| peak and never asks whether intensity rises or falls
+    outward - so it is immune to the polarity ambiguity that a level-crossing
+    estimator suffers on a feature no wider than its own search window.
+
+    ``threshold`` remains available and uses the same 50%-of-p10/p90 convention
+    as the repository's existing CD harness, for comparison with previously
+    published measurements.  ``erf`` is the most noise-tolerant of the three.
 
     ``interp_order`` defaults to cubic on purpose: bilinear sampling injects a
     once-per-pixel systematic of order 0.05-0.1 px, which is the entire
@@ -198,7 +204,7 @@ class RefineConfig(_StrictModel):
     """
 
     enabled: bool = True
-    estimator: Literal["threshold", "gradient_peak", "erf"] = "threshold"
+    estimator: Literal["gradient_peak", "threshold", "erf"] = "gradient_peak"
     search_px: float = Field(default=6.0, gt=1.0)
     step_px: float = Field(default=0.25, gt=0.0)
     interp_order: Literal[1, 3] = 3
@@ -208,6 +214,17 @@ class RefineConfig(_StrictModel):
     deriv_sigma_px: float = Field(default=0.5, gt=0.0)
     min_contrast: float = Field(default=0.05, gt=0.0)
     max_residual: float = Field(default=0.15, gt=0.0)
+    #: Shrink the search window on small features so it cannot span the whole
+    #: object and pick up a neighbour's edge.
+    adaptive_search: bool = True
+    #: Search radius as a fraction of the feature's inscribed radius.
+    search_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+    min_search_px: float = Field(default=2.0, gt=0.0)
+    #: Gradient candidates must reach this fraction of the window's strongest edge.
+    peak_height_fraction: float = Field(default=0.3, ge=0.0, le=1.0)
+    peak_prominence_fraction: float = Field(default=0.15, ge=0.0, le=1.0)
+    #: Reject a vertex whose shift departs from its neighbours' by this many MADs.
+    coherence_mad: float = Field(default=3.0, ge=0.0)
     #: Accept a shift only below this; defaults to the full search radius.
     max_shift_px: float | None = Field(default=None, gt=0.0)
     allow_multiple_crossings: bool = False

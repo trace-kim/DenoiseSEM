@@ -29,8 +29,14 @@ question metrology actually asks, *where exactly is the edge*. Its vision tower
 runs at a fixed 1008 px, so on a larger frame every mask boundary is quantised
 to roughly two original pixels. So the pipeline uses the mask for topology and
 then measures the edge properly: at every contour vertex it samples the
-**original, unmodified** image along the outward normal and fits a
-one-dimensional edge model to that profile.
+**original, unmodified** image along the outward normal and locates the
+**gradient peak nearest that boundary**.
+
+Nearest, not strongest — that distinction is the whole ballgame on a crowded
+field. A useful window usually contains a neighbour's edge too, and if that
+neighbour is brighter its edge is steeper, so any strength-based rule measures
+the wrong particle. The window is also sized to each feature so it cannot span
+the object, and vertices that disagree with their neighbours are dropped.
 
 ```
 image ──► [segmentation backend] ──► instance masks ──► method 1: mask boundary

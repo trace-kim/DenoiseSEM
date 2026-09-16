@@ -258,8 +258,15 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
     refined: list[RefinedContour] = []
     if config.refine.enabled:
         start = time.perf_counter()
+        from .refine import adaptive_search_px
+
+        radii = [adaptive_search_px(m.crop, config.refine) for m in instances]
         refined = refine_all(
-            coarse, measure01, config.refine, spacing_px=config.contours.spacing_px
+            coarse,
+            measure01,
+            config.refine,
+            spacing_px=config.contours.spacing_px,
+            search_px=radii,
         )
         timings["refine"] = time.perf_counter() - start
 
