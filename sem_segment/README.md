@@ -81,41 +81,39 @@ empirical question — but it is not something to assume.
 air-gapped machine, and the control arm that shows whether SAM 3 actually bought
 anything on a given image.
 
-## Getting the weights onto a remote machine
+## Getting the weights
 
-`facebook/sam3` is **manually** gated (0.9 B parameters, licence "other") — a
-person at Meta reviews the request, so access is not instant. Weights cannot be
-committed — `.gitignore` excludes `*.safetensors` globally — and the target
-machine may have no internet at all. Nothing here downloads implicitly; a run
-either finds weights or tells you exactly how to get them.
-
-**Connected machine.** Accept the licence at
-<https://huggingface.co/facebook/sam3>, then:
+`facebook/sam3` is a gated repository (0.9 B parameters, licence "other").
+Request access once at <https://huggingface.co/facebook/sam3>, then:
 
 ```bash
-export HF_TOKEN=hf_...
+hf auth login                            # the flow the model card documents
 python -m sem_segment download-weights   # 3.4 GB
 python -m sem_segment backends           # should now say ready
 ```
 
+`hf` ships with `huggingface-hub`, so it is already installed. `HF_TOKEN=hf_...`
+works too; the package asks `huggingface_hub` which token it would use, so
+either mechanism is detected and `backends` reports which one it found.
+
 The download skips `sam3.pt`, Meta's original-format checkpoint: the repo ships
 the model twice and `from_pretrained` only reads `model.safetensors`, so the
-default fetch is 3.4 GB rather than 6.9 GB. Pass `--all-files` to mirror the
-repository exactly.
+default fetch is 3.4 GB rather than 6.9 GB. `--all-files` mirrors the repo.
 
-**Air-gapped machine.** Fetch on a connected machine as above, then copy the
-cache directory across and pin it:
+### If the machine has no internet
+
+`runctl/docs/training_workflow.md` notes the H100 site may be air-gapped. Fetch
+on a connected machine as above, then copy the cache across:
 
 ```bash
 scp -r ~/.cache/huggingface/hub/models--facebook--sam3 <host>:~/.cache/huggingface/hub/
-# on the remote host
-export HF_HOME=~/.cache/huggingface
-export HF_HUB_OFFLINE=1
+# on that host
+export HF_HOME=~/.cache/huggingface HF_HUB_OFFLINE=1
 python -m sem_segment backends
 ```
 
-Or point a config straight at a directory with `segmentation.model_path`, or use
-`backend: classical`, which needs nothing.
+Or point `segmentation.model_path` at a directory, or use `backend: classical`,
+which needs no weights at all.
 
 ## Measurements
 

@@ -49,7 +49,7 @@ def test_backends_command_reports_readiness():
     result = runner.invoke(app, ["backends"])
     assert result.exit_code == 0, result.output
     assert "classical" in result.output and "ready" in result.output
-    assert "HF_TOKEN" in result.output
+    assert "signed in:" in result.output  # reports auth however it was set
 
 
 def test_segment_writes_every_artifact(tmp_path):

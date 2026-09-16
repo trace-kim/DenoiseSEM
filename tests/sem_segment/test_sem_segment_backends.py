@@ -276,7 +276,8 @@ def test_gated_repository_error_explains_the_token_route(monkeypatch):
     with pytest.raises(GatedRepositoryError) as error:
         resolve_model_source("facebook/sam3")
     message = str(error.value)
-    assert "huggingface.co/facebook/sam3" in message and "HF_TOKEN" in message
+    assert "huggingface.co/facebook/sam3" in message
+    assert "hf auth login" in message  # the documented flow comes first
 
 
 def test_local_model_path_bypasses_the_hub(tmp_path, monkeypatch):
@@ -315,7 +316,13 @@ def test_download_skips_the_redundant_original_checkpoint(monkeypatch):
     assert "ignore_patterns" not in captured
 
 
-def test_download_passes_the_token_when_one_is_set(monkeypatch):
+def test_download_lets_huggingface_hub_resolve_credentials(monkeypatch):
+    """Do not re-implement token lookup; the library already does it.
+
+    `hf auth login` - the flow the model card documents - stores a token in a
+    file, not the environment. Passing our own env-var-only token would override
+    that with None and duplicate logic we get for free.
+    """
     import sem_segment.weights as weights
 
     captured = {}
@@ -325,7 +332,44 @@ def test_download_passes_the_token_when_one_is_set(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_example")
 
     weights.fetch_weights("facebook/sam3")
-    assert captured["token"] == "hf_example"
+    assert "token" not in captured
+
+
+def test_signed_in_via_cli_login_is_detected(monkeypatch):
+    """A token file with no env var must not read as 'not signed in'."""
+    import sem_segment.weights as weights
+
+    module = types.ModuleType("huggingface_hub")
+    module.get_token = lambda: "hf_from_login_file"
+    monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+
+    assert weights._token() == "hf_from_login_file"
+    assert weights._token_source() == "hf auth login"
+
+
+def test_env_var_token_is_still_detected_and_labelled(monkeypatch):
+    import sem_segment.weights as weights
+
+    module = types.ModuleType("huggingface_hub")
+    module.get_token = lambda: "hf_from_env"
+    monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+    monkeypatch.setenv("HF_TOKEN", "hf_from_env")
+
+    assert weights._token() == "hf_from_env"
+    assert weights._token_source() == "environment"
+
+
+def test_gated_error_leads_with_the_documented_cli_flow(monkeypatch):
+    from sem_segment.weights import GatedRepositoryError, resolve_model_source
+
+    monkeypatch.setattr("sem_segment.weights.cached_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr("sem_segment.weights._token", lambda: None)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    with pytest.raises(GatedRepositoryError) as error:
+        resolve_model_source("facebook/sam3")
+    assert "hf auth login" in str(error.value)
 
 
 def test_missing_model_path_is_reported_clearly(tmp_path):

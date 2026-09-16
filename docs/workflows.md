@@ -385,35 +385,33 @@ Docs: [`sem_segment/README.md`](../sem_segment/README.md) for use,
 [`sem_segment/docs/sem_segment_method.md`](../sem_segment/docs/sem_segment_method.md)
 for the maths and the measured biases.
 
-### 4c.1 Getting SAM 3 weights onto the remote server
+### 4c.1 Getting SAM 3 weights
 
-`facebook/sam3` is **manually** gated (0.9 B parameters) — a person at Meta
-reviews the access request, so plan for it not being instant. Weights cannot be
-committed (`.gitignore` excludes `*.safetensors`), and the target machine may
-have no internet access. Nothing downloads implicitly; a run either finds the weights or
-prints the exact remedy.
-
-On a connected machine, after accepting the licence at
-<https://huggingface.co/facebook/sam3>:
+`facebook/sam3` is gated, and weights cannot be committed (`.gitignore`
+excludes `*.safetensors`). Request access once at
+<https://huggingface.co/facebook/sam3>, then:
 
 ```bash
-export HF_TOKEN=hf_...
+hf auth login                            # ships with huggingface-hub
 python -m sem_segment download-weights   # 3.4 GB (skips the redundant sam3.pt)
 python -m sem_segment backends           # should now report ready
 ```
 
-For an air-gapped host, fetch as above and copy the cache across:
+`HF_TOKEN=hf_...` works equally well — the package asks `huggingface_hub` which
+token it would use, so both mechanisms are detected.
+
+If the target machine has no internet access, fetch on a connected machine and
+copy the cache across:
 
 ```bash
 scp -r ~/.cache/huggingface/hub/models--facebook--sam3 <host>:~/.cache/huggingface/hub/
-# then on that host
 export HF_HOME=~/.cache/huggingface HF_HUB_OFFLINE=1
 python -m sem_segment backends
 ```
 
 `python -m sem_segment backends` is the triage command: it reports per backend
-whether imports resolve, whether weights are cached, and whether a token is
-set — turning an authentication failure buried in a batch run into one line
+whether imports resolve, whether weights are cached, and whether you are signed
+in — turning an authentication failure buried in a batch run into one line
 before the run starts.
 
 ---

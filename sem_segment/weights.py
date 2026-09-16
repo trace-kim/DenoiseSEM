@@ -34,7 +34,25 @@ class GatedRepositoryError(RuntimeError):
 
 
 def _token() -> str | None:
-    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    """Whatever token huggingface_hub would actually use, however it was set.
+
+    ``hf auth login`` - the flow the model card documents - stores a token in a
+    file rather than the environment, so checking ``HF_TOKEN`` alone reports a
+    correctly-authenticated user as having no credentials.  ``get_token()`` is
+    the library's own resolver and covers both, plus any future mechanism.
+    """
+    try:
+        from huggingface_hub import get_token
+    except ImportError:
+        return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    return get_token()
+
+
+def _token_source() -> str:
+    """Where the active token came from, for the readiness report."""
+    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        return "environment"
+    return "hf auth login" if _token() else "none"
 
 
 def _offline() -> bool:
@@ -96,9 +114,9 @@ def resolve_model_source(model_id: str, model_path: Path | None = None) -> str:
         )
     if _token() is None:
         raise GatedRepositoryError(
-            f"{model_id} is a gated repository and no token is configured.\n"
-            f"  1. Accept the licence at {LICENCE_URL} with your Hugging Face account.\n"
-            "  2. Export a token: HF_TOKEN=hf_...\n"
+            f"{model_id} is a gated repository and you are not signed in.\n"
+            f"  1. Request access at {LICENCE_URL} while signed in to Hugging Face.\n"
+            "  2. Sign in:  hf auth login          (or set HF_TOKEN=hf_...)\n"
             f"  3. Fetch once: python -m sem_segment download-weights --model-id {model_id}\n"
             "Or set segmentation.backend to 'classical', which needs no weights at all."
         )
@@ -136,9 +154,9 @@ def fetch_weights(
         kwargs["ignore_patterns"] = ORIGINAL_CHECKPOINT_PATTERNS
     if dest is not None:
         kwargs["local_dir"] = str(Path(dest))
-    token = _token()
-    if token:
-        kwargs["token"] = token
+    # No explicit token: huggingface_hub resolves HF_TOKEN and the `hf auth
+    # login` token file on its own, and duplicating that logic here is how the
+    # CLI flow got missed in the first place.
     try:
         return Path(snapshot_download(**{k: v for k, v in kwargs.items() if v is not None}))
     except Exception as error:
@@ -169,6 +187,6 @@ def backend_readiness(name: str) -> tuple[bool, str]:
     cached = cached_snapshot("facebook/sam3")
     if cached is None:
         if _token() is None:
-            return False, f"{detail}; weights not cached and HF_TOKEN is not set"
-        return False, f"{detail}; weights not cached - run: python -m sem_segment download-weights"
+            return False, f"{detail}; weights not cached, not signed in - run: hf auth login"
+        return False, f"{detail}; signed in, weights not cached - run: python -m sem_segment download-weights"
     return True, f"{detail}; weights cached at {cached}"

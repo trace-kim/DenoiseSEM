@@ -159,9 +159,14 @@ def backends() -> None:
         ready, detail = backend_readiness(name)
         typer.echo(f"{name:<16}{'ready' if ready else 'unavailable':<12}{detail}")
 
-    token = "set" if (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")) else "not set"
+    from .weights import _token, _token_source
+
+    signed_in = "yes" if _token() else "no"
     offline = os.environ.get("HF_HUB_OFFLINE", "0") not in ("0", "", "false", "False")
-    typer.echo(f"\nHF_TOKEN: {token}   HF_HUB_OFFLINE: {offline}   HF_HOME: {os.environ.get('HF_HOME', '(default)')}")
+    typer.echo(
+        f"\nsigned in: {signed_in} (via {_token_source()})   HF_HUB_OFFLINE: {offline}   "
+        f"HF_HOME: {os.environ.get('HF_HOME', '(default)')}"
+    )
 
 
 @app.command("download-weights")
