@@ -118,18 +118,34 @@ class RefinedContour:
 
     @property
     def refined_points(self) -> np.ndarray:
-        """(N, 2) refined positions; rows for invalid vertices hold nan."""
+        """(N, 2) refined positions; rows for unrefined vertices hold nan."""
         shift = np.where(self.valid, self.displacement, np.nan)
         return self.base_points + shift[:, None] * self.normals
 
     @property
     def polygon(self) -> np.ndarray:
-        """(M, 2) the closed ring actually measured, invalid vertices removed."""
-        return self.refined_points[self.valid]
+        """(N, 2) the complete boundary: refined where it could be, coarse elsewhere.
+
+        Every vertex is present.  Dropping the unrefined ones and letting the
+        ring close across the gap would draw - and, worse, *measure* - a straight
+        line where no boundary was ever observed; on real data that produced
+        chords up to 193 px long feeding straight into area and perimeter.
+
+        Falling back to the segmentation's own vertex invents nothing.  It is a
+        real estimate of the boundary, simply not a refined one, and
+        :attr:`refined_fraction` says how much of the ring it accounts for.
+        """
+        shift = np.where(self.valid, self.displacement, 0.0)
+        return self.base_points + shift[:, None] * self.normals
 
     @property
     def valid_fraction(self) -> float:
         return float(np.mean(self.valid)) if self.valid.size else 0.0
+
+    @property
+    def refined_fraction(self) -> float:
+        """Share of the boundary that refinement actually moved."""
+        return self.valid_fraction
 
     def reason_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -539,6 +555,21 @@ def _coherence_filter(
     scale = 1.4826 * np.median(np.abs(finite - np.median(finite)))
     limit = max(threshold_mad * scale, 0.5)
     keep = ~(np.isfinite(residual) & (residual > limit))
+
+    # The local test cannot see a run of outliers longer than its own window:
+    # such a run dominates its neighbourhood, the median follows it, and the
+    # residual stays small. A region-level test does see it, because the run
+    # still departs from what the whole contour agrees on. Using the median
+    # keeps a *uniformly* displaced boundary - where the mask really was off by
+    # a constant - entirely intact; only a subset disagreeing with its own
+    # region is removed.
+    observed = filled[np.isfinite(filled)]
+    if observed.size >= 8:
+        centre = np.median(observed)
+        spread = 1.4826 * np.median(np.abs(observed - centre))
+        region_limit = max(threshold_mad * spread, 1.0)
+        far = np.isfinite(filled) & (np.abs(filled - centre) > region_limit)
+        keep &= ~far
     return valid & keep
 
 
@@ -706,6 +737,26 @@ def refine_contour(
             "profiles_shape": tuple(profiles.shape),
         },
     )
+
+
+def edge_strength_along(points: np.ndarray, image01: np.ndarray, *, sigma: float = 1.0) -> float:
+    """Mean |grad I| sampled on a contour - does it sit on an edge?
+
+    The only way to ask "did refinement improve this boundary" without ground
+    truth.  A boundary that tracks a real edge samples a higher gradient than one
+    that does not, so comparing this between the coarse and refined rings says
+    directly whether the move was an improvement, a wash, or a regression.
+
+    It is not a proxy for accuracy: a contour can sit on a strong edge and still
+    be the wrong edge.  It is a regression detector, which is what was missing.
+    """
+    from scipy.ndimage import gaussian_gradient_magnitude, map_coordinates
+
+    if points.shape[0] < 3 or not np.isfinite(points).all():
+        return float("nan")
+    magnitude = gaussian_gradient_magnitude(np.asarray(image01, dtype=np.float64), sigma)
+    sampled = map_coordinates(magnitude, [points[:, 0], points[:, 1]], order=1, mode="nearest")
+    return float(np.mean(sampled))
 
 
 def refine_all(

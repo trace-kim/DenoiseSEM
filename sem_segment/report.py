@@ -80,6 +80,17 @@ def _colour_labels(labels: np.ndarray, count: int) -> np.ndarray:
     return palette[np.clip(labels, 0, count)]
 
 
+def _contiguous(indices: np.ndarray):
+    """Yield (start, end) of each run of consecutive indices."""
+    if indices.size == 0:
+        return
+    breaks = np.flatnonzero(np.diff(indices) != 1)
+    starts = np.concatenate([[0], breaks + 1])
+    ends = np.concatenate([breaks, [indices.size - 1]])
+    for a, b in zip(starts, ends):
+        yield int(indices[a]), int(indices[b])
+
+
 def _draw_contours(axis, result: SegmentationResult, *, linewidth: float = 0.9) -> None:
     for index, contour in enumerate(result.coarse):
         if len(contour) < 3:
@@ -94,7 +105,16 @@ def _draw_contours(axis, result: SegmentationResult, *, linewidth: float = 0.9) 
         if polygon.shape[0] < 3:
             continue
         ring = np.vstack([polygon, polygon[:1]])
-        axis.plot(ring[:, 1], ring[:, 0], "-", color="#2ad4a0", linewidth=linewidth)
+        # Spans where refinement declined fall back to the mask boundary. They
+        # are drawn faintly so a reader can see which parts of the outline were
+        # actually measured and which are the segmentation's own.
+        valid = np.concatenate([refined.valid, refined.valid[:1]])
+        axis.plot(ring[:, 1], ring[:, 0], "-", color="#2ad4a0",
+                  linewidth=linewidth, alpha=0.35)
+        segments = np.where(valid[:-1] & valid[1:])[0]
+        for start, end in _contiguous(segments):
+            axis.plot(ring[start:end + 2, 1], ring[start:end + 2, 0], "-",
+                      color="#2ad4a0", linewidth=linewidth)
 
 
 def _overview_figure(image01: np.ndarray, result: SegmentationResult, dpi: int) -> str:
@@ -280,7 +300,10 @@ def _kpis(result: SegmentationResult, config: Config) -> str:
         ("Aggregated", stats.get("region_count_aggregated")),
         (f"Mean CD ({unit})", stats.get(cd_key)),
         ("Mean |shift| (px)", stats.get("shift_abs_mean_px_mean")),
-        ("Valid vertices", result.diagnostics.valid_fraction),
+        ("Boundary refined", result.diagnostics.valid_fraction),
+        ("Contours improved",
+         f"{result.diagnostics.edge_strength_change.get('regions_improved', 0)}"
+         f"/{result.region_count}" if result.diagnostics.edge_strength_change else None),
         (f"Mean LER 3σ ({unit})", stats.get(f"ler_3sigma_{unit}_mean", stats.get("ler_3sigma_px_mean"))),
     ]
     cells = "".join(
@@ -305,6 +328,21 @@ def _flags(result: SegmentationResult) -> str:
     if diagnostics.refine_rejections:
         reasons = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in diagnostics.refine_rejections.items())
         items.append(f"Contour vertices rejected during edge fitting - {reasons}.")
+    change = diagnostics.edge_strength_change
+    if change:
+        items.append(
+            f"Refinement put {change['regions_improved']} of "
+            f"{change['regions_improved'] + change['regions_unchanged'] + change['regions_degraded']} "
+            f"contours on a stronger edge than the mask boundary they started from "
+            f"(median {change['median_change']:+.1%}, worst {change['worst_change']:+.1%}). "
+            "This is a regression check, not an accuracy measure: a contour can sit on a strong "
+            "edge and still be the wrong edge."
+        )
+    items.append(
+        "Spans where refinement declined keep the segmentation's own vertices and are drawn "
+        "faintly. They are never skipped, because closing the ring across a gap would draw - and "
+        "measure - a boundary that was never observed."
+    )
     items.append(
         "Method 1 (mask boundary) interpolates the 0.5 level of a binary mask, so its precision is "
         "bounded by the resolution the mask was produced at. Method 2 measures the original pixels. "

@@ -88,10 +88,11 @@ def test_every_estimator_is_correct_once_the_window_excludes_the_neighbour(estim
     refined = refine_contour(
         vertical_contour(40.0),
         image,
-        RefineConfig(estimator=estimator, search_px=2.5, adaptive_search=False,
+        RefineConfig(estimator=estimator, search_px=3.0, adaptive_search=False,
                      min_contrast=0.02, step_px=0.2),
     )
-    measured = np.nanmean(refined.refined_points[:, 1])
+    assert refined.valid.any(), f"{estimator} refined nothing"
+    measured = float(np.mean(refined.polygon[:, 1]))
     assert measured == pytest.approx(40.0, abs=0.5), f"{estimator} gave {measured:.2f}"
 
 
@@ -157,6 +158,31 @@ def test_coherence_filter_keeps_a_smoothly_varying_boundary():
     angle = np.linspace(0, 2 * np.pi, 80, endpoint=False)
     displacement = 0.6 * np.sin(angle)  # a genuine, smooth excursion
     kept = _coherence_filter(displacement, np.ones(80, dtype=bool), threshold_mad=3.0)
+    assert kept.all()
+
+
+def test_coherence_filter_catches_a_run_longer_than_its_window():
+    """A local median cannot see a run that dominates its own neighbourhood.
+
+    On real data an 8-vertex stretch of one contour locked onto a neighbouring
+    particle at +1.5 to +2.75 px and survived the local test entirely, because
+    with a 7-vertex window the run *is* the local median. A region-level test
+    sees it, since it still departs from what the whole contour agrees on.
+    """
+    displacement = np.full(60, 0.2)
+    displacement[20:31] = 2.4          # 11 contiguous vertices, window is 7
+    kept = _coherence_filter(displacement, np.ones(60, dtype=bool), threshold_mad=3.0)
+    assert not kept[20:31].any(), "the run survived"
+    # Vertices immediately flanking the run may also go, since their own local
+    # median is contaminated by it. Everything well clear of it must survive.
+    assert kept[:18].all() and kept[33:].all()
+    assert kept.sum() >= 45
+
+
+def test_a_uniformly_displaced_boundary_is_kept_intact():
+    """When the mask really was off by a constant, nothing is an outlier."""
+    displacement = np.full(60, 2.5) + np.random.default_rng(0).normal(0, 0.05, 60)
+    kept = _coherence_filter(displacement, np.ones(60, dtype=bool), threshold_mad=3.0)
     assert kept.all()
 
 

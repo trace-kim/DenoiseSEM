@@ -157,6 +157,7 @@ def write_result(
             "rejections": result.diagnostics.rejections,
             "refine_rejections": result.diagnostics.refine_rejections,
             "valid_fraction": result.diagnostics.valid_fraction,
+            "edge_strength_change": result.diagnostics.edge_strength_change,
             "timings_s": result.diagnostics.timings_s,
             "scaling": result.diagnostics.scaling,
         },

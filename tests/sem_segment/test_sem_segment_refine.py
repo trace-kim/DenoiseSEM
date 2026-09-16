@@ -149,15 +149,49 @@ def test_window_leaving_the_image_is_rejected_as_out_of_bounds():
     assert np.isnan(refined.displacement).all()
 
 
-def test_polygon_excludes_invalid_vertices_rather_than_zero_filling():
-    """Zero-filling would plant a notch far larger than the roughness signal."""
+def test_polygon_is_complete_and_never_chords_across_a_gap():
+    """An unrefined span keeps the segmentation's vertex; it is not skipped.
+
+    Dropping unrefined vertices lets the ring close with a straight line across
+    the gap, which is then not only drawn but fed into area and perimeter. On
+    real data that produced chords up to 193 px long. The mask boundary is a real
+    estimate of where the edge is - falling back to it invents nothing.
+    """
     image = gaussian_blurred_step(edge_x=40.3)
     contour = vertical_edge_contour(guess_x=38.3, n=20)
-    refined = refine_contour(contour, image, RefineConfig())
-    refined.valid[5] = False
-    refined.displacement[5] = np.nan
-    assert refined.polygon.shape[0] == len(refined.valid) - 1
-    assert np.isfinite(refined.polygon).all()
+    refined = refine_contour(contour, image, RefineConfig(adaptive_search=False))
+    refined.valid[5:9] = False
+    refined.displacement[5:9] = np.nan
+
+    polygon = refined.polygon
+    assert polygon.shape[0] == len(refined.valid)      # complete ring
+    assert np.isfinite(polygon).all()                  # no holes
+    # The unrefined vertices sit exactly on the coarse contour.
+    np.testing.assert_allclose(polygon[5:9], refined.base_points[5:9])
+    # ...and the refined ones are still refined.
+    assert abs(polygon[0, 1] - 40.3) < 0.05
+
+
+def test_refinement_does_not_degrade_a_contour():
+    """Refinement must be an improvement or a no-op, never a regression.
+
+    Without ground truth the honest test is whether the ring ends up sampling a
+    stronger gradient than it started on. A contour that has been pulled onto a
+    neighbouring feature, or into flat background, samples a weaker one.
+    """
+    from sem_segment.refine import edge_strength_along
+
+    image = blurred_disk(size=128, centre=(63.5, 63.5), radius=24.0, sigma=1.5)
+    instance = InstanceMask.from_mask(image > 0.62, score=1.0, backend="t")
+    outer, _ = trace_instance(instance, ContoursConfig())
+    from sem_segment.contours import attach_normals
+
+    attach_normals(outer, instance.full_mask(image.shape), ContoursConfig())
+    refined = refine_contour(outer, image, RefineConfig())
+
+    before = edge_strength_along(outer.points, image)
+    after = edge_strength_along(refined.polygon, image)
+    assert after >= before, f"refinement weakened the contour: {before:.4f} -> {after:.4f}"
 
 
 def test_short_gaps_are_interpolated_and_long_gaps_are_not():

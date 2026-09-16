@@ -52,6 +52,8 @@ class Diagnostics:
     scaling: dict = field(default_factory=dict)
     refine_rejections: dict = field(default_factory=dict)
     valid_fraction: float = float("nan")
+    #: Per-region change in mean |grad I| along the ring, coarse -> refined.
+    edge_strength_change: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -293,6 +295,30 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
     )
     timings["metrology"] = time.perf_counter() - start
 
+    # Did refinement actually improve each boundary? Without ground truth the
+    # honest check is whether the ring ends up on a stronger gradient. A contour
+    # dragged onto a neighbour or into flat background lands on a weaker one, and
+    # a summary that only reports what was fixed would never show it.
+    strength: dict = {}
+    if refined:
+        from .refine import edge_strength_along
+
+        changes = []
+        for base, ref in zip(coarse, refined):
+            before = edge_strength_along(base.points, measure01)
+            after = edge_strength_along(ref.polygon, measure01)
+            if np.isfinite(before) and np.isfinite(after) and before > 0:
+                changes.append((after - before) / before)
+        if changes:
+            values = np.asarray(changes)
+            strength = {
+                "regions_improved": int((values > 0.02).sum()),
+                "regions_unchanged": int((np.abs(values) <= 0.02).sum()),
+                "regions_degraded": int((values < -0.02).sum()),
+                "median_change": float(np.median(values)),
+                "worst_change": float(values.min()),
+            }
+
     refine_rejections: dict = {}
     for contour in refined:
         for reason, count in contour.reason_counts().items():
@@ -306,6 +332,13 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
             f"Only {valid_fraction:.0%} of contour vertices produced a usable edge fit "
             f"(threshold {config.refine.min_valid_fraction:.0%}). Refined geometry is based on "
             "the surviving vertices; see refine_rejections for why the rest failed."
+        )
+    if strength.get("regions_degraded"):
+        warnings.append(
+            f"Refinement moved {strength['regions_degraded']} region(s) onto a WEAKER edge than "
+            f"the segmentation boundary they started from (worst {strength['worst_change']:.1%}). "
+            "Those contours are worse than the mask they came from and should not be trusted; "
+            "inspect them before using their numbers."
         )
     if not regions:
         warnings.append(
@@ -328,6 +361,7 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
         scaling=scaling,
         refine_rejections=refine_rejections,
         valid_fraction=valid_fraction,
+        edge_strength_change=strength,
     )
     return SegmentationResult(
         shape=shape,
