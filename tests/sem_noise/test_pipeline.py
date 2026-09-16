@@ -157,3 +157,52 @@ def test_failed_registration_writes_shift_audit(tmp_path: Path) -> None:
     assert result["status"] == "partial_failure"
     assert (output / "site_001/registration.csv").exists()
     assert "only 1 frames pass registration" in result["sites"][0]["error"]
+
+
+def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+    from scipy import ndimage
+    from sem_noise import report
+
+    rng = np.random.default_rng(55)
+    reference = 1000 + 200 * ndimage.gaussian_filter(rng.normal(size=(192, 192)), 1.5)
+    stack = np.stack([ndimage.rotate(reference, angle, reshape=False, mode="reflect")
+                      + rng.normal(0, 1, reference.shape) for angle in (0, 0.2, 0.4, 0.6)])
+    source = tmp_path / "repeats.npy"
+    np.save(source, stack.astype(np.float32))
+    config = tmp_path / "config.yml"
+    config.write_text("min_frames: 4\nexpected_frames: 4\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n", encoding="utf-8")
+    output = tmp_path / "affine"
+    assert main(["analyze", "--input", str(source), "--output", str(output), "--config", str(config),
+                 "--affine-diagnostics", "--local-frames", "0", "--local-grid", "3"]) == 0
+    diagnostic = json.loads((output / "site_001/affine.json").read_text(encoding="utf-8"))
+    assert len(diagnostic["frames"]) == 4
+    assert len(diagnostic["models"]) == 16
+    assert diagnostic["summary"]["reliable_affine_frames"] == 4
+    html = (output / "site_001/report.html").read_text(encoding="utf-8")
+    assert "Affine motion diagnostics" in html
+    assert "Within-site affine parameter distributions" in html
+    assert (output / "site_001/affine.png").exists()
+    assert "Motion model support by site" in (output / "index.html").read_text(encoding="utf-8")
+    provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["config"]["local_frames"] == 0
+    monkeypatch.setattr(report, "site_report", lambda *args: None)
+    baseline = analyze_dataset(source, tmp_path / "baseline", config=replace(
+        _config(), registration="translation", min_frames=4, expected_frames=4, local_frames=0, local_grid=3))
+    with (output / "site_001/summary.json").open(encoding="utf-8") as stream:
+        enriched = json.load(stream)
+    assert enriched["modes"] == baseline["sites"][0]["modes"]
+
+
+def test_affine_without_registration_reports_unavailable(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+    from sem_noise import report
+    monkeypatch.setattr(report, "site_report", lambda *args: None)
+    _site(tmp_path / "input/site")
+    output = tmp_path / "result"
+    result = analyze_dataset(tmp_path / "input", output, config=replace(_config(), affine_diagnostics=True))
+    summary = result["sites"][0]["affine_diagnostics"]
+    assert summary["supported_frames"] == 0
+    assert summary["not_assessed_frames"] == 8
+    frames = json.loads((output / "site_001/affine.json").read_text(encoding="utf-8"))["frames"]
+    assert all(r["selected_model"] is None and r["reason"] == "registration disabled" for r in frames)

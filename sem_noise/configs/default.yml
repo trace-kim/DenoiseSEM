@@ -17,6 +17,14 @@ registration_max_side: 768
 min_correlation: 0.2
 local_grid: 3
 local_frames: 16
+# Optional motion-model comparison (no affine correction). For all frames and
+# more tiles, use affine_diagnostics.yml or CLI --local-frames 0 --local-grid 5.
+affine_diagnostics: false
+affine_min_improvement_px: 0.05
+affine_min_relative_improvement: 0.15
+affine_max_cv_error_px: 0.5
+affine_max_stability_px: 0.25
+affine_min_texture_ratio: 0.02
 sample_pixels: 8192
 distribution_samples: 100000
 intensity_bins: 12

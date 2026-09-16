@@ -42,12 +42,63 @@ def _warnings(messages: list[str]) -> str:
     return "<section><h2>Interpretation and quality flags</h2><ul>" + "".join(f"<li>{escape(m)}</li>" for m in messages) + "</ul></section>"
 
 
-def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: list[dict], local: list[dict]) -> None:
+def _affine_report(out: Path, summary: dict, rows: list[dict], local: list[dict]) -> str:
+    diagnostic = summary.get("affine_diagnostics", {})
+    if not diagnostic.get("enabled"):
+        return ""
+    counts = diagnostic["selected_model_counts"]
+    body = '<section><h2>Affine motion diagnostics</h2><p><a href="affine.json">Matrices and metadata (JSON)</a> | <a href="affine_models.csv">Model comparison CSV</a> | <a href="affine_frames.csv">Frame decisions CSV</a></p>'
+    body += '<p>Supported frame counts: ' + ', '.join(f'{escape(k)}: {v}' for k, v in counts.items()) + '.</p>'
+    body += f'<p>{diagnostic["unavailable_frames"]} measured frames lack a supported model; {diagnostic.get("not_assessed_frames", 0)} frames were not assessed. Missing estimates are unavailable, not zero motion.</p>'
+    body += '<p>Use the simplest supported model. A richer model must improve held-out tile error by both the configured absolute and relative thresholds, and pass error and tile-deletion stability limits. Translation support means no sufficiently large improvement was detected; it does not prove zero rotation.</p>'
+    body += '<p>Parameters below are from reliable full-affine candidates, including those where a simpler model was selected. They describe corrections into each frame’s leave-one-out repeat mean, not absolute stage motion or a shared anchor shape. Coordinates are within the analysis ROI; x points right, y down, and positive rotation is clockwise. Center offsets include the original translation. Scale/shear can also absorb specimen changes.</p>'
+    body += '<p>Affine diagnostics do not change noise measurements or training data. Tile shifts approximate small motion and are limited to 3 px per axis. Larger changes require a separate registration method. Tile-deletion spread measures sensitivity, not a confidence interval.</p></section>'
+    reliable = [r for r in rows if r["model"] == "affine" and r["reliable"]]
+    if not reliable:
+        return body + '<section><p>No reliable affine parameter estimates. Inspect frame decisions, texture, tile size, and the selected ROI.</p></section>'
+    fig, axes = plt.subplots(3, 2, figsize=(13, 11), constrained_layout=True)
+    x = [r["frame_index"] for r in reliable]
+    panels = [(("correction_rotation_deg",), "Correction rotation", "Degrees"),
+              (("correction_scale_x_percent", "correction_scale_y_percent"), "Correction scale change", "Percent"),
+              (("correction_center_dx_px", "correction_center_dy_px"), "Correction at ROI center", "Pixels"),
+              (("correction_shear",), "Correction shear", "Dimensionless")]
+    for ax, (keys, title, unit) in zip(axes.ravel(), panels):
+        for key in keys:
+            ax.scatter(x, [r[key] for r in reliable], s=15, label=key.replace("correction_", ""))
+        ax.set(title=title, xlabel="Acquisition index", ylabel=unit)
+        ax.legend(fontsize=8)
+    for model in counts:
+        model_rows = [r for r in rows if r["model"] == model and "cv_median_error_px" in r]
+        axes[2, 0].scatter([r["frame_index"] for r in model_rows],
+                           [r["cv_median_error_px"] for r in model_rows], s=12, label=model)
+    axes[2, 0].set(title="Held-out tile prediction error", xlabel="Acquisition index", ylabel="Median error (px)")
+    axes[2, 0].legend(fontsize=8)
+    chosen = max(reliable, key=lambda r: abs(r["correction_rotation_deg"]) +
+                 abs(r["correction_scale_x_percent"]) + abs(r["correction_scale_y_percent"]))
+    tiles = [r for r in local if r["frame_position"] == chosen["frame_position"] and r["valid"]]
+    axes[2, 1].quiver([r["x_px"] for r in tiles], [r["y_px"] for r in tiles],
+                      [r["residual_dx_px"] for r in tiles], [r["residual_dy_px"] for r in tiles],
+                      angles="xy")
+    axes[2, 1].invert_yaxis()
+    axes[2, 1].margins(0.2)
+    axes[2, 1].set_aspect("equal")
+    axes[2, 1].set(title=f'Local residual field, frame {chosen["frame_index"]}', xlabel="ROI x (px)", ylabel="ROI y (px)")
+    body += _figure(out, "affine.png", fig, "Points omit unavailable estimates and do not bridge gaps. Residual arrows are visually autoscaled; numerical vectors are in local_registration.csv. Held-out errors include unreliable candidates so failures remain visible.")
+    body += '<section><h3>Within-site affine parameter distributions</h3><table><tr><th>Correction parameter</th><th>Min</th><th>Median</th><th>Max</th><th>Std</th></tr>'
+    for key, values in diagnostic["affine_parameter_distributions"].items():
+        if values:
+            body += '<tr><td>' + escape(key) + '</td>' + ''.join(f'<td>{_number(values[k])}</td>' for k in ("min", "median", "max", "std")) + '</tr>'
+    return body + '</table><p>Descriptive distribution over reliable sampled frames, not independent-site uncertainty. Do not pool unrelated sites into one geometric reference.</p></section>'
+
+
+def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: list[dict], local: list[dict],
+                affine: list[dict] | None = None) -> None:
     """Render quantitative diagnostics without treating the repeat mean as truth."""
     native, aligned = summary["modes"]["native"], summary["modes"]["aligned"]
     body = '<p><a href="../index.html">All sites</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
     body += f'<section><h2>{summary["accepted_frames"]} / {summary["input_frames"]} frames accepted</h2><p>Native flat-region temporal σ: <b>{_number(native["flat_temporal_sigma_dn"])} DN</b>. Aligned: <b>{_number(aligned["flat_temporal_sigma_dn"])} DN</b>. Maximum estimated drift: <b>{_number(summary["max_drift_px"])} px</b>. Local residual: <b>{_number(summary["local_residual_rms_px"])} px RMS</b>.</p><p>DN means the original exported pixel units. Native statistics use integer translations; aligned statistics use bilinear interpolation. The latter changes noise variance and spatial correlation. The predicted mean variance multiplier for independent white noise is {_number(summary["bilinear_white_noise_variance_factor_mean"])}; no universal correction is applied.</p></section>'
     body += _warnings(summary["warnings"])
+    body += _affine_report(out, summary, affine or [], local)
     fig, axes = plt.subplots(2, 3, figsize=(13, 8), constrained_layout=True)
     panels = [("unregistered_mean", "Unregistered mean", "gray"), ("aligned_mean", "Aligned repeat mean", "gray"),
               ("aligned_early_late_delta", "Last quarter − first quarter (DN)", "coolwarm"),
@@ -173,4 +224,13 @@ def index_report(out: Path, overview: dict) -> None:
             body += f'<td>{_number(value)}</td>'
         body += f'<td>{len(site["warnings"])} flags / complete</td></tr>'
     body += '</tbody></table></div><p>Compare sites with matched acquisition settings. These are descriptive observed-noise estimates; the site is the unit of comparison, not millions of independent pixels.</p></section>'
+    diagnostics = [s for s in overview["sites"] if s.get("affine_diagnostics", {}).get("enabled")]
+    if diagnostics:
+        body += '<section><h2>Motion model support by site</h2><table><tr><th>Site</th><th>Translation</th><th>Rigid</th><th>Similarity</th><th>Affine</th><th>Unavailable / not assessed</th></tr>'
+        for site in diagnostics:
+            result = site["affine_diagnostics"]
+            body += '<tr><td>' + escape(site["site"]) + '</td>'
+            body += ''.join(f'<td>{result["selected_model_counts"][model]}</td>' for model in ("translation", "rigid", "similarity", "affine"))
+            body += f'<td>{result["unavailable_frames"]} / {result.get("not_assessed_frames", 0)}</td></tr>'
+        body += '</table><p>Counts refer to frames with supported held-out tile fits. Inspect each site report before choosing a correction model. No affine warp has been applied.</p></section>'
     (out / "index.html").write_text(_document("Repeated SEM acquisition — noise and stability", body), encoding="utf-8")

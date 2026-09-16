@@ -1,0 +1,10 @@
+# Diagnostic model comparison only; noise measurements still use translations.
+affine_diagnostics: true
+local_grid: 5
+# Zero analyzes every globally accepted frame, preserving acquisition indices.
+local_frames: 0
+affine_min_improvement_px: 0.05
+affine_min_relative_improvement: 0.15
+affine_max_cv_error_px: 0.5
+affine_max_stability_px: 0.25
+affine_min_texture_ratio: 0.02

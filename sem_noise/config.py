@@ -27,6 +27,12 @@ class AnalysisConfig:
     min_correlation: float = 0.2
     local_grid: int = 3
     local_frames: int = 16
+    affine_diagnostics: bool = False
+    affine_min_improvement_px: float = 0.05
+    affine_min_relative_improvement: float = 0.15
+    affine_max_cv_error_px: float = 0.5
+    affine_max_stability_px: float = 0.25
+    affine_min_texture_ratio: float = 0.02
     sample_pixels: int = 8192
     distribution_samples: int = 100000
     intensity_bins: int = 12
@@ -39,7 +45,7 @@ class AnalysisConfig:
     def __post_init__(self) -> None:
         for name in (
             "expected_frames", "min_frames", "upsample_factor",
-            "registration_max_side", "local_grid", "local_frames",
+            "registration_max_side", "local_grid",
             "sample_pixels", "distribution_samples", "intensity_bins",
             "max_lag", "spatial_pairs", "spatial_max_side",
         ):
@@ -48,6 +54,17 @@ class AnalysisConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.min_frames < 4 or self.intensity_bins < 3:
             raise ValueError("min_frames must be >= 4 and intensity_bins >= 3")
+        if type(self.local_frames) is not int or self.local_frames < 0:
+            raise ValueError("local_frames must be nonnegative (0 means all accepted frames)")
+        if type(self.affine_diagnostics) is not bool:
+            raise ValueError("affine_diagnostics must be a boolean")
+        for name in ("affine_min_improvement_px", "affine_min_relative_improvement",
+                     "affine_max_cv_error_px", "affine_max_stability_px", "affine_min_texture_ratio"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if self.affine_min_relative_improvement >= 1 or self.affine_min_texture_ratio >= 1:
+            raise ValueError("affine relative improvement and texture ratio must be below 1")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
         for name in ("frame_interval_s", "pixel_size_nm", "max_shift_px", "registration_sigma"):

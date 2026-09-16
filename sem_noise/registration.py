@@ -170,7 +170,8 @@ def local_diagnostics(stack: np.ndarray, shifts: np.ndarray, accepted: np.ndarra
     if config.registration == "none":
         return []
     indices = np.flatnonzero(accepted)
-    selected = indices[np.unique(np.linspace(0, len(indices) - 1, min(config.local_frames, len(indices))).astype(int))]
+    selected = indices if config.local_frames == 0 else indices[
+        np.unique(np.linspace(0, len(indices) - 1, min(config.local_frames, len(indices))).astype(int))]
     ys = np.linspace(0, mean.shape[0], config.local_grid + 1).astype(int)
     xs = np.linspace(0, mean.shape[1], config.local_grid + 1).astype(int)
     local_config = replace(config, max_shift_px=min(3.0, config.max_shift_px))
@@ -183,10 +184,18 @@ def local_diagnostics(stack: np.ndarray, shifts: np.ndarray, accepted: np.ndarra
                 if min(y1 - y0, x1 - x0) < 24:
                     continue
                 result = estimate_translation(reference[y0:y1, x0:x1], moving[y0:y1, x0:x1], local_config)
+                # A 2-D structure tensor detects the aperture problem: parallel
+                # edges do not constrain displacement along the edges.
+                texture = ndimage.gaussian_filter(reference[y0:y1, x0:x1], config.registration_sigma)
+                gy, gx = np.gradient(texture)
+                eigenvalues = np.linalg.eigvalsh([[np.mean(gx * gx), np.mean(gx * gy)],
+                                                [np.mean(gx * gy), np.mean(gy * gy)]])
+                ratio = float(max(0, eigenvalues[0]) / max(eigenvalues[1], 1e-12))
                 rows.append({"frame_position": int(i), "y_px": float((y0 + y1) / 2 + crop[0].start),
                              "x_px": float((x0 + x1) / 2 + crop[1].start),
                              "residual_dy_px": float(result["shift"][0]),
                              "residual_dx_px": float(result["shift"][1]),
                              "correlation": result["correlation"], "valid": result["valid"],
+                             "texture_ratio": ratio,
                              "peak_ratio": result["peak_ratio"]})
     return rows

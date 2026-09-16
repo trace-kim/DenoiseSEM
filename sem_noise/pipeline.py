@@ -17,6 +17,7 @@ from typing import Callable
 import numpy as np
 
 from .config import AnalysisConfig
+from .affine import compare_models
 from .io import Frame, discover_sites, file_hash, pixel_hash, read_frame
 from .metrics import analyze_mode
 from .registration import common_crop, local_diagnostics, register_stack
@@ -204,6 +205,29 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
             for row in local:
                 row["frame_index"] = frames[row["frame_position"]].index
             write_csv(out / "local_registration.csv", local)
+            affine_rows = []
+            affine_summary = {"enabled": config.affine_diagnostics}
+            if config.affine_diagnostics:
+                progress(f"{frames[0].site}: comparing translation, rigid, similarity, and affine models")
+                affine_rows, affine_frames, affine_summary = compare_models(local, shifts, stack.shape[1:], config)
+                assessed = {r["frame_position"] for r in affine_frames}
+                for i, frame in enumerate(frames):
+                    if i not in assessed:
+                        affine_frames.append({"frame_position": i, "frame_index": frame.index,
+                                              "usable_tiles": 0, "measured_tiles": 0, "selected_model": None,
+                                              "reason": "global registration rejected/excluded" if not accepted[i] else
+                                              "registration disabled" if config.registration == "none" else
+                                              "not sampled or tiles too small"})
+                affine_frames.sort(key=lambda r: r["frame_position"])
+                affine_summary["not_assessed_frames"] = len(frames) - len(assessed)
+                write_csv(out / "affine_models.csv", affine_rows)
+                write_csv(out / "affine_frames.csv", affine_frames)
+                write_json(out / "affine.json", {"summary": affine_summary, "frames": affine_frames, "models": affine_rows})
+                richer = sum(n for model, n in affine_summary["selected_model_counts"].items() if model != "translation")
+                if richer:
+                    warnings.append(f"{richer} sampled frames support motion beyond translation on held-out tiles; inspect affine diagnostics before changing training registration.")
+                if affine_summary["unavailable_frames"] or affine_summary["not_assessed_frames"]:
+                    warnings.append("Affine diagnostics are unavailable for some frames; see affine_frames.csv for quality or sampling reasons.")
             valid_local = [r for r in local if r["valid"]]
             local_rms = float(np.sqrt(np.mean([r["residual_dy_px"]**2 + r["residual_dx_px"]**2 for r in valid_local]))) if valid_local else None
             if local_rms is not None and local_rms > 0.5:
@@ -254,10 +278,10 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                        "brightness_slope_time_unit": "second" if frames[0].timestamp_s is not None or interval else "frame",
                        "bilinear_white_noise_variance_factor_mean": float(variance_factors.mean()),
                        "unregistered_temporal_sigma_dn": float(np.sqrt(np.mean(unregistered_m2 / (len(positions) - 1)))),
-                       "modes": summaries, "warnings": warnings}
+                       "modes": summaries, "affine_diagnostics": affine_summary, "warnings": warnings}
             np.savez_compressed(out / "maps.npz", **maps)
             write_json(out / "summary.json", summary)
-            site_report(out, summary, maps, list(metrics_by_position.values()), local)
+            site_report(out, summary, maps, list(metrics_by_position.values()), local, affine_rows)
             return summary
         finally:
             stack._mmap.close()
@@ -317,6 +341,8 @@ def analyze_dataset(input_path: str | Path, output_path: str | Path, *,
                                        "accepted_frames": r.get("accepted_frames"), "max_drift_px": r.get("max_drift_px"),
                                        "native_flat_sigma_dn": r.get("modes", {}).get("native", {}).get("flat_temporal_sigma_dn"),
                                        "aligned_flat_sigma_dn": r.get("modes", {}).get("aligned", {}).get("flat_temporal_sigma_dn"),
+                                       **{f"motion_{model}_frames": r.get("affine_diagnostics", {}).get("selected_model_counts", {}).get(model)
+                                          for model in ("translation", "rigid", "similarity", "affine")},
                                        "local_residual_rms_px": r.get("local_residual_rms_px"), "error": r.get("error", "")}
                                       for r in results])
     index_report(output, overview)

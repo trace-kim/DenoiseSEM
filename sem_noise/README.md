@@ -213,6 +213,100 @@ the IID reference. Residual specimen/motion energy can contribute to spectra.
 
 ## Output and resource use
 
+### Rotation, scale, shear, and motion-model comparison
+
+Run this from the repository on the remote machine (CPU only):
+
+```bash
+python -m pip install -e ".[analysis]"
+python -m sem_noise analyze \
+  --input /path/to/real-noisy-data \
+  --output /path/to/results/sem-noise-affine-01 \
+  --config sem_noise/configs/affine_diagnostics.yml
+```
+
+Use one folder per repeated site, with filenames in acquisition order. The
+output directory must be new and outside the input. Open `index.html` in the
+output directory; each site links to a self-contained `report.html` with
+embedded images. Download the entire output directory to keep table/JSON links
+working. For irregular layouts, add `--manifest /path/to/order.csv` as above.
+Crop labels/scale bars with `--roi Y0 Y1 X0 X1` (exclusive stops). Add known
+`--frame-interval-s` and `--pixel-size-nm` values only when calibrated.
+
+The preset enables a 5-by-5 tile grid on **every globally accepted frame**.
+Equivalent options are `--affine-diagnostics --local-grid 5 --local-frames 0`.
+`--local-frames 16` samples at most 16 frames to reduce runtime. Tiles must be
+at least 24-by-24 pixels; use fewer tiles for small ROIs. At least eight usable,
+spatially distributed tiles are needed, so a 3-by-3 grid is the practical minimum.
+`--no-affine-diagnostics` overrides a preset. Without these options, diagnostics
+remain disabled and the established analysis defaults are preserved.
+
+For each sampled frame, the diagnostic fits translation (2 parameters), rigid
+motion (3), similarity (4), and affine motion (6) to local residual shifts.
+Fits use correlation weights and robust residual reweighting. Ambiguous peaks
+(ratio below 1.05), invalid shifts, and nearly one-dimensional texture are
+excluded. The structure-tensor eigenvalue ratio must be at least
+`affine_min_texture_ratio` (default 0.02). This detects the aperture problem,
+but it is not a complete test of registration correctness.
+
+Each tile is held out in turn and predicted from the remaining tiles. A more
+complex model must reduce median held-out displacement error by both
+`affine_min_improvement_px` (0.05 px) and
+`affine_min_relative_improvement` (15%) compared with the current simpler
+candidate. Selected models must also have median error at most
+`affine_max_cv_error_px` (0.5 px) and maximum corner prediction spread over
+tile-deletion fits at most `affine_max_stability_px` (0.25 px). These are
+configurable screening thresholds, not calibrated hypothesis tests. Untrimmed
+held-out RMS is exported too, so outliers are not hidden by the median score.
+Full and held-out tile sets must span at least 25% of each ROI axis and have a
+well-conditioned two-dimensional geometry.
+
+Reports show model-support counts, rotation/scale/shear/center-offset
+trajectories, within-site distributions, held-out error comparisons, and a
+representative local displacement field. Parameter plots use reliable
+full-affine candidates even when a simpler model is selected; small estimates
+are not automatically evidence that affine correction is needed. Failed,
+excluded, unobserved, or unsampled frames are explicitly distinguished from
+zero motion. No dataset-wide geometric fit pools unrelated sites.
+
+The `m00` through `m12` fields form the first two rows of a homogeneous 3-by-3
+matrix, with final row `[0, 0, 1]`. It maps **native ROI pixel centers to each
+frame's leave-one-out translation-aligned mean**, with x right, y down, and
+positive rotation clockwise. Coordinates are ROI-local; add the saved ROI
+origin when interpreting locations in the original image. This is not a
+common anchor specimen shape or absolute stage calibration. Center offsets
+include the original global translation. The decomposition is
+`A = R(theta) [[sx, shear*sy], [0, sy]]`, with positive scales and reported scale
+changes `100*(s-1)` percent. Geometric offsets are separate from brightness
+offsets. Optional nm offsets use the configured pixel calibration.
+
+Tile correspondences approximate **small** motion; local registration searches
+only up to 3 px per axis (or the smaller configured global shift limit).
+Large rotations, strong intra-tile deformation, repetitive features, specimen
+changes, or blurred reference means can invalidate this approximation. Rejected
+global frames are not rescued by affine diagnostics. The reported overlap is
+a 64-by-64 sampling estimate over the ROI, not a loss mask. Tile-deletion
+spreads measure sensitivity, not confidence intervals; shared references make
+tile errors dependent.
+
+These diagnostics apply **no affine warp**, change no noise metrics, and do
+not modify training/preparation. Decide whether rigid/similarity/affine
+correction is warranted from the support counts and residuals on real data.
+Scale and shear may absorb real dimensional changes; validate metrology before
+using them as corrections. A translation choice means no sufficiently large
+improvement was detected, not proof of zero rotation.
+
+Additional per-site files:
+
+| Artifact | Contents |
+|---|---|
+| `affine.json` | Convention, per-frame decisions, model fits, full matrices, and distributions |
+| `affine_models.csv` | Parameters, fit and held-out errors, stability, reliability, and selection |
+| `affine_frames.csv` | Every frame's decision or reason it was not assessed |
+| `affine.png` | Motion plots (when reliable affine estimates exist) |
+
+### Standard artifacts
+
 | Artifact | Contents |
 |---|---|
 | `index.html`, `summary.csv`, `summary.json` | Site comparisons, status, and all numerical results |
