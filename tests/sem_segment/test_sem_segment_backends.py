@@ -271,8 +271,10 @@ def test_gated_repository_error_explains_the_token_route(monkeypatch):
 
     monkeypatch.setattr("sem_segment.weights.cached_snapshot", lambda *_a, **_k: None)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    # Clearing the environment is not enough to simulate being signed out:
+    # get_token() also reads the file `hf auth login` writes, so this test
+    # passed only on a logged-out machine until the token lookup was fixed.
+    monkeypatch.setattr("sem_segment.weights._token", lambda: None)
     with pytest.raises(GatedRepositoryError) as error:
         resolve_model_source("facebook/sam3")
     message = str(error.value)

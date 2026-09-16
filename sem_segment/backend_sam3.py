@@ -24,6 +24,12 @@ interchangeable on SEM imagery:
 Each returns a different output shape; this module's job is to normalise all
 three into ``list[InstanceMask]`` so nothing downstream has to care.
 
+One checkpoint serves all three. Note that ``facebook/sam3`` declares
+``model_type: "sam3_video"`` and ``architectures: ["Sam3VideoModel"]`` - not
+``sam3``/``Sam3Model`` as the documentation page might suggest - so
+``AutoModelForMaskGeneration`` resolves it to ``Sam3TrackerModel``. Verified by
+loading the real weights: ``sam3_auto`` gets a ``Sam3TrackerModel``.
+
 Every import here is deferred into the call that needs it, so ``--help``, config
 validation and the entire classical path never load torch or transformers.
 """
@@ -108,7 +114,8 @@ class Sam3AutoSegmenter:
                 "mask-generation",
                 model=_source(self.config),
                 device=0 if device.startswith("cuda") else -1,
-                torch_dtype=torch.float32,
+                # transformers 5 renamed torch_dtype -> dtype on pipeline().
+                dtype=torch.float32,
             )
         return self._generator
 
