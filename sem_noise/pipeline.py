@@ -17,6 +17,7 @@ from typing import Callable
 import numpy as np
 
 from .config import AnalysisConfig
+from .brightness import analyze_brightness
 from .affine import compare_models
 from .feature_registration import analyze_features, difference_examples
 from .intensity_registration import analyze_intensity
@@ -304,6 +305,14 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                        "modes": summaries, "affine_diagnostics": affine_summary,
                        "feature_affine": feature_summary, "difference_examples": differences, "warnings": warnings}
             np.savez_compressed(out / "maps.npz", **maps)
+            progress(f"{frames[0].site}: validating brightness correction and differences")
+            brightness, brightness_rows, brightness_maps = analyze_brightness(
+                stack, shifts, accepted, np.array([f.index for f in frames]), crop,
+                registration_enabled=config.registration != "none", example_count=config.diff_examples)
+            summary["brightness_correction"] = brightness
+            write_json(out / "brightness.json", {"summary": brightness, "frames": brightness_rows})
+            write_csv(out / "brightness.csv", brightness_rows)
+            np.savez_compressed(out / "brightness_examples.npz", **brightness_maps)
             write_json(out / "summary.json", summary)
             site_report(out, summary, maps, list(metrics_by_position.values()), local, affine_rows,
                         feature_rows, difference_maps)

@@ -5,6 +5,14 @@ Defaults assume 128 acquisitions per site, with independent results for each
 of 15–30 sites. This package imports none of the training packages and requires
 no GPU. Input images are read only; results go into a new output directory.
 
+Every analysis also includes a **brightness correction comparison**: before/after
+acquisition tracks, signed correction images, and residuals against a fixed
+reference. Fits use registered block averages with separate validation blocks;
+raw noise statistics remain available unchanged. See the
+[brightness method and preprocessing review](brightness_review.md) for the
+assumptions, output files, and the distinction between analysis normalization
+and matching training targets to untouched inputs.
+
 ## Start with the PNG data
 
 ```powershell
@@ -88,7 +96,9 @@ the actual PNGs. Crop burned-in labels, scale bars, and non-imaging borders
 clipping bounds: unscaled 12-bit values in uint16 PNGs have upper bound 4095,
 not 65535. Otherwise integer storage limits are used and flagged; float images
 have no implicit clipping bounds. Measurements are not gamma-corrected,
-equalized, normalized per frame, denoised, or photometrically compensated.
+equalized, normalized per frame, denoised, or photometrically compensated in the
+native/aligned noise measurements. The separately labeled brightness comparison
+applies gain/offset to analysis copies only.
 
 Retain voltage/current, detector, dwell time, frame time, scan direction, pixel
 size, working distance, and any automatic contrast/filtering/averaging settings.
