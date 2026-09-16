@@ -28,6 +28,11 @@ class AnalysisConfig:
     local_grid: int = 3
     local_frames: int = 16
     affine_diagnostics: bool = False
+    affine_method: str = "intensity"
+    affine_refine_max_linear_change: float = 0.03
+    affine_refine_max_translation_px: float = 3.0
+    affine_refine_min_relative_improvement: float = 0.02
+    affine_refine_min_overlap: float = 0.5
     affine_min_improvement_px: float = 0.05
     affine_min_relative_improvement: float = 0.15
     affine_max_cv_error_px: float = 0.5
@@ -66,6 +71,15 @@ class AnalysisConfig:
             raise ValueError("local_frames must be nonnegative (0 means all accepted frames)")
         if type(self.affine_diagnostics) is not bool:
             raise ValueError("affine_diagnostics must be a boolean")
+        if self.affine_method not in {"intensity", "features"}:
+            raise ValueError("affine_method must be intensity or features")
+        for name in ("affine_refine_max_linear_change", "affine_refine_max_translation_px",
+                     "affine_refine_min_relative_improvement", "affine_refine_min_overlap"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+            if name != "affine_refine_max_translation_px" and value >= 1:
+                raise ValueError(f"{name} must be below 1")
         for name in ("affine_min_improvement_px", "affine_min_relative_improvement",
                      "affine_max_cv_error_px", "affine_max_stability_px", "affine_min_texture_ratio"):
             value = getattr(self, name)

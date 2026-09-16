@@ -19,6 +19,7 @@ import numpy as np
 from .config import AnalysisConfig
 from .affine import compare_models
 from .feature_registration import analyze_features, difference_examples
+from .intensity_registration import analyze_intensity
 from .io import Frame, discover_sites, file_hash, pixel_hash, read_frame
 from .metrics import analyze_mode
 from .registration import common_crop, local_diagnostics, register_stack
@@ -232,9 +233,15 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                     warnings.append(f"{richer} sampled frames support motion beyond translation on held-out tiles; inspect affine diagnostics before changing training registration.")
                 if affine_summary["unavailable_frames"] or affine_summary["not_assessed_frames"]:
                     warnings.append("Affine diagnostics are unavailable for some frames; see affine_frames.csv for quality or sampling reasons.")
-                feature_summary, feature_rows, feature_matches, examples = analyze_features(
-                    stack, included, np.array([f.index for f in frames]), config,
-                    lambda message: progress(f"{frames[0].site}: {message}"))
+                if config.affine_method == "intensity":
+                    feature_summary, feature_rows, feature_matches, examples = analyze_intensity(
+                        stack, included, np.array([f.index for f in frames]), shifts, accepted, config,
+                        lambda message: progress(f"{frames[0].site}: {message}"))
+                else:
+                    feature_summary, feature_rows, feature_matches, examples = analyze_features(
+                        stack, included, np.array([f.index for f in frames]), config,
+                        lambda message: progress(f"{frames[0].site}: {message}"))
+                feature_summary["estimator"] = config.affine_method
                 differences, difference_maps = difference_examples(
                     stack, feature_rows, examples, shifts, accepted, config.registration != "none")
                 write_json(out / "feature_affine.json", {"summary": feature_summary, "frames": feature_rows})
@@ -243,7 +250,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_json(out / "difference_examples.json", differences)
                 np.savez_compressed(out / "difference_examples.npz", **difference_maps)
                 if feature_summary["estimated_frames"] < feature_summary["attempted_frames"]:
-                    warnings.append("Some feature-based affine estimates failed validation; see feature_affine.csv. Difference panels show these estimates as unavailable.")
+                    warnings.append("Some frames do not support an affine correction; see feature_affine.csv for the estimator and validation reasons. Translation remains available for accepted frames.")
             valid_local = [r for r in local if r["valid"]]
             local_rms = float(np.sqrt(np.mean([r["residual_dy_px"]**2 + r["residual_dx_px"]**2 for r in valid_local]))) if valid_local else None
             if local_rms is not None and local_rms > 0.5:

@@ -1,5 +1,13 @@
-# Feature affine registration and diff previews; noise statistics use translations.
+# Small-motion intensity affine registration and diff previews; noise statistics use translations.
 affine_diagnostics: true
+# Translation-initialized refinement; use features for the legacy SIFT path.
+affine_method: intensity
+# Bounds on inverse-warp linear entries and extra center translation.
+affine_refine_max_linear_change: 0.03
+affine_refine_max_translation_px: 3.0
+# Required fractional held-out RMS improvement over refined translation.
+affine_refine_min_relative_improvement: 0.02
+affine_refine_min_overlap: 0.5
 local_grid: 5
 # Zero analyzes every globally accepted frame, preserving acquisition indices.
 local_frames: 0
@@ -8,7 +16,7 @@ affine_min_relative_improvement: 0.15
 affine_max_cv_error_px: 0.5
 affine_max_stability_px: 0.25
 affine_min_texture_ratio: 0.02
-# Actual feature correspondences (independent of the tile approximation).
+# Optional legacy SIFT estimator (affine_method: features).
 feature_max_keypoints: 1500
 feature_match_ratio: 0.75
 feature_residual_px: 1.5

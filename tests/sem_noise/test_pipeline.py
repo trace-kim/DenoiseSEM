@@ -159,7 +159,8 @@ def test_failed_registration_writes_shift_audit(tmp_path: Path) -> None:
     assert "only 1 frames pass registration" in result["sites"][0]["error"]
 
 
-def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("method", ["intensity", "features"])
+def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkeypatch, method: str) -> None:
     from dataclasses import replace
     from scipy import ndimage
     from sem_noise import report
@@ -171,7 +172,7 @@ def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkey
     source = tmp_path / "repeats.npy"
     np.save(source, stack.astype(np.float32))
     config = tmp_path / "config.yml"
-    config.write_text("min_frames: 4\nexpected_frames: 4\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n", encoding="utf-8")
+    config.write_text(f"affine_method: {method}\nmin_frames: 4\nexpected_frames: 4\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n", encoding="utf-8")
     output = tmp_path / "affine"
     assert main(["analyze", "--input", str(source), "--output", str(output), "--config", str(config),
                  "--affine-diagnostics", "--local-frames", "0", "--local-grid", "3"]) == 0
@@ -181,10 +182,11 @@ def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkey
     assert diagnostic["summary"]["reliable_affine_frames"] == 4
     html = (output / "site_001/report.html").read_text(encoding="utf-8")
     assert "Approximate tile-based affine diagnostics" in html
-    assert "Feature-based affine registration" in html
+    assert ("Translation-initialized affine registration" if method == "intensity" else "Feature-based affine registration") in html
     assert "Frame-pair difference comparison" in html
     feature = json.loads((output / "site_001/feature_affine.json").read_text(encoding="utf-8"))
     assert feature["summary"]["estimated_frames"] == 3
+    assert feature["summary"]["estimator"] == method
     assert feature["frames"][-1]["correction_rotation_deg"] == pytest.approx(0.6, abs=0.08)
     pairs = json.loads((output / "site_001/difference_examples.json").read_text(encoding="utf-8"))
     assert len(pairs) == 3

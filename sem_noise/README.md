@@ -233,16 +233,72 @@ working. For irregular layouts, add `--manifest /path/to/order.csv` as above.
 Crop labels/scale bars with `--roi Y0 Y1 X0 X1` (exclusive stops). Add known
 `--frame-interval-s` and `--pixel-size-nm` values only when calibrated.
 
-The preset enables feature-based affine estimation on **every included frame**,
-and supplementary 5-by-5 tile diagnostics on every globally accepted frame.
+The preset considers **every included frame** for translation-initialized affine
+estimation; frames without an accepted translation are marked unavailable. It
+also enables supplementary 5-by-5 tile diagnostics on every globally accepted frame.
 Equivalent options are `--affine-diagnostics --local-grid 5 --local-frames 0`.
-`--local-frames 16` samples up to 16 frames; the feature pass additionally
+`--local-frames 16` samples up to 16 frames; the affine pass additionally
 includes the fixed reference and difference-example frames. Without
-`--affine-diagnostics` neither feature estimation nor difference panels run.
+`--affine-diagnostics` neither affine estimation nor difference panels run.
 
-#### Feature-based affine estimates and difference images
+#### Translation-initialized affine estimates and difference images
 
-The stronger estimate detects SIFT keypoints on smoothed, percentile-normalized
+The default `affine_method: intensity` starts from accepted translation shifts
+and refines small affine corrections against the **first included native
+frame**, keeping one coordinate system for the site. It does not require SIFT
+keypoints or distinctive local patterns. Translation must be enabled and both
+the moving frame and fixed reference must pass translation QC.
+
+Optimization uses smoothed copies, from coarse to fine, up to
+`registration_max_side`. It jointly fits geometry and brightness gain/offset;
+brightness corrections are nuisance parameters and are never applied to noise
+measurements or displayed differences. Each candidate maps original moving
+pixels into the native reference. Original pixels are resampled once only when
+making difference images; the noise statistics remain translation-based.
+
+A fixed 4-by-4 reference grid holds out cells where `(column + row) % 3 == 0`.
+Those regions never enter affine optimization or the separately refined
+translation baseline. Both models are scored on identical interior pixels,
+with a smoothing-width buffer at region boundaries. Acceptance requires:
+
+- At least 2% held-out RMS reduction (`affine_refine_min_relative_improvement`)
+  and improvement in a majority of held-out regions.
+- At least `affine_min_improvement_px` (0.05 native px) additional corner motion.
+- Two-dimensional texture (`affine_min_texture_ratio`, default 0.02) and a
+  well-conditioned photometric/geometric fit.
+- Maximum corner disagreement between fits to two disjoint sets of training
+  cells at most `affine_max_stability_px` (0.25 native px).
+- Estimated overlap at least `affine_refine_min_overlap` (0.5).
+
+The inverse warp's linear entries may depart from identity by at most
+`affine_refine_max_linear_change` (0.03), and its extra center translation is
+bounded by `affine_refine_max_translation_px` (3 native px) per axis. Fits that
+reach these bounds are rejected. These defaults target small acquisition
+motion, not arbitrary rotations. Insufficient improvement, weak texture,
+unstable fits, or failed initialization leave affine unavailable and retain the
+accepted translation. This is not recorded as a successful affine transform.
+
+Validation is conditional on the existing whole-image translation initializer;
+it is not a statistically independent uncertainty estimate. The fixed reference
+is still noisy, and spatially varying/non-affine specimen changes may be rejected.
+The training-region spread measures sensitivity, not a confidence interval.
+
+For output compatibility, results retain the `feature_affine.json/.csv/.png`
+names and `feature_affine` summary key. The JSON summary's `estimator` identifies
+`intensity` or `features`. Intensity rows report training/validation pixel counts,
+held-out translation and affine RMS in DN, relative improvement, texture/design
+conditioning, and training-region corner spread when those stages are reached.
+`selected_model: translation` means a tried refinement was unsupported;
+`selected_model: affine` means it passed. No rejected affine matrix is saved.
+`feature_matches.csv` is empty for intensity registration.
+
+#### Optional feature estimator
+
+Set `affine_method: features` in YAML to use the previous SIFT estimator.
+The `feature_*` settings below apply only to that estimator. It can also run
+without translation initialization, unlike the default intensity estimator.
+
+The feature estimator detects SIFT keypoints on smoothed, percentile-normalized
 copies of each **original native frame**. It performs no translation
 pre-alignment and uses no repeat mean. The first included, nonduplicate frame
 is the fixed reference for the entire site. Weak reference texture produces
@@ -284,13 +340,15 @@ rotation is clockwise with x right and y down. The decomposition is
 diagnostic's per-frame leave-one-out reference. The identity reference is
 labeled explicitly and excluded from estimated-parameter summaries.
 
+#### Difference images (both estimators)
+
 `diff_examples` (3) chooses moving frames uniformly through acquisition order,
 independently of registration success. Each example displays the reference and
 moving images followed by **no correction**, **translation only**, and
-**feature affine correction** differences. Differences are moving minus
+**validated affine correction** differences. Differences are moving minus
 reference in original DN, without brightness normalization. Translation uses
 the existing saved shifts relative to that same reference; affine uses the
-validated feature matrix. Each mode resamples the original moving frame only
+validated affine matrix. Each mode resamples the original moving frame only
 once with bilinear interpolation. All available differences for a pair share
 the same valid-pixel intersection, color limits, and RMS measurement region.
 Failed transforms are unavailable, never quietly replaced by translation or
@@ -305,7 +363,7 @@ to preserve links to the numerical outputs.
 
 | New artifact | Contents |
 |---|---|
-| `feature_affine.json`, `feature_affine.csv` | Stronger estimates, fixed reference, matrices, per-frame parameters and validation status |
+| `feature_affine.json`, `feature_affine.csv` | Estimator, fixed reference, matrices, per-frame parameters and validation status |
 | `feature_matches.csv` | Native point pairs, training/validation partition, residuals and threshold agreement for fitted candidates |
 | `feature_affine.png` | Validated parameter trajectories, if any estimates pass |
 | `difference_pair_*.png` | Side-by-side raw, translation, and affine difference examples |
