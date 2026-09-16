@@ -33,6 +33,13 @@ class AnalysisConfig:
     affine_max_cv_error_px: float = 0.5
     affine_max_stability_px: float = 0.25
     affine_min_texture_ratio: float = 0.02
+    feature_max_keypoints: int = 1500
+    feature_match_ratio: float = 0.75
+    feature_residual_px: float = 1.5
+    feature_min_inliers: int = 8
+    feature_min_inlier_fraction: float = 0.5
+    feature_min_overlap: float = 0.5
+    diff_examples: int = 3
     sample_pixels: int = 8192
     distribution_samples: int = 100000
     intensity_bins: int = 12
@@ -48,6 +55,7 @@ class AnalysisConfig:
             "registration_max_side", "local_grid",
             "sample_pixels", "distribution_samples", "intensity_bins",
             "max_lag", "spatial_pairs", "spatial_max_side",
+            "feature_max_keypoints", "feature_min_inliers", "diff_examples",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -65,6 +73,14 @@ class AnalysisConfig:
                 raise ValueError(f"{name} must be finite and positive")
         if self.affine_min_relative_improvement >= 1 or self.affine_min_texture_ratio >= 1:
             raise ValueError("affine relative improvement and texture ratio must be below 1")
+        for name in ("feature_match_ratio", "feature_residual_px", "feature_min_inlier_fraction", "feature_min_overlap"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+            if name != "feature_residual_px" and value >= 1:
+                raise ValueError(f"{name} must be below 1")
+        if self.feature_min_inliers < 6 or self.feature_max_keypoints < 16:
+            raise ValueError("feature_min_inliers must be >= 6 and feature_max_keypoints >= 16")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
         for name in ("frame_interval_s", "pixel_size_nm", "max_shift_px", "registration_sigma"):

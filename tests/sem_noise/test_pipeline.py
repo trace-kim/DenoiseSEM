@@ -180,7 +180,17 @@ def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkey
     assert len(diagnostic["models"]) == 16
     assert diagnostic["summary"]["reliable_affine_frames"] == 4
     html = (output / "site_001/report.html").read_text(encoding="utf-8")
-    assert "Affine motion diagnostics" in html
+    assert "Approximate tile-based affine diagnostics" in html
+    assert "Feature-based affine registration" in html
+    assert "Frame-pair difference comparison" in html
+    feature = json.loads((output / "site_001/feature_affine.json").read_text(encoding="utf-8"))
+    assert feature["summary"]["estimated_frames"] == 3
+    assert feature["frames"][-1]["correction_rotation_deg"] == pytest.approx(0.6, abs=0.08)
+    pairs = json.loads((output / "site_001/difference_examples.json").read_text(encoding="utf-8"))
+    assert len(pairs) == 3
+    assert all(r["available_modes"] == ["raw", "translation", "affine"] for r in pairs)
+    assert pairs[-1]["affine_rms_dn"] < pairs[-1]["translation_rms_dn"] / 3
+    assert (output / "site_001/difference_pair_02.png").exists()
     assert "Within-site affine parameter distributions" in html
     assert (output / "site_001/affine.png").exists()
     assert "Motion model support by site" in (output / "index.html").read_text(encoding="utf-8")

@@ -233,9 +233,93 @@ working. For irregular layouts, add `--manifest /path/to/order.csv` as above.
 Crop labels/scale bars with `--roi Y0 Y1 X0 X1` (exclusive stops). Add known
 `--frame-interval-s` and `--pixel-size-nm` values only when calibrated.
 
-The preset enables a 5-by-5 tile grid on **every globally accepted frame**.
+The preset enables feature-based affine estimation on **every included frame**,
+and supplementary 5-by-5 tile diagnostics on every globally accepted frame.
 Equivalent options are `--affine-diagnostics --local-grid 5 --local-frames 0`.
-`--local-frames 16` samples at most 16 frames to reduce runtime. Tiles must be
+`--local-frames 16` samples up to 16 frames; the feature pass additionally
+includes the fixed reference and difference-example frames. Without
+`--affine-diagnostics` neither feature estimation nor difference panels run.
+
+#### Feature-based affine estimates and difference images
+
+The stronger estimate detects SIFT keypoints on smoothed, percentile-normalized
+copies of each **original native frame**. It performs no translation
+pre-alignment and uses no repeat mean. The first included, nonduplicate frame
+is the fixed reference for the entire site. Weak reference texture produces
+an explicit failure rather than an identity fallback. Feature estimation can
+attempt frames rejected by translation QC, but it does not change their
+acceptance for the existing noise statistics. The overall site still needs
+enough accepted frames for those statistics.
+
+Detector copies use `registration_sigma` and `registration_max_side`; all
+keypoint positions, thresholds, and matrices are converted to native ROI
+pixels. Feature count is capped at `feature_max_keypoints` (1500), distributed
+across the field. Mutual descriptor matching uses `feature_match_ratio` (0.75).
+Multiple orientations at the same keypoint cannot inflate correspondence counts.
+
+Reference locations are partitioned into a 4-by-4 grid. Cells where
+`(column + row) % 3 == 0` are withheld **before** fitting. Affine RANSAC uses
+three non-collinear point pairs per trial, up to 1000 trials, and a fixed
+per-frame seed. Its consensus fit uses only training matches. There is no
+intensity-based refinement or refit on held-out matches. Both training and
+validation inliers must cover at least 25% of each ROI dimension with
+non-collinear, well-conditioned geometry. Requirements include:
+
+- At least `feature_min_inliers` (8) training inliers and 4 validation inliers.
+- At least `feature_min_inlier_fraction` (50%) agreement in each partition.
+- Inlier residuals and validation median at most `feature_residual_px` (1.5 native pixels).
+- Positive determinant, linear-matrix condition number below 4, and estimated
+  overlap of at least `feature_min_overlap` (50%).
+
+These are configurable screening criteria, not a calibrated uncertainty
+estimate. Repeated patterns can still support a wrong transform. Inspect the
+actual matched coordinates, spatial coverage, held-out errors, and differences.
+The 1.5-pixel acceptance threshold is not a claim of subpixel metrology accuracy.
+
+The HTML report lists per-frame rotation, x/y scale changes, shear, center
+offset, and held-out error, with parameter trajectories. Matrices map original
+moving ROI pixel coordinates into the **same fixed native reference**; positive
+rotation is clockwise with x right and y down. The decomposition is
+`A = R(theta) [[sx, shear*sy], [0, sy]]`. This differs from the older tile
+diagnostic's per-frame leave-one-out reference. The identity reference is
+labeled explicitly and excluded from estimated-parameter summaries.
+
+`diff_examples` (3) chooses moving frames uniformly through acquisition order,
+independently of registration success. Each example displays the reference and
+moving images followed by **no correction**, **translation only**, and
+**feature affine correction** differences. Differences are moving minus
+reference in original DN, without brightness normalization. Translation uses
+the existing saved shifts relative to that same reference; affine uses the
+validated feature matrix. Each mode resamples the original moving frame only
+once with bilinear interpolation. All available differences for a pair share
+the same valid-pixel intersection, color limits, and RMS measurement region.
+Failed transforms are unavailable, never quietly replaced by translation or
+identity. Blank borders are excluded from RMS. Color limits use the pooled
+99th percentile absolute difference; stored arrays remain unclipped.
+
+Affine warps are applied **only to the difference examples**. Native and
+translation-aligned noise statistics and training/preparation remain unchanged.
+Interpolation changes variance and correlation, so reduced difference RMS by
+itself is not evidence of better metrology. Download the entire result folder
+to preserve links to the numerical outputs.
+
+| New artifact | Contents |
+|---|---|
+| `feature_affine.json`, `feature_affine.csv` | Stronger estimates, fixed reference, matrices, per-frame parameters and validation status |
+| `feature_matches.csv` | Native point pairs, training/validation partition, residuals and threshold agreement for fitted candidates |
+| `feature_affine.png` | Validated parameter trajectories, if any estimates pass |
+| `difference_pair_*.png` | Side-by-side raw, translation, and affine difference examples |
+| `difference_examples.json` | Frame IDs, availability, shared color limits and RMS values |
+| `difference_examples.npz` | Reference/moving images, full-resolution signed differences and common masks; invalid difference pixels are NaN |
+
+Feature methods follow the [scikit-image SIFT documentation](https://scikit-image.org/docs/stable/auto_examples/features_detection/plot_sift.html)
+and [affine RANSAC example](https://scikit-image.org/docs/stable/auto_examples/transform/plot_matching.html).
+
+#### Supplementary approximate tile diagnostics
+
+The earlier tile-based estimates remain in a collapsed report section and the
+existing `affine*.csv/json` files. They do not supply the new affine parameters
+or difference warps. Tiles must be
 at least 24-by-24 pixels; use fewer tiles for small ROIs. At least eight usable,
 spatially distributed tiles are needed, so a 3-by-3 grid is the practical minimum.
 `--no-affine-diagnostics` overrides a preset. Without these options, diagnostics
@@ -289,7 +373,7 @@ a 64-by-64 sampling estimate over the ROI, not a loss mask. Tile-deletion
 spreads measure sensitivity, not confidence intervals; shared references make
 tile errors dependent.
 
-These diagnostics apply **no affine warp**, change no noise metrics, and do
+These **tile diagnostics** apply no affine warp, change no noise metrics, and do
 not modify training/preparation. Decide whether rigid/similarity/affine
 correction is warranted from the support counts and residuals on real data.
 Scale and shear may absorb real dimensional changes; validate metrology before

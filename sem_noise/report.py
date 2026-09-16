@@ -47,12 +47,12 @@ def _affine_report(out: Path, summary: dict, rows: list[dict], local: list[dict]
     if not diagnostic.get("enabled"):
         return ""
     counts = diagnostic["selected_model_counts"]
-    body = '<section><h2>Affine motion diagnostics</h2><p><a href="affine.json">Matrices and metadata (JSON)</a> | <a href="affine_models.csv">Model comparison CSV</a> | <a href="affine_frames.csv">Frame decisions CSV</a></p>'
+    body = '<section><h2>Approximate tile-based affine diagnostics</h2><p>These earlier tile-displacement estimates are approximate. Use the separately validated feature-based estimate above for affine parameters and difference images.</p><p><a href="affine.json">Matrices and metadata (JSON)</a> | <a href="affine_models.csv">Model comparison CSV</a> | <a href="affine_frames.csv">Frame decisions CSV</a></p>'
     body += '<p>Supported frame counts: ' + ', '.join(f'{escape(k)}: {v}' for k, v in counts.items()) + '.</p>'
     body += f'<p>{diagnostic["unavailable_frames"]} measured frames lack a supported model; {diagnostic.get("not_assessed_frames", 0)} frames were not assessed. Missing estimates are unavailable, not zero motion.</p>'
     body += '<p>Use the simplest supported model. A richer model must improve held-out tile error by both the configured absolute and relative thresholds, and pass error and tile-deletion stability limits. Translation support means no sufficiently large improvement was detected; it does not prove zero rotation.</p>'
     body += '<p>Parameters below are from reliable full-affine candidates, including those where a simpler model was selected. They describe corrections into each frame’s leave-one-out repeat mean, not absolute stage motion or a shared anchor shape. Coordinates are within the analysis ROI; x points right, y down, and positive rotation is clockwise. Center offsets include the original translation. Scale/shear can also absorb specimen changes.</p>'
-    body += '<p>Affine diagnostics do not change noise measurements or training data. Tile shifts approximate small motion and are limited to 3 px per axis. Larger changes require a separate registration method. Tile-deletion spread measures sensitivity, not a confidence interval.</p></section>'
+    body += '<p>These tile estimates do not change noise measurements or training data and are not used for the affine difference panels. Tile shifts approximate small motion and are limited to 3 px per axis. Tile-deletion spread measures sensitivity, not a confidence interval.</p></section>'
     reliable = [r for r in rows if r["model"] == "affine" and r["reliable"]]
     if not reliable:
         return body + '<section><p>No reliable affine parameter estimates. Inspect frame decisions, texture, tile size, and the selected ROI.</p></section>'
@@ -91,14 +91,77 @@ def _affine_report(out: Path, summary: dict, rows: list[dict], local: list[dict]
     return body + '</table><p>Descriptive distribution over reliable sampled frames, not independent-site uncertainty. Do not pool unrelated sites into one geometric reference.</p></section>'
 
 
+def _feature_report(out: Path, summary: dict, rows: list[dict], differences: dict[str, np.ndarray]) -> str:
+    diagnostic = summary.get("feature_affine", {})
+    if not diagnostic.get("enabled"):
+        return ""
+    body = '<section><h2>Feature-based affine registration</h2><p><a href="feature_affine.json">Transforms and convention (JSON)</a> | <a href="feature_affine.csv">Per-frame parameters and quality (CSV)</a> | <a href="feature_matches.csv">Matched point coordinates (CSV)</a></p>'
+    body += f'<p>{diagnostic["estimated_frames"]} / {diagnostic["attempted_frames"]} attempted moving frames passed validation against fixed native reference frame {diagnostic["reference_frame_index"]}.</p>'
+    body += '<p>SIFT features are matched directly between native-frame detector copies, without translation pre-alignment. Mutual descriptor matches pass a ratio test; affine RANSAC rejects outliers. Spatially separate matches are held out before fitting and are never used to refit the matrix. Failed or unsampled frames have no reported transform.</p>'
+    body += '<p>Parameters are corrections from native ROI coordinates into the fixed reference: x right, y down, positive rotation clockwise. Scale changes are percentages; shear is dimensionless using A = R(theta) [[sx, shear*sy], [0, sy]]. Offsets describe displacement at the ROI center. The reference identity is not an estimated fit. Repeated patterns can still produce wrong matches; inspect errors and difference panels. These are acquisition-relative measurements, not calibrated stage motion.</p>'
+    body += '<div class="scroll"><table><tr><th>Frame</th><th>Status</th><th>Rotation (deg)</th><th>Scale x / y (%)</th><th>Shear</th><th>Center dx / dy (px)</th><th>Held-out median (px)</th></tr>'
+    for row in rows:
+        body += f'<tr><td>{row["frame_index"]}</td><td>{escape(row["reason"])}</td>'
+        body += f'<td>{_number(row.get("correction_rotation_deg"))}</td><td>{_number(row.get("correction_scale_x_percent"))} / {_number(row.get("correction_scale_y_percent"))}</td>'
+        body += f'<td>{_number(row.get("correction_shear"))}</td><td>{_number(row.get("correction_center_dx_px"))} / {_number(row.get("correction_center_dy_px"))}</td><td>{_number(row.get("validation_median_error_px"))}</td></tr>'
+    body += '</table></div></section>'
+    valid = [r for r in rows if r["available"] and r["frame_position"] != diagnostic["reference_position"]]
+    if valid:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+        panels = [(("correction_rotation_deg",), "Feature affine rotation", "Degrees"),
+                  (("correction_scale_x_percent", "correction_scale_y_percent"), "Feature affine scale change", "Percent"),
+                  (("correction_center_dx_px", "correction_center_dy_px"), "Feature affine center displacement", "Pixels"),
+                  (("correction_shear",), "Feature affine shear", "Dimensionless")]
+        for ax, (keys, title, unit) in zip(axes.ravel(), panels):
+            for key in keys:
+                ax.scatter([r["frame_index"] for r in valid], [r[key] for r in valid], label=key.replace("correction_", ""), s=18)
+            ax.set(title=title, xlabel="Acquisition index", ylabel=unit)
+            ax.legend(fontsize=8)
+        body += _figure(out, "feature_affine.png", fig, "Validated feature-based affine estimates relative to one fixed native reference frame. Unavailable frames and reference identity are omitted.")
+    body += '<section><h2>Frame-pair difference comparison</h2><p><a href="difference_examples.json">Pair identities, shared limits, and RMS (JSON)</a> | <a href="difference_examples.npz">Numerical differences and masks (NumPy)</a></p><p>Pairs are selected uniformly in acquisition order before inspecting fit quality. Each row shows moving minus reference in original exported units (DN), on the intersection of valid pixels for all available modes. All three differences in a row share one symmetric color scale. No brightness matching or smoothing is applied to these displayed measurements. Both correction modes use one bilinear resampling of the original moving image.</p><p>RMS is computed over the same pixels in each row. Interpolation changes noise; lower difference RMS alone does not prove a more accurate transform. Existing native and translation-aligned noise statistics are unchanged.</p></section>'
+    for pair in summary.get("difference_examples", []):
+        prefix = pair["prefix"]
+        fig, axes = plt.subplots(1, 5, figsize=(19, 4.5), constrained_layout=True)
+        ref, moving = differences[f"{prefix}_reference"], differences[f"{prefix}_moving"]
+        stride = max(1, int(np.ceil(max(ref.shape) / 600)))
+        low, high = np.percentile(np.concatenate((ref.ravel(), moving.ravel())), [1, 99])
+        for ax, image, title in zip(axes[:2], (ref, moving), (f'Reference {pair["reference_frame_index"]}', f'Moving {pair["moving_frame_index"]}')):
+            ax.imshow(image[::stride, ::stride], cmap="gray", vmin=low, vmax=max(high, low + 1e-9), interpolation="nearest")
+            ax.set_title(title)
+        im = None
+        for ax, mode, label in zip(axes[2:], ("raw", "translation", "affine"), ("No registration fix", "Translation only", "Feature affine fix")):
+            if mode in pair["available_modes"] and pair["valid_pixels"]:
+                delta = differences[f"{prefix}_{mode}_diff"]
+                im = ax.imshow(np.ma.masked_invalid(delta[::stride, ::stride]), cmap="coolwarm",
+                               vmin=-pair["color_limit_dn"], vmax=pair["color_limit_dn"], interpolation="nearest")
+                ax.set_title(f'{label}\nRMS {pair[f"{mode}_rms_dn"]:.3g} DN')
+            else:
+                ax.set_title(label)
+                reason = pair["affine_reason"] if mode == "affine" else pair["translation_reason"]
+                ax.text(0.5, 0.5, "Unavailable\n" + (reason if pair["valid_pixels"] else "No common valid pixels"),
+                        ha="center", va="center", wrap=True, fontsize=8, transform=ax.transAxes)
+            ax.set_facecolor("#dddddd")
+        for ax in axes:
+            ax.set_axis_off()
+        if im is not None:
+            fig.colorbar(im, ax=list(axes[2:]), shrink=0.65, label="Moving - reference (DN)")
+        body += _figure(out, f"difference_{prefix}.png", fig,
+                        f'Frame {pair["moving_frame_index"]} minus frame {pair["reference_frame_index"]}; {pair["valid_pixels"]} shared valid pixels. Limits are +/- {pair["color_limit_dn"]:.4g} DN (pooled 99th percentile absolute difference). Masked borders are blank; numerical arrays retain unclipped differences.')
+    return body
+
+
 def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: list[dict], local: list[dict],
-                affine: list[dict] | None = None) -> None:
+                affine: list[dict] | None = None, feature_rows: list[dict] | None = None,
+                differences: dict[str, np.ndarray] | None = None) -> None:
     """Render quantitative diagnostics without treating the repeat mean as truth."""
     native, aligned = summary["modes"]["native"], summary["modes"]["aligned"]
     body = '<p><a href="../index.html">All sites</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
     body += f'<section><h2>{summary["accepted_frames"]} / {summary["input_frames"]} frames accepted</h2><p>Native flat-region temporal σ: <b>{_number(native["flat_temporal_sigma_dn"])} DN</b>. Aligned: <b>{_number(aligned["flat_temporal_sigma_dn"])} DN</b>. Maximum estimated drift: <b>{_number(summary["max_drift_px"])} px</b>. Local residual: <b>{_number(summary["local_residual_rms_px"])} px RMS</b>.</p><p>DN means the original exported pixel units. Native statistics use integer translations; aligned statistics use bilinear interpolation. The latter changes noise variance and spatial correlation. The predicted mean variance multiplier for independent white noise is {_number(summary["bilinear_white_noise_variance_factor_mean"])}; no universal correction is applied.</p></section>'
     body += _warnings(summary["warnings"])
-    body += _affine_report(out, summary, affine or [], local)
+    body += _feature_report(out, summary, feature_rows or [], differences or {})
+    if summary.get("affine_diagnostics", {}).get("enabled"):
+        body += '<details><summary>Earlier approximate tile diagnostics (supplementary)</summary>'
+        body += _affine_report(out, summary, affine or [], local) + '</details>'
     fig, axes = plt.subplots(2, 3, figsize=(13, 8), constrained_layout=True)
     panels = [("unregistered_mean", "Unregistered mean", "gray"), ("aligned_mean", "Aligned repeat mean", "gray"),
               ("aligned_early_late_delta", "Last quarter − first quarter (DN)", "coolwarm"),
@@ -226,11 +289,17 @@ def index_report(out: Path, overview: dict) -> None:
     body += '</tbody></table></div><p>Compare sites with matched acquisition settings. These are descriptive observed-noise estimates; the site is the unit of comparison, not millions of independent pixels.</p></section>'
     diagnostics = [s for s in overview["sites"] if s.get("affine_diagnostics", {}).get("enabled")]
     if diagnostics:
-        body += '<section><h2>Motion model support by site</h2><table><tr><th>Site</th><th>Translation</th><th>Rigid</th><th>Similarity</th><th>Affine</th><th>Unavailable / not assessed</th></tr>'
+        body += '<section><h2>Validated feature affine estimates</h2><table><tr><th>Site</th><th>Reference frame</th><th>Passed / attempted</th></tr>'
+        for site in diagnostics:
+            result = site.get("feature_affine", {})
+            if result.get("enabled"):
+                body += f'<tr><td><a href="{site["directory"]}/report.html">{escape(site["site"])}</a></td><td>{result["reference_frame_index"]}</td><td>{result["estimated_frames"]} / {result["attempted_frames"]}</td></tr>'
+        body += '</table><p>Open each site for feature-based parameters, validation quality, and raw/translation/affine difference panels. Noise statistics remain translation-based.</p></section>'
+        body += '<section><h2>Motion model support by site (approximate tiles)</h2><table><tr><th>Site</th><th>Translation</th><th>Rigid</th><th>Similarity</th><th>Affine</th><th>Unavailable / not assessed</th></tr>'
         for site in diagnostics:
             result = site["affine_diagnostics"]
             body += '<tr><td>' + escape(site["site"]) + '</td>'
             body += ''.join(f'<td>{result["selected_model_counts"][model]}</td>' for model in ("translation", "rigid", "similarity", "affine"))
             body += f'<td>{result["unavailable_frames"]} / {result.get("not_assessed_frames", 0)}</td></tr>'
-        body += '</table><p>Counts refer to frames with supported held-out tile fits. Inspect each site report before choosing a correction model. No affine warp has been applied.</p></section>'
+        body += '</table><p>These supplementary counts use approximate tile correspondences. Feature-based affine fits are validated separately and applied only to the example difference images.</p></section>'
     (out / "index.html").write_text(_document("Repeated SEM acquisition — noise and stability", body), encoding="utf-8")

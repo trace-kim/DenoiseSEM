@@ -1,4 +1,4 @@
-# Diagnostic model comparison only; noise measurements still use translations.
+# Feature affine registration and diff previews; noise statistics use translations.
 affine_diagnostics: true
 local_grid: 5
 # Zero analyzes every globally accepted frame, preserving acquisition indices.
@@ -8,3 +8,11 @@ affine_min_relative_improvement: 0.15
 affine_max_cv_error_px: 0.5
 affine_max_stability_px: 0.25
 affine_min_texture_ratio: 0.02
+# Actual feature correspondences (independent of the tile approximation).
+feature_max_keypoints: 1500
+feature_match_ratio: 0.75
+feature_residual_px: 1.5
+feature_min_inliers: 8
+feature_min_inlier_fraction: 0.5
+feature_min_overlap: 0.5
+diff_examples: 3

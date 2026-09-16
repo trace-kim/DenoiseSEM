@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--roi", nargs=4, type=int, metavar=("Y0", "Y1", "X0", "X1"))
     analyze.add_argument("--registration", choices=["translation", "none"])
     analyze.add_argument("--affine-diagnostics", action=argparse.BooleanOptionalAction, default=None,
-                         help="Compare motion models diagnostically; no affine warp is applied")
+                         help="Estimate feature affine motion and compare raw/translation/affine differences; noise statistics stay translation-based")
     analyze.add_argument("--local-grid", type=int, help="Tile grid side length (5 recommended for affine diagnostics)")
     analyze.add_argument("--local-frames", type=int, help="Maximum frames for local diagnostics; 0 analyzes all accepted frames")
     demo = commands.add_parser("demo", help="Generate three synthetic PNG sites with known noise and drift")

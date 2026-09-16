@@ -18,6 +18,7 @@ import numpy as np
 
 from .config import AnalysisConfig
 from .affine import compare_models
+from .feature_registration import analyze_features, difference_examples
 from .io import Frame, discover_sites, file_hash, pixel_hash, read_frame
 from .metrics import analyze_mode
 from .registration import common_crop, local_diagnostics, register_stack
@@ -206,6 +207,9 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 row["frame_index"] = frames[row["frame_position"]].index
             write_csv(out / "local_registration.csv", local)
             affine_rows = []
+            feature_rows, difference_maps = [], {}
+            feature_summary = {"enabled": False}
+            differences = []
             affine_summary = {"enabled": config.affine_diagnostics}
             if config.affine_diagnostics:
                 progress(f"{frames[0].site}: comparing translation, rigid, similarity, and affine models")
@@ -228,6 +232,18 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                     warnings.append(f"{richer} sampled frames support motion beyond translation on held-out tiles; inspect affine diagnostics before changing training registration.")
                 if affine_summary["unavailable_frames"] or affine_summary["not_assessed_frames"]:
                     warnings.append("Affine diagnostics are unavailable for some frames; see affine_frames.csv for quality or sampling reasons.")
+                feature_summary, feature_rows, feature_matches, examples = analyze_features(
+                    stack, included, np.array([f.index for f in frames]), config,
+                    lambda message: progress(f"{frames[0].site}: {message}"))
+                differences, difference_maps = difference_examples(
+                    stack, feature_rows, examples, shifts, accepted, config.registration != "none")
+                write_json(out / "feature_affine.json", {"summary": feature_summary, "frames": feature_rows})
+                write_csv(out / "feature_affine.csv", [{k: v for k, v in r.items() if k != "matrix"} for r in feature_rows])
+                write_csv(out / "feature_matches.csv", feature_matches)
+                write_json(out / "difference_examples.json", differences)
+                np.savez_compressed(out / "difference_examples.npz", **difference_maps)
+                if feature_summary["estimated_frames"] < feature_summary["attempted_frames"]:
+                    warnings.append("Some feature-based affine estimates failed validation; see feature_affine.csv. Difference panels show these estimates as unavailable.")
             valid_local = [r for r in local if r["valid"]]
             local_rms = float(np.sqrt(np.mean([r["residual_dy_px"]**2 + r["residual_dx_px"]**2 for r in valid_local]))) if valid_local else None
             if local_rms is not None and local_rms > 0.5:
@@ -278,10 +294,12 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                        "brightness_slope_time_unit": "second" if frames[0].timestamp_s is not None or interval else "frame",
                        "bilinear_white_noise_variance_factor_mean": float(variance_factors.mean()),
                        "unregistered_temporal_sigma_dn": float(np.sqrt(np.mean(unregistered_m2 / (len(positions) - 1)))),
-                       "modes": summaries, "affine_diagnostics": affine_summary, "warnings": warnings}
+                       "modes": summaries, "affine_diagnostics": affine_summary,
+                       "feature_affine": feature_summary, "difference_examples": differences, "warnings": warnings}
             np.savez_compressed(out / "maps.npz", **maps)
             write_json(out / "summary.json", summary)
-            site_report(out, summary, maps, list(metrics_by_position.values()), local, affine_rows)
+            site_report(out, summary, maps, list(metrics_by_position.values()), local, affine_rows,
+                        feature_rows, difference_maps)
             return summary
         finally:
             stack._mmap.close()
