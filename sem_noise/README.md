@@ -158,12 +158,28 @@ dropped merely because its geometric or brightness estimate failed.
 Every pair has a row in `target_pairs.csv`, and each successful pair has four
 native-resolution difference panels on one shared colour scale: before,
 translation only, affine only, and affine plus brightness, all minus fixed A.
-`pair_regions.csv` gives a 4×4 RMS table for each panel. Example pairs also show
-raw/blurred images and the line through the two measured brightness points.
-The pixel cloud behind that line is explanatory; it is not fitted.
+The colour limit is calculated separately for each pair from the largest
+absolute valid difference across all four panels, so every displayed stage
+fits within its shared symmetric range. `pair_regions.csv` gives a 4×4 RMS
+table for each panel.
+
+The main `report.html` shows only the first, middle, and last included input
+examples, alongside tracks covering all pairs. The linked `pair_report_full.html`
+contains every pair's difference image, residual tables, geometry and brightness
+measurements, including all failure reasons. CSV/JSON outputs still cover all
+pairs. Raw/blurred intermediate images and scatter plots are generated for
+the three examples and appear in both reports.
+
+Each example has three pixel-to-pixel scatter plots: raw B, translation-corrected
+B, and affine-corrected B versus untouched A. Every corresponding valid pixel
+is plotted on the same mask and shared linear axes; there is no binning or
+subsampling. Only the affine panel overlays the line through the two measured
+brightness-region means. The gain/offset calculation is unchanged; no regression
+is fitted to the scatter points.
 
 | New artifact | Contents |
 |---|---|
+| `pair_report_full.html` | All pair comparisons and measurement tables; linked from the concise site report |
 | `geometry.csv` | Translation, affine sampling matrices, ECC scores, corner effects, failure reasons |
 | `target_pairs.csv` | Input/target indices, pair matrix, both region means/counts, target-to-input gain/offset, residual RMS, image links |
 | `pair_registration.json` | Geometry and pair measurements with method/selection conventions |
@@ -281,8 +297,8 @@ scale:
 The full fit adds affine and brightness corrections. Intermediate examples
 separate their effects with an additional affine-only panel. All three use one
 pixel set (inside both footprints, covered by the mean, not touching clipped
-values; grey elsewhere) and one limit, the 99th percentile of the uncorrected
-absolute difference, printed in the caption and in `registration.csv`
+values; grey elsewhere) and one limit, the largest absolute valid difference
+across the three maps, printed in the caption and in `registration.csv`
 (`colour_limit_dn`). The PNG is an 8-bit palette image: index 127 is zero,
 0 and 254 are ∓limit, 255 is invalid. `regions.csv` gives the RMS difference in
 each cell of a 4×4 grid for the same three panels on the same pixels.

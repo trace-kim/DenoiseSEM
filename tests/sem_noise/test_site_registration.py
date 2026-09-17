@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("scipy")
 
 from sem_noise.registration import PARAMETERS
-from sem_noise.site_registration import (INVALID_INDEX, PANEL_GAP_PX, PANELS, csv_rows, difference_image,
+from sem_noise.site_registration import (INVALID_INDEX, PANEL_GAP_PX, PANELS, csv_rows, difference_image, difference_limit,
                                          difference_outputs, fit_rows, register_site, registration_summary)
 from test_registration import moving_frame, specimen
 
@@ -108,6 +108,18 @@ def test_difference_image_indices_and_layout() -> None:
     assert image[1, 5 + PANEL_GAP_PX + 1] == 254
     assert image[1, 2 * (5 + PANEL_GAP_PX) + 1] == 0
     assert (image[:, 5:5 + PANEL_GAP_PX] == INVALID_INDEX).all()
+
+
+def test_difference_scale_covers_corrected_maps_and_ignores_invalid_pixels() -> None:
+    valid = np.ones((16, 16), dtype=bool)
+    valid[0, 0] = False
+    before = np.ones(valid.shape)
+    corrected = np.full(valid.shape, -2.0)
+    corrected[8, 8] = -30  # one real extreme must not be clipped by a percentile
+    corrected[0, 0] = 1e9  # masked values do not set the display range
+    failed = np.full(valid.shape, np.nan)
+    assert difference_limit([before, corrected, failed], valid) == 30
+    assert difference_limit([np.zeros(valid.shape), failed], valid) > 0
 
 
 def test_parameter_names_are_stable() -> None:

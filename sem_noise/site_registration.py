@@ -9,6 +9,7 @@ table; nothing is selected, gated or dropped.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -44,6 +45,16 @@ def difference_image(differences: list[np.ndarray], valid: np.ndarray, limit: fl
         index[~panel_valid] = INVALID_INDEX
         panels.extend((index, gap))
     return np.hstack(panels[:-1])
+
+
+def difference_limit(differences: Sequence[np.ndarray], valid: np.ndarray) -> float:
+    """Cover every finite valid difference with one symmetric scale per pair."""
+    limit = 0.0
+    for delta in differences:
+        values = delta[valid & np.isfinite(delta)]
+        if values.size:
+            limit = max(limit, float(np.max(np.abs(values))))
+    return max(limit, 1e-9)
 
 
 def write_difference_png(path: Path, differences: list[np.ndarray], valid: np.ndarray, limit: float) -> None:
@@ -86,7 +97,7 @@ def frame_differences(frame: np.ndarray, bad: np.ndarray, mean: np.ndarray, mean
         raise ValueError("no common valid pixels between the frame and the registered mean")
     differences = [np.where(valid, frame - mean, 0.0), np.where(valid, shifted - mean, 0.0),
                    np.where(valid, full - mean, 0.0)]
-    limit = max(float(np.percentile(np.abs(differences[0][valid]), 99)), 1e-9)
+    limit = difference_limit(differences, valid)
     # "After" is the corrected copy itself (warped, gain, offset) on the same
     # pixels, so a good fit puts it on the reference mean; the raw frame's
     # mean also carries whatever its drift moved into or out of the region.

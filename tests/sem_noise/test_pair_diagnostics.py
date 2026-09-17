@@ -60,6 +60,10 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
                 np.testing.assert_array_equal(example["input_blurred"], blurred_a)
                 np.testing.assert_array_equal(example["target_blurred"], blurred_b)
                 np.testing.assert_allclose(example["corrected_target"], row["gain"] * example["aligned_target"] + row["offset_dn"])
+                mask = example["difference_valid"]
+                largest_difference = max(np.max(np.abs(example[key][mask] - example["input"][mask]))
+                                         for key in ("target", "translated_target", "aligned_target", "corrected_target"))
+                assert row["colour_limit_dn"] == pytest.approx(largest_difference)
                 for label, name in ((1, "low"), (2, "high")):
                     mask = (example["regions"] == label) & example["brightness_valid"]
                     assert mask.sum() == row[name + "_pixels"]
@@ -72,6 +76,15 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert "data:image/png;base64," in html
     assert "two measured region means" in html
     assert "one least-squares fit per frame" not in html
+    assert 'href="pair_report_full.html"' in html
+    full = (site / "pair_report_full.html").read_text(encoding="utf-8")
+    assert html.count("<h3>Input A = ") == 3
+    assert full.count("<h3>Input A = ") == 6
+    for row in rows:
+        heading = f'<h3>Input A = {row["input_index"]}, target B = {row["target_index"]}</h3>'
+        assert heading in full
+        assert (heading in html) == (row["input_index"] in {0, 3, 5})
+    assert "no binning or subsampling" in html and "log scale" not in full
     assert (site / "geometry.csv").is_file() and (site / "target_pairs.csv").is_file()
 
 

@@ -14,7 +14,7 @@ from scipy import stats
 
 from .registration import (CORNERS, PARAMETERS, clip_mask, fit_pixel_diagnostics,
                            parameter_vector, shift_only, warp)
-from .site_registration import PANELS, REGION_GRID, difference_palette
+from .site_registration import PANELS, REGION_GRID, difference_limit, difference_palette
 
 
 STYLE = """
@@ -114,7 +114,7 @@ def intermediate_examples(out: Path, stack: np.ndarray, fit: dict,
         body += _figure(out, f"intermediates/{stem}_images.png", fig,
                         f"Acquisition {indices[i]}: original, blurred and corrected images. Shared grayscale range {limits[0]:.4g} to {limits[1]:.4g} DN; masked pixels are blank. Filled clipped values are excluded from fit observations.")
         differences = (frame - reference, shifted - reference, affine - reference, full - reference)
-        limit = max(float(np.percentile(np.abs(differences[0][valid]), 99)), 1e-9)
+        limit = difference_limit(differences, valid)
         fig, axes = plt.subplots(1, 4, figsize=(17, 4), constrained_layout=True)
         for ax, delta, title in zip(axes, differences, ("Before", "Shift only", "Affine + shift only", "Full fit")):
             im = ax.imshow(np.ma.array(delta, mask=~valid), cmap="coolwarm", vmin=-limit, vmax=limit, interpolation="nearest")
@@ -226,7 +226,7 @@ def _difference_report(out: Path, rows: list[dict], regions: list[dict]) -> str:
     plt.close(fig)
     scale = base64.b64encode((out / "difference_scale.png").read_bytes()).decode("ascii")
     body = '<section><h3>Difference images for every frame</h3>'
-    body += f'<p>Each row is one native-resolution PNG with three panels, left to right: <b>frame minus reference before correction</b>, <b>after the shift alone</b> (centre translation only; gain 1, offset 0), and <b>after the full fit</b>. The three panels share one symmetric colour scale, set per frame to the 99th percentile of the uncorrected absolute difference and printed in the caption; grey marks pixels outside the common valid area or touching clipped values. The full-fit panel adds both affine and brightness corrections; the intermediate examples separate their effects.</p>'
+    body += f'<p>Each row is one native-resolution PNG with three panels, left to right: <b>frame minus reference before correction</b>, <b>after the shift alone</b> (centre translation only; gain 1, offset 0), and <b>after the full fit</b>. The three panels share one symmetric colour scale, automatically set per frame to the largest absolute valid difference across all three panels and printed in the caption; grey marks pixels outside the common valid area or touching clipped values. The full-fit panel adds both affine and brightness corrections; the intermediate examples separate their effects.</p>'
     body += f'<img src="data:image/png;base64,{scale}" alt="difference colour scale" style="max-width:420px">'
     body += f'<p>Below each image, the {REGION_GRID}×{REGION_GRID} tables give the RMS difference (DN) per region for the same three panels on the same pixels, so a corner that improves only under the full fit is visible as a number.</p>'
     by_frame: dict[int, list[dict]] = {}

@@ -10,7 +10,7 @@ import numpy as np
 from .pair_matching import (estimate_geometry, identity_transform, match_target, pair_transform,
                             regions_on_input, select_brightness_regions, warp_target)
 from .registration import clip_mask, prepare_fit_images
-from .site_registration import region_edges, write_difference_png
+from .site_registration import difference_limit, region_edges, write_difference_png
 
 PAIR_PANELS = ("before", "translation", "affine", "brightness")
 
@@ -118,7 +118,7 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
             if not valid.any():
                 raise ValueError("no shared pixels for the before/translation/affine/brightness comparison")
             differences = [image - input_image for image in (target_image, translated, matched["aligned_target"], matched["corrected_target"])]
-            limit = max(float(np.percentile(np.abs(differences[0][valid]), 99)), 1e-9)
+            limit = difference_limit(differences, valid)
             stem = f"input_{frame_indices[a]:04d}_target_{frame_indices[b]:04d}"
             write_difference_png(directory / f"{stem}_differences.png", differences, valid, limit)
             row.update(status="complete", **matrix_fields(matrix), **matched["brightness"],
