@@ -1,12 +1,37 @@
-"""Translation estimates and diagnostics; never deform the measured specimen."""
+"""One least-squares fit per frame: translation, affine, gain, and offset.
+
+Every frame is fitted against a fixed reference on native-resolution pixels.
+Both copies are lightly blurred, nothing is subsampled, there is no search and
+no pyramid, and the fit starts from zero shift. Nothing here decides whether a
+parameter is real: each number is reported with its standard error, and the
+reader compares the two.
+
+Conventions
+-----------
+Coordinates are ROI pixels, x right and y down, with ``u = x - cx`` and
+``v = y - cy`` measured from the image centre. The corrected copy of a moving
+frame ``M`` on the reference grid is::
+
+    corrected(x, y) = gain * M(x + dx + a11 u + a12 v, y + dy + a21 u + a22 v) + offset
+
+so ``(dy, dx)`` is where the reference centre's content sits in the moving
+frame (its drift), and the affine terms add a displacement that grows linearly
+away from the centre. ``translate`` and ``common_crop`` apply the centre shift
+alone to the noise statistics; they never warp measurement pixels affinely.
+"""
 
 from __future__ import annotations
 
 import numpy as np
-from scipy import fft, ndimage, signal
-from skimage.registration import phase_cross_correlation
+from scipy import fft, ndimage
 
-from .config import AnalysisConfig
+PARAMETERS = ("dy_px", "dx_px", "a11", "a12", "a21", "a22", "gain", "offset_dn")
+CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
+HUBER_C = 1.345          # 95 % efficiency for Gaussian residuals
+CLIP_DILATION_PX = 2     # a 1 px blur spreads a clipped value about this far
+CORRELATION_LAGS = 8     # residual autocorrelation window (+/- lags) for error bars
+MAX_ITERATIONS = 40
+STEP_TOLERANCE_PX = 1e-3
 
 
 def translate(image: np.ndarray, shift: np.ndarray, *, integer: bool = False) -> np.ndarray:
@@ -25,177 +50,301 @@ def common_crop(shape: tuple[int, int], shifts: np.ndarray, margin: int = 2) -> 
     return slice(starts[0], stops[0]), slice(starts[1], stops[1])
 
 
-def _prepared(image: np.ndarray, config: AnalysisConfig) -> tuple[np.ndarray, int]:
-    stride = max(1, int(np.ceil(max(image.shape) / config.registration_max_side)))
-    centered = np.asarray(image - np.mean(image, dtype=np.float64), dtype=np.float32)
-    smooth = ndimage.gaussian_filter(centered, max(config.registration_sigma, stride / 2))
-    smooth = smooth[::stride, ::stride].copy()
-    smooth -= smooth.mean(dtype=np.float64)
-    return smooth, stride
+def clip_mask(image: np.ndarray, levels: tuple[float | None, float | None]) -> np.ndarray:
+    """Pixels at or beyond the configured black/white levels."""
+    mask = np.zeros(image.shape, dtype=bool)
+    if levels[0] is not None:
+        mask |= image <= levels[0]
+    if levels[1] is not None:
+        mask |= image >= levels[1]
+    return mask
 
 
-def _refine_overlap(reference: np.ndarray, moving: np.ndarray, initial: np.ndarray) -> np.ndarray:
-    """Refine on a fixed interior, jointly fitting translation, gain, and offset.
+def _grid(shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    yy, xx = np.indices(shape, dtype=np.float64)
+    cy, cx = (shape[0] - 1) / 2, (shape[1] - 1) / 2
+    radius = max(shape) / 2
+    return yy, xx, (xx - cx) / radius, (yy - cy) / radius, radius
 
-    Tapered Fourier peaks provide a robust starting point, but shifting a
-    pattern relative to a fixed taper can bias that peak. Interior least squares
-    avoids this effect. Only the registration copies enter this fit.
+
+def warp_coordinates(parameters: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sampling positions (y', x') in the moving frame for every reference pixel.
+
+    ``parameters`` are the eight fit values in the order of ``PARAMETERS``.
+    The affine terms are dimensionless; internally they are scaled by half the
+    larger image side so that every geometric unknown is in pixels.
     """
-    border = int(np.ceil(np.max(np.abs(initial)))) + 4
-    if min(reference.shape) - 2 * border < 12:
-        return initial
-    stride = max(1, int(np.ceil(np.sqrt(reference.size / 16384))))
-    yy, xx = np.mgrid[border:reference.shape[0] - border:stride,
-                     border:reference.shape[1] - border:stride]
-    target = reference[yy, xx].ravel().astype(float)
-    gy, gx = np.gradient(moving)
-    coefficients = ndimage.spline_filter(moving, order=3)
-    shift, gain, offset = initial.copy(), 1.0, 0.0
-    for _ in range(8):
-        coordinates = np.array([yy.ravel() - shift[0], xx.ravel() - shift[1]])
-        warped = ndimage.map_coordinates(coefficients, coordinates, order=3, prefilter=False)
-        dy = ndimage.map_coordinates(gy, coordinates, order=1, prefilter=False)
-        dx = ndimage.map_coordinates(gx, coordinates, order=1, prefilter=False)
-        design = np.column_stack((-gain * dy, -gain * dx, warped, np.ones_like(warped)))
-        update, _, rank, _ = np.linalg.lstsq(design, target - gain * warped - offset, rcond=None)
-        if rank < 4 or not np.isfinite(update).all():
-            return initial
-        candidate = shift + update[:2]
-        if np.max(np.abs(candidate - initial)) > 1.5:
-            return initial
-        shift, gain, offset = candidate, gain + update[2], offset + update[3]
-        if np.linalg.norm(update[:2]) < 0.002:
+    yy, xx, u, v, radius = _grid(shape)
+    dy, dx, a11, a12, a21, a22 = parameters[:6]
+    y = yy + dy + (a21 * u + a22 * v) * radius
+    x = xx + dx + (a11 * u + a12 * v) * radius
+    # Three pixels of margin keep the cubic support, and the prefilter's
+    # boundary ringing, inside the moving frame.
+    inside = (y >= 3) & (y <= shape[0] - 4) & (x >= 3) & (x <= shape[1] - 4)
+    return y, x, inside
+
+
+def warp(image: np.ndarray, parameters: np.ndarray, invalid: np.ndarray | None = None,
+         *, order: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """Resample ``image`` once onto the reference grid and apply gain and offset.
+
+    Returns the corrected copy and its valid mask: inside the moving frame with
+    full interpolation support and, when ``invalid`` is given, not touching any
+    invalid (clipped) moving pixel.
+    """
+    y, x, valid = warp_coordinates(parameters, image.shape)
+    coordinates = [y.ravel(), x.ravel()]
+    resampled = ndimage.map_coordinates(np.asarray(image, dtype=np.float64), coordinates, order=order,
+                                        mode="nearest").reshape(image.shape)
+    if invalid is not None:
+        touched = ndimage.map_coordinates(invalid.astype(np.float32), coordinates, order=1,
+                                          mode="nearest").reshape(image.shape)
+        valid &= touched <= 0
+    return parameters[6] * resampled + parameters[7], valid
+
+
+def _correlation_area(residual: np.ndarray, valid: np.ndarray, lags: int = CORRELATION_LAGS) -> float:
+    """Sum of the normalized residual autocorrelation over a small lag window.
+
+    A Gaussian blur of the fitted copies (and any intrinsic noise correlation)
+    makes neighbouring residuals dependent. The least-squares covariance counts
+    every pixel as independent, so it is multiplied by this area (in pixels).
+    """
+    z = np.where(valid, residual, 0.0).astype(np.float64)
+    m = valid.astype(np.float64)
+    acf = fft.irfft2(np.abs(fft.rfft2(z)) ** 2, s=z.shape)
+    counts = fft.irfft2(np.abs(fft.rfft2(m)) ** 2, s=z.shape)
+    index = np.r_[0:lags + 1, -lags:0]
+    acf = acf[np.ix_(index, index)]
+    counts = np.maximum(counts[np.ix_(index, index)], 1.0)
+    normalized = (acf / counts) / max(acf[0, 0] / counts[0, 0], 1e-300)
+    return float(max(1.0, normalized.sum()))
+
+
+def fit_frame(reference: np.ndarray, moving: np.ndarray, *, sigma: float = 1.0,
+              reference_invalid: np.ndarray | None = None,
+              moving_invalid: np.ndarray | None = None) -> dict:
+    """Fit dy, dx, a11, a12, a21, a22, gain, offset with standard errors.
+
+    Both copies are blurred by ``sigma`` pixels. Pixels marked invalid in either
+    image are excluded, together with a ``CLIP_DILATION_PX`` neighbourhood that
+    the blur contaminates. The loss is Huber with a scale re-estimated from the
+    residual's median absolute deviation on every iteration. Standard errors
+    are the weighted least-squares covariance scaled by the measured residual
+    correlation area; they describe the fit, not calibrated stage motion.
+    """
+    reference = np.asarray(reference, dtype=np.float64)
+    moving = np.asarray(moving, dtype=np.float64)
+    if reference.ndim != 2 or reference.shape != moving.shape:
+        raise ValueError("fit_frame requires two equally shaped 2-D images")
+    if min(reference.shape) < 16:
+        raise ValueError("fit_frame requires images of at least 16x16 pixels")
+    if not (np.isfinite(reference).all() and np.isfinite(moving).all()):
+        raise ValueError("fit_frame requires finite images; mask clipped pixels instead")
+    shape = reference.shape
+    ref = ndimage.gaussian_filter(reference, sigma)
+    mov = ndimage.gaussian_filter(moving, sigma)
+    structure = np.ones((2 * CLIP_DILATION_PX + 1,) * 2, dtype=bool)
+    ref_bad = np.zeros(shape, dtype=bool) if reference_invalid is None else ndimage.binary_dilation(reference_invalid, structure)
+    mov_bad = np.zeros(shape, dtype=bool) if moving_invalid is None else ndimage.binary_dilation(moving_invalid, structure)
+    coefficients = ndimage.spline_filter(mov, order=3, mode="nearest")
+    gy, gx = np.gradient(mov)
+    yy, xx, u, v, radius = _grid(shape)
+    u_flat, v_flat = u.ravel(), v.ravel()
+    ref_flat, ref_ok = ref.ravel(), (~ref_bad).ravel()
+    mov_bad32 = mov_bad.astype(np.float32) if mov_bad.any() else None
+    scale = max(float(np.std(ref)), 1e-12)
+
+    def evaluate(p: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        y, x, inside = warp_coordinates(p, shape)
+        coordinates = [y.ravel(), x.ravel()]
+        warped = ndimage.map_coordinates(coefficients, coordinates, order=3, prefilter=False, mode="nearest")
+        valid = inside.ravel() & ref_ok
+        if mov_bad32 is not None:
+            touched = ndimage.map_coordinates(mov_bad32, coordinates, order=1, mode="nearest")
+            valid &= touched <= 0
+        residual = p[6] * warped + p[7] - ref_flat
+        return residual, warped, coordinates, valid
+
+    def huber_weights(residual: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, float]:
+        r = residual[valid]
+        centre = np.median(r)
+        s = 1.4826 * np.median(np.abs(r - centre))
+        s = max(float(s), 1e-9 * scale, 1e-300)
+        c = HUBER_C * s
+        w = np.zeros(len(residual))
+        w[valid] = np.minimum(1.0, c / np.maximum(np.abs(r), 1e-300))
+        return w, s
+
+    def cost(residual: np.ndarray, w: np.ndarray) -> float:
+        return float(np.sum(w * residual * residual))
+
+    # ``p`` holds the reported units (affine terms dimensionless). The solver
+    # works on scaled columns: geometry in pixels, with the affine terms as
+    # pixels at half the larger side, and gain in units of reference contrast.
+    p = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    residual, warped, coordinates, valid = evaluate(p)
+    if valid.sum() < 64:
+        raise ValueError("fewer than 64 usable pixels; check clipping levels and ROI")
+    initial_rms = float(np.sqrt(np.mean(residual[valid] ** 2)))
+    weights, robust_scale = huber_weights(residual, valid)
+    converged, iterations = False, 0
+    normal = np.eye(8)
+    column_scale = np.ones(8)
+    for iterations in range(1, MAX_ITERATIONS + 1):
+        gyw = ndimage.map_coordinates(gy, coordinates, order=1, mode="nearest")
+        gxw = ndimage.map_coordinates(gx, coordinates, order=1, mode="nearest")
+        g = p[6]
+        jacobian = np.column_stack((g * gyw, g * gxw, g * gxw * u_flat * radius, g * gxw * v_flat * radius,
+                                    g * gyw * u_flat * radius, g * gyw * v_flat * radius, warped,
+                                    np.ones_like(warped)))
+        column_scale = np.array([1.0, 1.0, radius, radius, radius, radius, scale, 1.0])
+        jacobian /= column_scale
+        jw = jacobian * weights[:, None]
+        normal = jacobian.T @ jw
+        gradient = jw.T @ residual
+        try:
+            step = -np.linalg.solve(normal, gradient)
+        except np.linalg.LinAlgError:
             break
-    return shift
+        if not np.isfinite(step).all():
+            break
+
+        def negligible(s: np.ndarray) -> bool:
+            # Scaled steps: the first six are pixels, the gain step is relative
+            # to the reference contrast, the offset step is in DN.
+            return bool(np.abs(s[:6]).max() < STEP_TOLERANCE_PX and abs(s[6]) < 1e-5 * scale
+                        and abs(s[7]) < 1e-4 * scale)
+
+        if negligible(step):
+            converged = True
+            break
+        # Backtrack on the current weights so a bad linearization cannot
+        # increase the robust cost.
+        current = cost(residual, weights)
+        accepted = False
+        for _ in range(8):
+            candidate = p + step / column_scale
+            trial_residual, trial_warped, trial_coordinates, trial_valid = evaluate(candidate)
+            if trial_valid.sum() >= 64 and cost(trial_residual, weights * trial_valid) <= current:
+                accepted = True
+                break
+            step /= 2
+            if negligible(step):
+                converged = True
+                break
+        if not accepted:
+            break
+        p, residual, warped, coordinates, valid = candidate, trial_residual, trial_warped, trial_coordinates, trial_valid
+        weights, robust_scale = huber_weights(residual, valid)
+        if negligible(step):
+            converged = True
+            break
+    # Covariance at the solution, with the weights of the final residual.
+    gyw = ndimage.map_coordinates(gy, coordinates, order=1, mode="nearest")
+    gxw = ndimage.map_coordinates(gx, coordinates, order=1, mode="nearest")
+    g = p[6]
+    jacobian = np.column_stack((g * gyw, g * gxw, g * gxw * u_flat * radius, g * gxw * v_flat * radius,
+                                g * gyw * u_flat * radius, g * gyw * v_flat * radius, warped,
+                                np.ones_like(warped))) / column_scale
+    normal = jacobian.T @ (jacobian * weights[:, None])
+    effective = float(weights.sum())
+    variance = float(np.sum(weights * residual ** 2)) / max(effective - 8, 1.0)
+    area = _correlation_area((residual * weights).reshape(shape), valid.reshape(shape))
+    try:
+        covariance = np.linalg.inv(normal) * variance * area
+    except np.linalg.LinAlgError:
+        covariance = np.full((8, 8), np.nan)
+    # Undo the column scaling: ``p`` already holds the reported units.
+    unscale = 1 / column_scale
+    covariance = covariance * np.outer(unscale, unscale)
+    parameters = p.copy()
+    errors = np.sqrt(np.maximum(np.diag(covariance), 0))
+    result = {name: float(parameters[i]) for i, name in enumerate(PARAMETERS)}
+    result.update({f"{name}_se": float(errors[i]) for i, name in enumerate(PARAMETERS)})
+    result.update(residual_rms_dn=float(np.sqrt(np.mean(residual[valid] ** 2))), initial_rms_dn=initial_rms,
+                  robust_scale_dn=float(robust_scale), downweighted_fraction=float(np.mean(weights[valid] < 1)),
+                  valid_pixels=int(valid.sum()), residual_correlation_area_px2=area,
+                  iterations=iterations, converged=bool(converged), blur_sigma_px=float(sigma))
+    result.update(corner_effects(parameters, covariance, shape))
+    result.update(small_motion_decomposition(parameters, covariance))
+    result["covariance"] = covariance.tolist()
+    return result
 
 
-def estimate_translation(reference: np.ndarray, moving: np.ndarray, config: AnalysisConfig) -> dict:
-    """Return correction (dy, dx), overlap correlation and peak ambiguity proxy.
+def corner_effects(parameters: np.ndarray, covariance: np.ndarray, shape: tuple[int, int]) -> dict:
+    """Displacement the four affine terms add at each corner, in pixels, with errors."""
+    cy, cx = (shape[0] - 1) / 2, (shape[1] - 1) / 2
+    a11, a12, a21, a22 = parameters[2:6]
+    out = {}
+    largest = 0.0
+    for name, (y, x) in zip(CORNERS, ((0, 0), (0, shape[1] - 1), (shape[0] - 1, 0), (shape[0] - 1, shape[1] - 1))):
+        u, v = x - cx, y - cy
+        dx_c, dy_c = a11 * u + a12 * v, a21 * u + a22 * v
+        # Linear propagation: dx_c depends on (a11, a12), dy_c on (a21, a22).
+        gx_vec, gy_vec = np.array([u, v]), np.array([u, v])
+        var_x = float(gx_vec @ covariance[2:4, 2:4] @ gx_vec)
+        var_y = float(gy_vec @ covariance[4:6, 4:6] @ gy_vec)
+        magnitude = float(np.hypot(dx_c, dy_c))
+        if magnitude > 0:
+            direction = np.array([dy_c, dx_c]) / magnitude
+            se_mag = float(np.sqrt(max(direction[0] ** 2 * var_y + direction[1] ** 2 * var_x, 0)))
+        else:
+            se_mag = float(np.sqrt(max(var_x + var_y, 0)))
+        out[f"corner_{name}_dy_px"] = float(dy_c)
+        out[f"corner_{name}_dy_se"] = float(np.sqrt(max(var_y, 0)))
+        out[f"corner_{name}_dx_px"] = float(dx_c)
+        out[f"corner_{name}_dx_se"] = float(np.sqrt(max(var_x, 0)))
+        out[f"corner_{name}_px"] = magnitude
+        out[f"corner_{name}_se"] = se_mag
+        if magnitude >= largest:
+            largest = magnitude
+            out["corner_max_px"], out["corner_max_se"], out["corner_max_name"] = magnitude, se_mag, name
+    return out
 
-    The upsample grid is numerical precision, not a confidence interval. A
-    separate peak within the allowed shift range can expose periodic patterns.
+
+def small_motion_decomposition(parameters: np.ndarray, covariance: np.ndarray) -> dict:
+    """Rotation, shear and scale as linear combinations of the affine terms.
+
+    Valid for the small motions this fit targets; each carries a propagated
+    standard error. Positive rotation is clockwise with x right and y down.
     """
-    ref, stride = _prepared(reference, config)
-    mov, _ = _prepared(moving, config)
-    if float(np.std(ref)) < 1e-7 or float(np.std(mov)) < 1e-7:
-        return {"shift": np.zeros(2), "correlation": 0.0, "peak_ratio": 0.0, "valid": False}
-    # Suppress discontinuities at the rectangular boundary. Without tapering,
-    # cropped, nonperiodic SEM patterns bias subpixel shifts toward integers.
-    taper = np.outer(signal.windows.tukey(ref.shape[0], 0.5),
-                     signal.windows.tukey(ref.shape[1], 0.5)).astype(np.float32)
-    ref_fft, mov_fft = fft.fft2(ref * taper), fft.fft2(mov * taper)
-    shift, _, _ = phase_cross_correlation(
-        ref_fft, mov_fft, upsample_factor=config.upsample_factor,
-        normalization=None, space="fourier",
-    )
-    shift = np.asarray(shift, dtype=float)
-    shift = _refine_overlap(ref, mov, shift) * stride
-    if not np.isfinite(shift).all() or np.max(np.abs(shift)) > config.max_shift_px:
-        return {"shift": shift, "correlation": 0.0, "peak_ratio": 0.0, "valid": False}
-    crop = common_crop(ref.shape, np.array([[0, 0], shift / stride]), margin=1)
-    a = ref[crop].ravel().astype(float)
-    b = translate(mov, shift / stride)[crop].ravel().astype(float)
-    a -= a.mean()
-    b -= b.mean()
-    denominator = np.linalg.norm(a) * np.linalg.norm(b)
-    correlation = float(np.dot(a, b) / denominator) if denominator > 0 else 0.0
-    cross = fft.fftshift(fft.ifft2(ref_fft * mov_fft.conj()).real)
-    yy, xx = np.ogrid[:cross.shape[0], :cross.shape[1]]
-    yy, xx = yy - cross.shape[0] // 2, xx - cross.shape[1] // 2
-    search = (np.abs(yy) <= config.max_shift_px / stride) & (np.abs(xx) <= config.max_shift_px / stride)
-    peak_location = np.unravel_index(np.argmax(np.where(search, cross, -np.inf)), cross.shape)
-    py, px = peak_location[0] - cross.shape[0] // 2, peak_location[1] - cross.shape[1] // 2
-    other = search & ((yy - py)**2 + (xx - px)**2 > 9)
-    peak = float(cross[peak_location])
-    second = float(np.max(cross[other])) if other.any() else 0.0
-    ratio = peak / second if second > 0 else None
-    return {"shift": shift, "correlation": correlation, "peak_ratio": ratio,
-            "valid": correlation >= config.min_correlation}
+    a = parameters[2:6]
+    c = covariance[2:6, 2:6]
+    combos = {"rotation_deg": (np.array([0, -0.5, 0.5, 0]), np.degrees(1.0)),
+              "shear": (np.array([0, 0.5, 0.5, 0]), 1.0),
+              "scale_x_percent": (np.array([1, 0, 0, 0]), 100.0),
+              "scale_y_percent": (np.array([0, 0, 0, 1]), 100.0)}
+    out = {}
+    for name, (vector, factor) in combos.items():
+        out[name] = float(vector @ a * factor)
+        out[f"{name}_se"] = float(np.sqrt(max(vector @ c @ vector, 0)) * factor)
+    return out
 
 
-def register_stack(stack: np.ndarray, included: np.ndarray, config: AnalysisConfig) -> tuple[np.ndarray, np.ndarray, list[dict]]:
-    """Two passes: anchor registration, then refinement against leave-one-out means."""
-    count = len(stack)
-    shifts = np.zeros((count, 2), dtype=float)
-    accepted = included.copy()
-    anchor = int(np.flatnonzero(included)[0])
-    rows = [{"frame_position": i, "accepted": bool(included[i]), "correlation": None,
-             "peak_ratio": None, "reason": "" if included[i] else "excluded in manifest"}
-            for i in range(count)]
-    if config.registration == "none":
-        return shifts, accepted, rows
-    rows[anchor]["correlation"] = 1.0
-    for i in np.flatnonzero(included):
-        if i == anchor:
-            continue
-        result = estimate_translation(stack[anchor], stack[i], config)
-        shifts[i] = result["shift"]
-        accepted[i] = result["valid"]
-        rows[i].update(correlation=result["correlation"], peak_ratio=result["peak_ratio"])
-        if not accepted[i]:
-            rows[i].update(accepted=False, reason="initial registration failed quality/shift limit")
-    indices = np.flatnonzero(accepted)
-    if len(indices) < config.min_frames:
-        return shifts, accepted, rows
-    crop = common_crop(stack.shape[1:], shifts[accepted])
-    total = np.zeros(stack[anchor][crop].shape, dtype=np.float64)
-    for i in indices:
-        total += translate(stack[i], shifts[i])[crop]
-    refined = shifts.copy()
-    for i in indices:
-        own = translate(stack[i], shifts[i])[crop]
-        reference = (total - own) / (len(indices) - 1)
-        result = estimate_translation(reference, stack[i][crop], config)
-        refined[i] = result["shift"]
-        accepted[i] = result["valid"]
-        rows[i].update(correlation=result["correlation"], peak_ratio=result["peak_ratio"])
-        if not accepted[i]:
-            rows[i].update(accepted=False, reason="refined registration failed quality/shift limit")
-    # Keep the first included frame as the coordinate origin, even if refinement
-    # rejects it. A failed anchor is visible in the frame table.
-    if accepted[anchor]:
-        refined -= refined[anchor].copy()
-    for i in indices:
-        if accepted[i] and np.max(np.abs(refined[i])) > config.max_shift_px:
-            accepted[i] = False
-            rows[i].update(accepted=False, reason="anchor-relative shift exceeds max_shift_px")
-    return refined, accepted, rows
+def identity_result(shape: tuple[int, int]) -> dict:
+    """The reference frame's own row in pass 1: identity by definition, not a fit."""
+    parameters = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    covariance = np.zeros((8, 8))
+    result = {name: float(parameters[i]) for i, name in enumerate(PARAMETERS)}
+    result.update({f"{name}_se": None for name in PARAMETERS})
+    result.update(residual_rms_dn=0.0, initial_rms_dn=0.0, robust_scale_dn=None, downweighted_fraction=None,
+                  valid_pixels=int(np.prod(shape)), residual_correlation_area_px2=None, iterations=0,
+                  converged=True, blur_sigma_px=None)
+    result.update(corner_effects(parameters, covariance, shape))
+    result.update(small_motion_decomposition(parameters, covariance))
+    for key in [k for k in result if k.endswith("_se")]:
+        result[key] = None
+    result["covariance"] = covariance.tolist()
+    return result
 
 
-def local_diagnostics(stack: np.ndarray, shifts: np.ndarray, accepted: np.ndarray,
-                      mean: np.ndarray, crop: tuple[slice, slice], config: AnalysisConfig) -> list[dict]:
-    """Measure remaining tile translations after global correction; do not warp."""
-    from dataclasses import replace
+def parameter_vector(row: dict) -> np.ndarray:
+    return np.array([row[name] for name in PARAMETERS], dtype=np.float64)
 
-    if config.registration == "none":
-        return []
-    indices = np.flatnonzero(accepted)
-    selected = indices if config.local_frames == 0 else indices[
-        np.unique(np.linspace(0, len(indices) - 1, min(config.local_frames, len(indices))).astype(int))]
-    ys = np.linspace(0, mean.shape[0], config.local_grid + 1).astype(int)
-    xs = np.linspace(0, mean.shape[1], config.local_grid + 1).astype(int)
-    local_config = replace(config, max_shift_px=min(3.0, config.max_shift_px))
-    rows = []
-    for i in selected:
-        moving = translate(stack[i], shifts[i])[crop]
-        reference = (mean * len(indices) - moving) / (len(indices) - 1)
-        for y0, y1 in zip(ys, ys[1:]):
-            for x0, x1 in zip(xs, xs[1:]):
-                if min(y1 - y0, x1 - x0) < 24:
-                    continue
-                result = estimate_translation(reference[y0:y1, x0:x1], moving[y0:y1, x0:x1], local_config)
-                # A 2-D structure tensor detects the aperture problem: parallel
-                # edges do not constrain displacement along the edges.
-                texture = ndimage.gaussian_filter(reference[y0:y1, x0:x1], config.registration_sigma)
-                gy, gx = np.gradient(texture)
-                eigenvalues = np.linalg.eigvalsh([[np.mean(gx * gx), np.mean(gx * gy)],
-                                                [np.mean(gx * gy), np.mean(gy * gy)]])
-                ratio = float(max(0, eigenvalues[0]) / max(eigenvalues[1], 1e-12))
-                rows.append({"frame_position": int(i), "y_px": float((y0 + y1) / 2 + crop[0].start),
-                             "x_px": float((x0 + x1) / 2 + crop[1].start),
-                             "residual_dy_px": float(result["shift"][0]),
-                             "residual_dx_px": float(result["shift"][1]),
-                             "correlation": result["correlation"], "valid": result["valid"],
-                             "texture_ratio": ratio,
-                             "peak_ratio": result["peak_ratio"]})
-    return rows
+
+def shift_only(parameters: np.ndarray) -> np.ndarray:
+    """The same fit with its four affine terms set to zero."""
+    reduced = parameters.copy()
+    reduced[2:6] = 0.0
+    return reduced

@@ -52,11 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--frame-interval-s", type=float)
     analyze.add_argument("--pixel-size-nm", type=float)
     analyze.add_argument("--roi", nargs=4, type=int, metavar=("Y0", "Y1", "X0", "X1"))
-    analyze.add_argument("--registration", choices=["translation", "none"])
-    analyze.add_argument("--affine-diagnostics", action=argparse.BooleanOptionalAction, default=None,
-                         help="Refine small affine motion from translation and compare differences; noise statistics stay translation-based")
-    analyze.add_argument("--local-grid", type=int, help="Tile grid side length (5 recommended for affine diagnostics)")
-    analyze.add_argument("--local-frames", type=int, help="Maximum frames for local diagnostics; 0 analyzes all accepted frames")
+    analyze.add_argument("--registration", choices=["fit", "none"],
+                         help="fit: one translation+affine+gain+offset fit per frame (default); none: frames taken as aligned")
     demo = commands.add_parser("demo", help="Generate three synthetic PNG sites with known noise and drift")
     demo.add_argument("--output", required=True, type=Path)
     demo.add_argument("--frames", type=int, default=128)
@@ -74,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         from .pipeline import analyze_dataset
         config = load_config(args.config)
         overrides = {name: getattr(args, name) for name in
-                     ("frame_interval_s", "pixel_size_nm", "roi", "registration", "affine_diagnostics", "local_grid", "local_frames")
+                     ("frame_interval_s", "pixel_size_nm", "roi", "registration")
                      if getattr(args, name) is not None}
         result = analyze_dataset(args.input, args.output, config=replace(config, **overrides),
                                  manifest=args.manifest, progress=lambda message: print(message, flush=True))

@@ -17,13 +17,14 @@ from typing import Callable
 import numpy as np
 
 from .config import AnalysisConfig
-from .brightness import analyze_brightness
-from .affine import compare_models
-from .feature_registration import analyze_features, difference_examples
-from .intensity_registration import analyze_intensity
 from .io import Frame, discover_sites, file_hash, pixel_hash, read_frame
 from .metrics import analyze_mode
-from .registration import common_crop, local_diagnostics, register_stack
+from .registration import common_crop
+from .site_registration import (csv_rows, difference_outputs, fit_rows, register_site,
+                                registration_summary)
+
+FRAME_TABLE_KEYS = ("dy_px", "dy_px_se", "dx_px", "dx_px_se", "gain", "gain_se", "offset_dn", "offset_dn_se",
+                    "residual_rms_dn", "corner_max_px", "corner_max_se", "converged")
 
 
 def _json_value(value):
@@ -58,7 +59,7 @@ def _provenance(config: AnalysisConfig, order_source: str) -> dict:
             versions[package] = version(package)
         except PackageNotFoundError:
             versions[package] = "unknown"
-    return {"schema_version": 1, "created_utc": datetime.now(timezone.utc).isoformat(),
+    return {"schema_version": 2, "created_utc": datetime.now(timezone.utc).isoformat(),
             "config": asdict(config), "python": platform.python_version(), "platform": platform.system(),
             "dependencies": versions, "order_source": order_source,
             "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -146,6 +147,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                   progress: Callable[[str], None]) -> dict:
     from .report import site_report
 
+    site = frames[0].site
     if len(frames) < config.min_frames:
         raise ValueError(f"requires at least {config.min_frames} frames, found {len(frames)}")
     warnings = ["The repeat mean is a noisy specimen estimate, not ground truth. Acquisition order must be verified."]
@@ -166,36 +168,45 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 raise ValueError(f"only {included.sum()} distinct included frames remain after duplicate detection")
             if (~included).any():
                 warnings.append(f"{int((~included).sum())} frames excluded by manifest or exact decoded duplication; see inputs.json.")
-            progress(f"{frames[0].site}: estimating registration for {int(included.sum())} frames")
-            shifts, accepted, registration = register_stack(stack, included, config)
-            for row in registration:
-                i = row["frame_position"]
-                row.update(frame_index=frames[i].index, path=frames[i].relative_path, page=frames[i].page,
-                           correction_dy_px=float(shifts[i, 0]), correction_dx_px=float(shifts[i, 1]),
-                           drift_dy_px=float(-shifts[i, 0]), drift_dx_px=float(-shifts[i, 1]))
-                if not included[i]:
-                    row["reason"] = audit[i]["exclusion_reason"]
-                if config.pixel_size_nm:
-                    row.update(drift_dy_nm=float(-shifts[i, 0] * config.pixel_size_nm),
-                               drift_dx_nm=float(-shifts[i, 1] * config.pixel_size_nm))
-            write_csv(out / "registration.csv", registration)
-            if accepted.sum() < config.min_frames:
-                raise ValueError(f"only {accepted.sum()} frames pass registration; see registration.csv")
-            if (included & ~accepted).any():
-                warnings.append(f"{int((included & ~accepted).sum())} additional frames failed registration; temporal gaps are retained.")
-            if any(r["peak_ratio"] is not None and r["accepted"] and r["peak_ratio"] < 1.05 for r in registration):
-                warnings.append("Multiple similar correlation peaks: periodic-pattern registration may be ambiguous. Inspect drift and local residuals.")
-            if config.registration == "none":
-                warnings.append("Registration disabled: shift values are placeholders; specimen motion can inflate noise statistics.")
-            positions = np.flatnonzero(accepted)
-            indices = np.array([frames[i].index for i in positions])
+            frame_indices = np.array([f.index for f in frames])
+            positions = np.flatnonzero(included)
+            shifts = np.zeros((len(frames), 2), dtype=float)
+            registration_rows, pass1_rows, regions, maps = [], [], [], {}
+            if config.registration == "fit":
+                progress(f"{site}: fitting {len(positions)} frames in two passes")
+                fit = register_site(stack, included, levels, sigma=config.registration_sigma,
+                                    progress=lambda message: progress(f"{site}: {message}"))
+                extras, regions = difference_outputs(stack, fit, levels, out / "differences", frame_indices,
+                                                     lambda message: progress(f"{site}: {message}"))
+                registration_rows = fit_rows(fit["pass2"], None, frame_indices, extras)
+                pass1_rows = fit_rows(fit["pass1"], fit["anchor"], frame_indices)
+                write_csv(out / "registration.csv", csv_rows(registration_rows))
+                write_csv(out / "registration_pass1.csv", csv_rows(pass1_rows))
+                write_csv(out / "regions.csv", regions)
+                registration, brightness = registration_summary(registration_rows, pass1_rows,
+                                                                int(frame_indices[fit["anchor"]]), config.registration_sigma)
+                write_json(out / "registration.json", {"registration": registration, "brightness": brightness,
+                                                       "pass1": pass1_rows, "pass2": registration_rows})
+                for row in registration_rows:
+                    # The noise statistics apply the centre shift alone. The fit's (dy, dx) is
+                    # the drift; translating a frame by its negative aligns it to the reference.
+                    shifts[row["frame_position"]] = (-row["dy_px"], -row["dx_px"])
+                maps["reference_mean"] = fit["mean"].astype(np.float32)
+                maps["reference_valid"] = fit["mean_valid"]
+                if registration["unconverged_frames"]:
+                    warnings.append(f"{registration['unconverged_frames']} frames did not reach the step tolerance "
+                                    "within the iteration limit; their numbers are reported as they stand (see the converged column).")
+            else:
+                registration, brightness = registration_summary([], [], 0, config.registration_sigma, registration_enabled=False)
+                warnings.append("Registration disabled: frames are taken as aligned; specimen motion can inflate noise statistics.")
+            indices = frame_indices[positions]
             # The same crop is valid for both nearest-integer and linear shifts.
-            combined_shifts = np.concatenate((shifts[accepted], np.rint(shifts[accepted]), np.zeros((1, 2))))
+            combined_shifts = np.concatenate((shifts[included], np.rint(shifts[included]), np.zeros((1, 2))))
             crop = common_crop(stack.shape[1:], combined_shifts, margin=2 if config.registration != "none" else 0)
-            summaries, maps, frame_metrics = {}, {}, {}
+            summaries, frame_metrics = {}, {}
             for mode, integer in (("native", True), ("aligned", False)):
-                progress(f"{frames[0].site}: measuring {mode} noise, spectra, and temporal stability")
-                result, mode_maps, rows = analyze_mode(stack, shifts, accepted, indices, crop, integer, levels, config, interval, irregular)
+                progress(f"{site}: measuring {mode} noise, spectra, and temporal stability")
+                result, mode_maps, rows = analyze_mode(stack, shifts, included, indices, crop, integer, levels, config, interval, irregular)
                 summaries[mode] = result
                 maps.update({f"{mode}_{key}": value for key, value in mode_maps.items()})
                 frame_metrics[mode] = rows
@@ -203,63 +214,8 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_csv(out / f"{mode}_averaging.csv", result["temporal"]["averaging"])
                 write_csv(out / f"{mode}_temporal_acf.csv", result["temporal"]["acf"])
                 write_csv(out / f"{mode}_spatial_acf.csv", result["spatial"]["acf"])
-            progress(f"{frames[0].site}: checking local distortion and writing report")
-            local = local_diagnostics(stack, shifts, accepted, maps["aligned_mean"], crop, config)
-            for row in local:
-                row["frame_index"] = frames[row["frame_position"]].index
-            write_csv(out / "local_registration.csv", local)
-            affine_rows = []
-            feature_rows, difference_maps = [], {}
-            feature_summary = {"enabled": False}
-            differences = []
-            affine_summary = {"enabled": config.affine_diagnostics}
-            if config.affine_diagnostics:
-                progress(f"{frames[0].site}: comparing translation, rigid, similarity, and affine models")
-                affine_rows, affine_frames, affine_summary = compare_models(local, shifts, stack.shape[1:], config)
-                assessed = {r["frame_position"] for r in affine_frames}
-                for i, frame in enumerate(frames):
-                    if i not in assessed:
-                        affine_frames.append({"frame_position": i, "frame_index": frame.index,
-                                              "usable_tiles": 0, "measured_tiles": 0, "selected_model": None,
-                                              "reason": "global registration rejected/excluded" if not accepted[i] else
-                                              "registration disabled" if config.registration == "none" else
-                                              "not sampled or tiles too small"})
-                affine_frames.sort(key=lambda r: r["frame_position"])
-                affine_summary["not_assessed_frames"] = len(frames) - len(assessed)
-                write_csv(out / "affine_models.csv", affine_rows)
-                write_csv(out / "affine_frames.csv", affine_frames)
-                write_json(out / "affine.json", {"summary": affine_summary, "frames": affine_frames, "models": affine_rows})
-                richer = sum(n for model, n in affine_summary["selected_model_counts"].items() if model != "translation")
-                if richer:
-                    warnings.append(f"{richer} sampled frames support motion beyond translation on held-out tiles; inspect affine diagnostics before changing training registration.")
-                if affine_summary["unavailable_frames"] or affine_summary["not_assessed_frames"]:
-                    warnings.append("Affine diagnostics are unavailable for some frames; see affine_frames.csv for quality or sampling reasons.")
-                if config.affine_method == "intensity":
-                    feature_summary, feature_rows, feature_matches, examples = analyze_intensity(
-                        stack, included, np.array([f.index for f in frames]), shifts, accepted, config,
-                        lambda message: progress(f"{frames[0].site}: {message}"))
-                else:
-                    feature_summary, feature_rows, feature_matches, examples = analyze_features(
-                        stack, included, np.array([f.index for f in frames]), config,
-                        lambda message: progress(f"{frames[0].site}: {message}"))
-                feature_summary["estimator"] = config.affine_method
-                differences, difference_maps = difference_examples(
-                    stack, feature_rows, examples, shifts, accepted, config.registration != "none")
-                write_json(out / "feature_affine.json", {"summary": feature_summary, "frames": feature_rows})
-                write_csv(out / "feature_affine.csv", [{k: v for k, v in r.items() if k != "matrix"} for r in feature_rows])
-                write_csv(out / "feature_matches.csv", feature_matches)
-                write_json(out / "difference_examples.json", differences)
-                np.savez_compressed(out / "difference_examples.npz", **difference_maps)
-                if feature_summary["estimated_frames"] < feature_summary["attempted_frames"]:
-                    warnings.append("Some frames do not support an affine correction; see feature_affine.csv for the estimator and validation reasons. Translation remains available for accepted frames.")
-            valid_local = [r for r in local if r["valid"]]
-            local_rms = float(np.sqrt(np.mean([r["residual_dy_px"]**2 + r["residual_dx_px"]**2 for r in valid_local]))) if valid_local else None
-            if local_rms is not None and local_rms > 0.5:
-                warnings.append("Local residual shifts exceed 0.5 px RMS; translation may not explain charging distortion, rotation, or pattern ambiguity.")
-            if not valid_local and config.registration != "none":
-                warnings.append("No valid local registration tiles; local distortion was not assessed.")
             if any((r["low_clip_fraction"] or 0) + (r["high_clip_fraction"] or 0) > 0.001 for r in audit):
-                warnings.append("Some frames have >0.1% pixels at configured/storage clipping bounds. Clipped pixels are excluded from noise-distribution masks.")
+                warnings.append("Some frames have >0.1% pixels at configured/storage clipping bounds. Clipped pixels are excluded from the registration fit and from noise-distribution masks.")
             if config.white_level is None or config.black_level is None:
                 warnings.append("Clipping bounds default to integer storage limits (unknown for float inputs). Set actual ADC/export bounds for packed or rescaled data.")
             for mode in ("native", "aligned"):
@@ -274,48 +230,40 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 unregistered_m2 += delta * (frame - unregistered_mean)
             maps["unregistered_mean"] = unregistered_mean.astype(np.float32)
             maps["unregistered_std"] = np.sqrt(unregistered_m2 / (len(positions) - 1)).astype(np.float32)
-            metrics_by_position = {int(i): dict(audit[i], **registration[i]) for i in range(len(frames))}
+            by_position = {int(i): dict(audit[i]) for i in range(len(frames))}
+            for row in registration_rows:
+                by_position[row["frame_position"]].update({key: row[key] for key in FRAME_TABLE_KEYS if key in row})
             for mode, rows in frame_metrics.items():
                 for row in rows:
-                    metrics_by_position[row["frame_position"]].update({f"{mode}_{key}": value for key, value in row.items() if key != "frame_position"})
-            for row in metrics_by_position.values():
+                    by_position[row["frame_position"]].update({f"{mode}_{key}": value for key, value in row.items() if key != "frame_position"})
+            for row in by_position.values():
                 row.pop("metadata", None)
-            write_csv(out / "frames.csv", list(metrics_by_position.values()))
+            write_csv(out / "frames.csv", list(by_position.values()))
             stamps = np.array([frames[i].timestamp_s if frames[i].timestamp_s is not None else frames[i].index * (interval or 1) for i in positions])
             stamps -= stamps[0]
             means = np.array([r["mean_dn"] for r in frame_metrics["aligned"]])
-            brightness_slope = float(np.polyfit(stamps, means, 1)[0])
-            fractions = shifts[accepted] - np.floor(shifts[accepted])
+            fractions = shifts[included] - np.floor(shifts[included])
             variance_factors = np.prod((1 - fractions)**2 + fractions**2, axis=1)
-            summary = {"site": frames[0].site, "status": "complete", "input_frames": len(frames),
-                       "accepted_frames": int(accepted.sum()), "dtype": audit[0]["dtype"],
+            summary = {"site": site, "status": "complete", "input_frames": len(frames),
+                       "accepted_frames": int(included.sum()), "dtype": audit[0]["dtype"],
                        "original_shape": [audit[0]["height"], audit[0]["width"]],
                        "roi_y0_y1_x0_x1": list(config.roi) if config.roi else [0, stack.shape[1], 0, stack.shape[2]],
                        "common_crop_within_roi": [crop[0].start, crop[0].stop, crop[1].start, crop[1].stop],
                        "black_level_dn": levels[0], "white_level_dn": levels[1],
                        "interval_s": interval, "duration_s": float(stamps[-1]) if frames[0].timestamp_s is not None or interval else None,
                        "pixel_size_nm": config.pixel_size_nm,
-                       "max_drift_px": float(np.max(np.linalg.norm(shifts[accepted], axis=1))) if config.registration != "none" else None,
-                       "drift_step_rms_px": float(np.sqrt(np.mean(np.sum(np.diff(shifts[accepted], axis=0)[np.diff(indices) == 1]**2, axis=1)))) if np.any(np.diff(indices) == 1) and config.registration != "none" else None,
-                       "local_residual_rms_px": local_rms, "valid_local_tiles": len(valid_local),
-                       "brightness_slope_dn_per_unit": brightness_slope,
+                       "max_drift_px": registration.get("max_drift_px"),
+                       "drift_step_rms_px": registration.get("drift_step_rms_px"),
+                       "max_corner_effect_px": registration.get("max_corner_effect_px"),
+                       "brightness_slope_dn_per_unit": float(np.polyfit(stamps, means, 1)[0]),
                        "brightness_slope_time_unit": "second" if frames[0].timestamp_s is not None or interval else "frame",
                        "bilinear_white_noise_variance_factor_mean": float(variance_factors.mean()),
                        "unregistered_temporal_sigma_dn": float(np.sqrt(np.mean(unregistered_m2 / (len(positions) - 1)))),
-                       "modes": summaries, "affine_diagnostics": affine_summary,
-                       "feature_affine": feature_summary, "difference_examples": differences, "warnings": warnings}
+                       "modes": summaries, "registration": registration, "brightness": brightness, "warnings": warnings}
             np.savez_compressed(out / "maps.npz", **maps)
-            progress(f"{frames[0].site}: validating brightness correction and differences")
-            brightness, brightness_rows, brightness_maps = analyze_brightness(
-                stack, shifts, accepted, np.array([f.index for f in frames]), crop,
-                registration_enabled=config.registration != "none", example_count=config.diff_examples)
-            summary["brightness_correction"] = brightness
-            write_json(out / "brightness.json", {"summary": brightness, "frames": brightness_rows})
-            write_csv(out / "brightness.csv", brightness_rows)
-            np.savez_compressed(out / "brightness_examples.npz", **brightness_maps)
             write_json(out / "summary.json", summary)
-            site_report(out, summary, maps, list(metrics_by_position.values()), local, affine_rows,
-                        feature_rows, difference_maps)
+            progress(f"{site}: writing report")
+            site_report(out, summary, maps, list(by_position.values()), registration_rows, regions)
             return summary
         finally:
             stack._mmap.close()
@@ -362,7 +310,7 @@ def analyze_dataset(input_path: str | Path, output_path: str | Path, *,
             for row in rows:
                 identities.setdefault(row["pixel_sha256"], []).append({"site": site, "frame_index": row["frame_index"], "path": row["path"], "page": row["page"]})
     duplicates = [rows for rows in identities.values() if len({r["site"] for r in rows}) > 1]
-    overview = {"schema_version": 1, "status": "complete" if all(r["status"] == "complete" for r in results) else "partial_failure",
+    overview = {"schema_version": 2, "status": "complete" if all(r["status"] == "complete" for r in results) else "partial_failure",
                 "site_count": len(results), "successful_sites": sum(r["status"] == "complete" for r in results),
                 "cross_site_duplicate_groups": duplicates,
                 "warnings": ["Noise parameters are reported per site. Different patterns/settings are not pooled.",
@@ -372,12 +320,13 @@ def analyze_dataset(input_path: str | Path, output_path: str | Path, *,
     write_json(output / "input_manifest.json", input_manifest)
     write_json(output / "summary.json", overview)
     write_csv(output / "summary.csv", [{"site": r["site"], "status": r["status"], "directory": r["directory"],
-                                       "accepted_frames": r.get("accepted_frames"), "max_drift_px": r.get("max_drift_px"),
+                                       "frames": r.get("accepted_frames"), "max_drift_px": r.get("max_drift_px"),
+                                       "max_corner_effect_px": r.get("max_corner_effect_px"),
+                                       "gain_min": r.get("brightness", {}).get("gain_min"),
+                                       "gain_max": r.get("brightness", {}).get("gain_max"),
                                        "native_flat_sigma_dn": r.get("modes", {}).get("native", {}).get("flat_temporal_sigma_dn"),
                                        "aligned_flat_sigma_dn": r.get("modes", {}).get("aligned", {}).get("flat_temporal_sigma_dn"),
-                                       **{f"motion_{model}_frames": r.get("affine_diagnostics", {}).get("selected_model_counts", {}).get(model)
-                                          for model in ("translation", "rigid", "similarity", "affine")},
-                                       "local_residual_rms_px": r.get("local_residual_rms_px"), "error": r.get("error", "")}
+                                       "error": r.get("error", "")}
                                       for r in results])
     index_report(output, overview)
     return overview

@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-pytest.importorskip("skimage")
+pytest.importorskip("scipy")
 pytest.importorskip("tifffile")
 pytest.importorskip("matplotlib")
 
@@ -147,74 +147,70 @@ def test_packed_integer_clipping_bounds_are_respected(tmp_path: Path, monkeypatc
         assert not maps["native_valid_mask"][:4, :4].any()
 
 
-def test_failed_registration_writes_shift_audit(tmp_path: Path) -> None:
+def test_flat_frames_complete_with_undetermined_error_bars(tmp_path: Path, monkeypatch) -> None:
+    from sem_noise import report
+    monkeypatch.setattr(report, "site_report", lambda *args: None)
     source = tmp_path / "input"
     paths = _site(source / "site")
     for i, path in enumerate(paths):
         Image.fromarray(np.full((48, 48), 500 + i, dtype=np.uint16)).save(path)
     output = tmp_path / "result"
-    result = analyze_dataset(source, output, config=AnalysisConfig())
-    assert result["status"] == "partial_failure"
-    assert (output / "site_001/registration.csv").exists()
-    assert "only 1 frames pass registration" in result["sites"][0]["error"]
+    result = analyze_dataset(source, output, config=AnalysisConfig(expected_frames=8))
+    site = result["sites"][0]
+    assert site["status"] == "complete"
+    assert site["accepted_frames"] == 8
+    assert site["registration"]["unconverged_frames"] == 8
+    assert any("did not reach the step tolerance" in w for w in site["warnings"])
+    rows = json.loads((output / "site_001/registration.json").read_text(encoding="utf-8"))["pass2"]
+    assert len(rows) == 8 and all(r["dy_px_se"] is None for r in rows)
+    with (output / "site_001/registration.csv").open(encoding="utf-8") as stream:
+        header = stream.readline().strip().split(",")
+    assert "dy_px_se" in header and "covariance" not in header
 
 
-@pytest.mark.parametrize("method", ["intensity", "features"])
-def test_affine_cli_report_and_unchanged_noise_statistics(tmp_path: Path, monkeypatch, method: str) -> None:
-    from dataclasses import replace
-    from scipy import ndimage
-    from sem_noise import report
+def test_fit_pipeline_writes_every_frame(tmp_path: Path) -> None:
+    from test_registration import moving_frame, specimen
+    from test_site_registration import site_truth
 
+    clean = specimen(96)
     rng = np.random.default_rng(55)
-    reference = 1000 + 200 * ndimage.gaussian_filter(rng.normal(size=(192, 192)), 1.5)
-    stack = np.stack([ndimage.rotate(reference, angle, reshape=False, mode="reflect")
-                      + rng.normal(0, 1, reference.shape) for angle in (0, 0.2, 0.4, 0.6)])
+    stack = np.stack([moving_frame(clean, t) + rng.normal(0, 4, clean.shape) for t in site_truth()])
     source = tmp_path / "repeats.npy"
     np.save(source, stack.astype(np.float32))
     config = tmp_path / "config.yml"
-    config.write_text(f"affine_method: {method}\nmin_frames: 4\nexpected_frames: 4\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n", encoding="utf-8")
-    output = tmp_path / "affine"
-    assert main(["analyze", "--input", str(source), "--output", str(output), "--config", str(config),
-                 "--affine-diagnostics", "--local-frames", "0", "--local-grid", "3"]) == 0
-    diagnostic = json.loads((output / "site_001/affine.json").read_text(encoding="utf-8"))
-    assert len(diagnostic["frames"]) == 4
-    assert len(diagnostic["models"]) == 16
-    assert diagnostic["summary"]["reliable_affine_frames"] == 4
-    html = (output / "site_001/report.html").read_text(encoding="utf-8")
-    assert "Approximate tile-based affine diagnostics" in html
-    assert ("Translation-initialized affine registration" if method == "intensity" else "Feature-based affine registration") in html
-    assert "Frame-pair difference comparison" in html
-    feature = json.loads((output / "site_001/feature_affine.json").read_text(encoding="utf-8"))
-    assert feature["summary"]["estimated_frames"] == 3
-    assert feature["summary"]["estimator"] == method
-    assert feature["frames"][-1]["correction_rotation_deg"] == pytest.approx(0.6, abs=0.08)
-    pairs = json.loads((output / "site_001/difference_examples.json").read_text(encoding="utf-8"))
-    assert len(pairs) == 3
-    assert all(r["available_modes"] == ["raw", "translation", "affine"] for r in pairs)
-    assert pairs[-1]["affine_rms_dn"] < pairs[-1]["translation_rms_dn"] / 3
-    assert (output / "site_001/difference_pair_02.png").exists()
-    assert "Within-site affine parameter distributions" in html
-    assert (output / "site_001/affine.png").exists()
-    assert "Motion model support by site" in (output / "index.html").read_text(encoding="utf-8")
+    config.write_text("min_frames: 4\nexpected_frames: 6\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n",
+                      encoding="utf-8")
+    output = tmp_path / "fit"
+    assert main(["analyze", "--input", str(source), "--output", str(output), "--config", str(config)]) == 0
+    site = output / "site_001"
+    saved = json.loads((site / "registration.json").read_text(encoding="utf-8"))
+    assert len(saved["pass2"]) == 6 and len(saved["pass1"]) == 6
+    assert np.asarray(saved["pass2"][3]["covariance"]).shape == (8, 8)
+    assert saved["pass1"][0]["role"].startswith("reference")
+    assert saved["pass2"][5]["dy_px"] == pytest.approx(2.0, abs=0.1)
+    assert saved["pass2"][5]["gain"] == pytest.approx(0.85, abs=0.02)
+    assert saved["pass2"][3]["corner_max_px"] > 3 * saved["pass2"][3]["corner_max_se"]
+    with (site / "regions.csv").open(encoding="utf-8") as stream:
+        assert len(stream.readlines()) == 1 + 6 * 3 * 16
+    for index in range(6):
+        assert (site / "differences" / f"frame_{index:04d}.png").exists()
+    for name in ("registration.csv", "registration_pass1.csv", "registration.png", "brightness.png", "difference_scale.png", "frame_residuals.png"):
+        assert (site / name).exists(), name
+    html = (site / "report.html").read_text(encoding="utf-8")
+    assert "Registration fit: one least-squares fit per frame" in html
+    assert "Difference images for every frame" in html
+    assert 'src="differences/frame_0003.png"' in html
+    assert "unavailable" not in html.lower()
+    assert "Max corner effect" in (output / "index.html").read_text(encoding="utf-8")
+    summary = json.loads((site / "summary.json").read_text(encoding="utf-8"))
+    assert summary["accepted_frames"] == summary["input_frames"] == 6
+    assert summary["max_drift_px"] == pytest.approx(2.5, abs=0.15)
+    assert summary["brightness"]["gain_min"] == pytest.approx(0.85, abs=0.02)
+    with (site / "frames.csv").open(encoding="utf-8") as stream:
+        header = stream.readline().strip().split(",")
+    assert "dy_px" in header and "gain_se" in header
     provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["config"]["local_frames"] == 0
-    monkeypatch.setattr(report, "site_report", lambda *args: None)
-    baseline = analyze_dataset(source, tmp_path / "baseline", config=replace(
-        _config(), registration="translation", min_frames=4, expected_frames=4, local_frames=0, local_grid=3))
-    with (output / "site_001/summary.json").open(encoding="utf-8") as stream:
-        enriched = json.load(stream)
-    assert enriched["modes"] == baseline["sites"][0]["modes"]
-
-
-def test_affine_without_registration_reports_unavailable(tmp_path: Path, monkeypatch) -> None:
-    from dataclasses import replace
-    from sem_noise import report
-    monkeypatch.setattr(report, "site_report", lambda *args: None)
-    _site(tmp_path / "input/site")
-    output = tmp_path / "result"
-    result = analyze_dataset(tmp_path / "input", output, config=replace(_config(), affine_diagnostics=True))
-    summary = result["sites"][0]["affine_diagnostics"]
-    assert summary["supported_frames"] == 0
-    assert summary["not_assessed_frames"] == 8
-    frames = json.loads((output / "site_001/affine.json").read_text(encoding="utf-8"))["frames"]
-    assert all(r["selected_model"] is None and r["reason"] == "registration disabled" for r in frames)
+    assert provenance["config"]["registration"] == "fit"
+    assert not any("affine" in key or "feature" in key or "local" in key for key in provenance["config"])
+    with np.load(site / "maps.npz", allow_pickle=False) as maps:
+        assert maps["reference_mean"].shape == (96, 96)

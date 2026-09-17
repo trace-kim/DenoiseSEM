@@ -19,32 +19,8 @@ class AnalysisConfig:
     pixel_size_nm: float | None = None
     black_level: float | None = None
     white_level: float | None = None
-    registration: str = "translation"
-    max_shift_px: float = 12.0
-    upsample_factor: int = 20
-    registration_sigma: float = 1.0
-    registration_max_side: int = 768
-    min_correlation: float = 0.2
-    local_grid: int = 3
-    local_frames: int = 16
-    affine_diagnostics: bool = False
-    affine_method: str = "intensity"
-    affine_refine_max_linear_change: float = 0.03
-    affine_refine_max_translation_px: float = 3.0
-    affine_refine_min_relative_improvement: float = 0.02
-    affine_refine_min_overlap: float = 0.5
-    affine_min_improvement_px: float = 0.05
-    affine_min_relative_improvement: float = 0.15
-    affine_max_cv_error_px: float = 0.5
-    affine_max_stability_px: float = 0.25
-    affine_min_texture_ratio: float = 0.02
-    feature_max_keypoints: int = 1500
-    feature_match_ratio: float = 0.75
-    feature_residual_px: float = 1.5
-    feature_min_inliers: int = 8
-    feature_min_inlier_fraction: float = 0.5
-    feature_min_overlap: float = 0.5
-    diff_examples: int = 3
+    registration: str = "fit"          # "fit": the eight-parameter fit per frame; "none": frames taken as aligned
+    registration_sigma: float = 1.0    # light blur (px) of both copies before the fit
     sample_pixels: int = 8192
     distribution_samples: int = 100000
     intensity_bins: int = 12
@@ -55,67 +31,34 @@ class AnalysisConfig:
     seed: int = 17
 
     def __post_init__(self) -> None:
-        for name in (
-            "expected_frames", "min_frames", "upsample_factor",
-            "registration_max_side", "local_grid",
-            "sample_pixels", "distribution_samples", "intensity_bins",
-            "max_lag", "spatial_pairs", "spatial_max_side",
-            "feature_max_keypoints", "feature_min_inliers", "diff_examples",
-        ):
+        for name in ("expected_frames", "min_frames", "sample_pixels", "distribution_samples",
+                     "intensity_bins", "max_lag", "spatial_pairs", "spatial_max_side"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if self.min_frames < 4 or self.intensity_bins < 3:
             raise ValueError("min_frames must be >= 4 and intensity_bins >= 3")
-        if type(self.local_frames) is not int or self.local_frames < 0:
-            raise ValueError("local_frames must be nonnegative (0 means all accepted frames)")
-        if type(self.affine_diagnostics) is not bool:
-            raise ValueError("affine_diagnostics must be a boolean")
-        if self.affine_method not in {"intensity", "features"}:
-            raise ValueError("affine_method must be intensity or features")
-        for name in ("affine_refine_max_linear_change", "affine_refine_max_translation_px",
-                     "affine_refine_min_relative_improvement", "affine_refine_min_overlap"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
-            if name != "affine_refine_max_translation_px" and value >= 1:
-                raise ValueError(f"{name} must be below 1")
-        for name in ("affine_min_improvement_px", "affine_min_relative_improvement",
-                     "affine_max_cv_error_px", "affine_max_stability_px", "affine_min_texture_ratio"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
-        if self.affine_min_relative_improvement >= 1 or self.affine_min_texture_ratio >= 1:
-            raise ValueError("affine relative improvement and texture ratio must be below 1")
-        for name in ("feature_match_ratio", "feature_residual_px", "feature_min_inlier_fraction", "feature_min_overlap"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
-            if name != "feature_residual_px" and value >= 1:
-                raise ValueError(f"{name} must be below 1")
-        if self.feature_min_inliers < 6 or self.feature_max_keypoints < 16:
-            raise ValueError("feature_min_inliers must be >= 6 and feature_max_keypoints >= 16")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
-        for name in ("frame_interval_s", "pixel_size_nm", "max_shift_px", "registration_sigma"):
+        for name in ("frame_interval_s", "pixel_size_nm", "registration_sigma"):
             value = getattr(self, name)
-            if value is None and name in {"max_shift_px", "registration_sigma"}:
+            if value is None and name == "registration_sigma":
                 raise ValueError(f"{name} must be finite and positive")
             if value is not None and (isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"{name} must be finite and positive")
-        for name in ("black_level", "white_level", "min_correlation", "flat_fraction"):
+        for name in ("black_level", "white_level", "flat_fraction"):
             value = getattr(self, name)
-            if value is None and name in {"min_correlation", "flat_fraction"}:
+            if value is None and name == "flat_fraction":
                 raise ValueError(f"{name} must be finite")
             if value is not None and (isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value)):
                 raise ValueError(f"{name} must be finite")
-        if not 0 <= self.min_correlation <= 1 or not 0 < self.flat_fraction < 1:
-            raise ValueError("min_correlation must be in [0, 1]; flat_fraction in (0, 1)")
+        if not 0 < self.flat_fraction < 1:
+            raise ValueError("flat_fraction must be in (0, 1)")
         if self.black_level is not None and self.white_level is not None:
             if self.black_level >= self.white_level:
                 raise ValueError("black_level must be below white_level")
-        if self.registration not in {"translation", "none"}:
-            raise ValueError("registration must be translation or none")
+        if self.registration not in {"fit", "none"}:
+            raise ValueError("registration must be fit or none")
         if self.roi is not None:
             if len(self.roi) != 4 or any(type(v) is not int for v in self.roi):
                 raise ValueError("roi must contain four integers: y0, y1, x0, x1")

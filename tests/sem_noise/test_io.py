@@ -135,10 +135,10 @@ def test_inventory_is_recursive_editable_and_never_overwrites(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"min_frames": 2}, {"max_shift_px": float("nan")}, {"frame_interval_s": 0},
+    {"min_frames": 2}, {"registration_sigma": float("nan")}, {"frame_interval_s": 0},
     {"roi": (0, 1, 2, 1)}, {"white_level": 0, "black_level": 1},
-    {"sample_pixels": True}, {"registration": "affine"}, {"flat_fraction": 1},
-    {"max_shift_px": None}, {"registration_sigma": "1"}, {"min_correlation": None},
+    {"sample_pixels": True}, {"registration": "translation"}, {"flat_fraction": 1},
+    {"registration_sigma": None}, {"registration_sigma": "1"}, {"registration_sigma": 0},
 ])
 def test_invalid_settings(kwargs: dict) -> None:
     with pytest.raises(ValueError):

@@ -7,39 +7,14 @@ frame_interval_s: null
 pixel_size_nm: null
 # Set actual detector/export clipping bounds if known, e.g. 0 and 4095 for
 # unscaled 12-bit values in a 16-bit PNG. Otherwise integer dtype limits apply.
+# Pixels at these bounds are masked out of the registration fit.
 black_level: null
 white_level: null
-registration: translation
-max_shift_px: 12.0
-upsample_factor: 20
+# fit: one least-squares fit per frame (dy, dx, four affine terms, gain, offset)
+# on native pixels, both copies blurred by registration_sigma, no search, no
+# gates; every frame is reported with error bars. none: frames taken as aligned.
+registration: fit
 registration_sigma: 1.0
-registration_max_side: 768
-min_correlation: 0.2
-local_grid: 3
-local_frames: 16
-# Optional intensity affine diagnostics/difference images. For all frames and
-# more tiles, use affine_diagnostics.yml or CLI --local-frames 0 --local-grid 5.
-affine_diagnostics: false
-# Translation-initialized refinement; use features for the legacy SIFT path.
-affine_method: intensity
-# Bounds on inverse-warp linear entries and extra center translation.
-affine_refine_max_linear_change: 0.03
-affine_refine_max_translation_px: 3.0
-# Required fractional held-out RMS improvement over refined translation.
-affine_refine_min_relative_improvement: 0.02
-affine_refine_min_overlap: 0.5
-affine_min_improvement_px: 0.05
-affine_min_relative_improvement: 0.15
-affine_max_cv_error_px: 0.5
-affine_max_stability_px: 0.25
-affine_min_texture_ratio: 0.02
-feature_max_keypoints: 1500
-feature_match_ratio: 0.75
-feature_residual_px: 1.5
-feature_min_inliers: 8
-feature_min_inlier_fraction: 0.5
-feature_min_overlap: 0.5
-diff_examples: 3
 sample_pixels: 8192
 distribution_samples: 100000
 intensity_bins: 12

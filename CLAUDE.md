@@ -32,7 +32,13 @@ code and the add-ons built on top of it do not share a namespace:
    Depends on nothing in this repo.
 6. **`sem_noise/`** — noise, drift and temporal stability of repeated real SEM
    acquisitions. Analysis tier (`[analysis]` extra, argparse CLI, no GPU);
-   imports nothing else in this repo.
+   imports nothing else in this repo. Registration is deliberately **one
+   8-parameter least-squares fit per frame** (dy, dx, four affine terms, gain,
+   offset) on native pixels with error bars, two passes (first frame, then the
+   registered mean), and **no gates, tiles, pyramids or fallbacks**; the
+   report shows every frame's numbers, three difference images and a 4×4
+   region table so the reader decides. Do not reintroduce hidden validation
+   cells, thresholds, or "unavailable" states. Method: `sem_noise/README.md`.
 7. **`sem_segment/`** — SAM 3 feature segmentation, contour extraction and
    metrology. Analysis tier; imports nothing else in this repo. The two contour
    methods are *not* alternatives: SAM 3 runs at a fixed 1008 px so its mask

@@ -5,13 +5,12 @@ Defaults assume 128 acquisitions per site, with independent results for each
 of 15–30 sites. This package imports none of the training packages and requires
 no GPU. Input images are read only; results go into a new output directory.
 
-Every analysis also includes a **brightness correction comparison**: before/after
-acquisition tracks, signed correction images, and residuals against a fixed
-reference. Fits use registered block averages with separate validation blocks;
-raw noise statistics remain available unchanged. See the
-[brightness method and preprocessing review](brightness_review.md) for the
-assumptions, output files, and the distinction between analysis normalization
-and matching training targets to untouched inputs.
+Every site gets **one least-squares fit per frame** against a fixed reference:
+translation, four affine terms, gain and offset, each reported with its
+standard error, plus three native-resolution difference images and a 4×4
+region residual table per frame. The pipeline decides nothing; a reader sees
+whether a drift, rotation, shear or brightness change is real by comparing
+the number with its error bar and looking at the residual image.
 
 ## Start with the PNG data
 
@@ -23,8 +22,10 @@ python -m sem_noise analyze --input data/sem-real --output output/sem-noise-01
 The simple layout is `data/sem-real/site_01/frame_0000.png` through
 `frame_0127.png`, then `site_02/`, etc. Filenames must encode acquisition order.
 Open `output/sem-noise-01/index.html`. It links to each site's offline report,
-figures, numerical tables, and full-resolution maps. Reports embed their images
-and require no web service. `sem-noise` is also installed as a console command.
+figures, numerical tables, and full-resolution maps. Reports embed their
+figures; the per-frame difference images are separate PNG files next to the
+report, so download the entire output directory. `sem-noise` is also installed
+as a console command.
 
 If another session uses the existing editable environment, use a separate
 environment in this worktree. Do not repoint its editable install while that
@@ -95,55 +96,130 @@ the actual PNGs. Crop burned-in labels, scale bars, and non-imaging borders
 **before registration**. Set `black_level` and `white_level` to the true exported
 clipping bounds: unscaled 12-bit values in uint16 PNGs have upper bound 4095,
 not 65535. Otherwise integer storage limits are used and flagged; float images
-have no implicit clipping bounds. Measurements are not gamma-corrected,
-equalized, normalized per frame, denoised, or photometrically compensated in the
-native/aligned noise measurements. The separately labeled brightness comparison
-applies gain/offset to analysis copies only.
+have no implicit clipping bounds. Pixels at the bounds are masked out of the
+registration fit and out of the noise-distribution masks. Measurements are not
+gamma-corrected, equalized, normalized per frame, denoised, or photometrically
+compensated; the fitted gain and offset are applied only to the difference
+images and the brightness track.
 
 Retain voltage/current, detector, dwell time, frame time, scan direction, pixel
 size, working distance, and any automatic contrast/filtering/averaging settings.
 These can explain differences between otherwise comparable datasets.
 
+## The registration fit
+
+### What is fitted
+
+For every frame `M` of a site, against a fixed reference `R`, one least-squares
+fit on native-resolution pixels. Both copies are blurred by `registration_sigma`
+(1 px). Nothing is subsampled, there is no search, no pyramid, and the fit
+starts from zero shift. The model, with `u = x − cx` and `v = y − cy` measured
+from the ROI centre (x right, y down), is
+
+```text
+corrected(x, y) = gain · M(x + dx + a11·u + a12·v,  y + dy + a21·u + a22·v) + offset  ≈  R(x, y)
+```
+
+Eight parameters: `dy, dx` (where the reference centre's content sits in the
+frame, i.e. its drift), the four affine terms `a11 a12 a21 a22`
+(dimensionless; their effect is reported as the displacement they add at the
+four ROI corners, in pixels), `gain` and `offset`. The loss is Huber
+(scale 1.345 × the residual's median absolute deviation, re-estimated each
+iteration); pixels at the clipping bounds, and a 2-px neighbourhood the blur
+contaminates, are masked. Gauss–Newton with backtracking runs until every
+geometric step is below 0.001 px (at most 40 iterations); a frame that does not
+reach that is marked `converged = false` and reported as it stands.
+
+Two passes:
+
+1. **Pass 1** — reference = the first included frame. Its own row is the
+   identity by definition, not a fit.
+2. **Pass 2** — reference = the registered mean of all frames, built with the
+   pass-1 fits on the first frame's grid and brightness scale (pixels covered
+   by every frame). Every frame, including the first, is fitted against it.
+   **Pass 2 is the reported result**; pass 1 is saved for comparison.
+
+The mean includes the frame being fitted (1/N of it), which slightly favours
+the pass-1 solution; with the default frame counts this is negligible.
+
+### Error bars
+
+Each parameter's standard error is the weighted least-squares covariance of the
+fit, `σ̂² (JᵀWJ)⁻¹`, scaled by the frame's **residual correlation area**: the
+sum of the normalized residual autocorrelation over ±8 px lags. The 1-px blur
+alone makes that area about 12.6 px² for white noise (`4πσ²`), so an
+uncorrected error bar would be about 3.5× too small; intrinsic noise
+correlation and leftover structure enlarge it further. The area is written per
+frame (`residual_correlation_area_px2`). Correlation beyond ±8 px, such as
+scan-line noise that is coherent along a whole row, is not captured, so the
+error bar on `dy` is optimistic on such data. Corner displacements, rotation
+`(a21 − a12)/2`, shear `(a12 + a21)/2` and scale changes carry linearly
+propagated errors. These describe the fit on the two images at hand, not
+calibrated stage motion.
+
+### Difference images and region tables
+
+For every frame, one native-resolution PNG (`differences/frame_NNNN.png`) with
+three panels side by side, in original DN on one shared symmetric colour
+scale:
+
+1. **before correction** — frame minus reference;
+2. **shift only** — the same fit with its four affine terms set to zero (centre
+   translation, gain and offset kept), minus reference;
+3. **full fit** — all eight parameters, minus reference.
+
+The last two therefore differ only by the affine terms. All three use one
+pixel set (inside both footprints, covered by the mean, not touching clipped
+values; grey elsewhere) and one limit, the 99th percentile of the uncorrected
+absolute difference, printed in the caption and in `registration.csv`
+(`colour_limit_dn`). The PNG is an 8-bit palette image: index 127 is zero,
+0 and 254 are ∓limit, 255 is invalid. `regions.csv` gives the RMS difference in
+each cell of a 4×4 grid for the same three panels on the same pixels.
+
+Native-resolution PNGs of noise-like data do not compress: expect roughly
+8–10 MB per frame at 2048×2048 (about 1.2 GB for a 128-frame site).
+
+### Brightness track
+
+`gain` and `offset` per frame with error bars, and the frame mean before and
+after applying them on the pixels shared with the reference, together with
+the reference mean on those pixels. A flat after-track is the fitted outcome,
+not independent proof: the residual images show what a global gain and offset
+cannot explain.
+
+### The noise statistics stay translation-based
+
+`--registration fit` (default) applies only the fitted **centre shift** to the
+noise statistics; `--registration none` takes frames as aligned and skips the
+fit, the difference images and the brightness track. No affine warp and no
+gain/offset ever enter the native/aligned noise statistics, because a warp
+changes noise variance and correlation and a gain scales it.
+
+### Convergence radius
+
+Starting from zero shift, Gauss–Newton follows the residual downhill. For
+isolated edges and features that works over many pixels; for dense fine
+texture with a correlation length of a few pixels, a drift larger than that
+length can settle in a wrong local minimum. Such a frame shows a large
+`residual_rms_dn`, structure left in its full-fit panel, and often
+`converged = false`. Compare with `registration_pass1.csv`; both passes start
+from zero.
+
 ## Measurements and interpretation
 
 | Question | Outputs | What to check |
 |---|---|---|
-| Registration error | x/y drift, drift steps, overlap correlation, competing peaks, local tile residuals | Whole-frame translation versus local distortion; periodic-pattern ambiguity |
+| Registration | dy/dx, affine terms and corner effects, all with error bars; residual RMS; difference images; region tables | Numbers against error bars; structure left in the full-fit panel; region cells that improve only under the full fit |
+| Brightness | gain/offset with error bars, mean before/after | Trend versus error bar; residual images for what gain/offset cannot explain |
 | Noise distribution | Residual and adjacent-difference histograms, Gaussian Q–Q, skewness, kurtosis, MAD scale, >3σ tails | Flat regions versus moving edges; no automatic distribution-family claim |
 | Signal dependence | Binned mean–variance curve and affine fit | Empirical exported-DN variance model; not calibrated electron gain |
 | Temporal independence | Pixel ACF, offset-removed ACF, adjacent differences | Correlated repeats can bias pair-based estimates and training |
-| Slow changes | Mean, affine gain/offset, contrast, residual RMS, Laplacian RMS, early/late maps | Charging, beam/focus/specimen changes, and noise can all contribute |
+| Slow changes | Mean, contrast, residual RMS, Laplacian RMS, early/late maps | Charging, beam/focus/specimen changes, and noise can all contribute |
 | Averaging behavior | Pixel and mean-intensity Allan deviation, shuffled control, 1/√N reference | Detect departures from independent averaging without using a fake clean target |
 | Spatial structure | Pair-difference 2-D PSD, x/y ACF, row/column banding ratios | Scan-line noise, anisotropy, and residual pattern energy |
 | Data quality | Clipping, shape/dtype checks, duplicate hashes, unstable-pixel candidates | Inspect flags; they do not uniquely identify detector defects |
 
-### Registration and the two pixel domains
-
-Translations are estimated from smoothed copies with tapered boundaries,
-unnormalized FFT cross-correlation, and subpixel DFT refinement, followed by
-interior least-squares refinement of shift, gain, and offset on registration
-copies. The interior fit reduces taper bias without changing measured pixels.
-The first pass
-uses the first included frame; the second uses leave-one-out provisional means
-to reduce reference noise. The coordinate origin remains the first included
-frame if its refinement passes. This does not remove all data-dependent
-registration bias. Frames outside `max_shift_px` per axis or below
-`min_correlation` are excluded and recorded. Correlation is measured on smoothed
-overlap and is not a calibrated probability of correctness.
-
-`registration_max_side` caps registration copies, not measurements. Approximate
-initial numerical shift spacing is `ceil(max_side / registration_max_side) /
-upsample_factor` pixels; the interior fit is continuous. Neither is a claim of
-**accuracy or uncertainty**. Similar separated
-peaks within the search range flag ambiguity without automatically rejecting
-the frame. Repeated lines/grids can produce plausible wrong matches despite
-these checks; inspect a distinctive ROI and compare acquisition priors.
-
-Local checks sample up to 16 frames with a 3×3 grid, tiles at least 24×24, and
-residual shifts at most 3 pixels. No nonrigid warp is applied. Residuals can
-reflect charging distortion, rotation, scan jitter, low texture, or ambiguity.
-`--registration none` provides a stationary/flat-reference control with drift
-metrics unavailable.
+### The two pixel domains
 
 Each site is measured in two domains on the same valid crop:
 
@@ -160,8 +236,8 @@ universal correction to possibly correlated, signal-dependent SEM noise.
 
 ### Noise estimators
 
-Pixels clipping in any accepted frame are removed from distribution/moment
-masks, including bilinear footprints touching clipped samples. The low-gradient
+Pixels clipping in any frame are removed from distribution/moment masks,
+including bilinear footprints touching clipped samples. The low-gradient
 mask thresholds a Gaussian-smoothed repeat mean at `flat_fraction` (default
 50th percentile), then erodes one pixel. It may still contain texture. Up to
 `sample_pixels` masked pixels and `distribution_samples` residuals are sampled
@@ -223,242 +299,6 @@ the IID reference. Residual specimen/motion energy can contribute to spectra.
 
 ## Output and resource use
 
-### Rotation, scale, shear, and motion-model comparison
-
-Run this from the repository on the remote machine (CPU only):
-
-```bash
-python -m pip install -e ".[analysis]"
-python -m sem_noise analyze \
-  --input /path/to/real-noisy-data \
-  --output /path/to/results/sem-noise-affine-01 \
-  --config sem_noise/configs/affine_diagnostics.yml
-```
-
-Use one folder per repeated site, with filenames in acquisition order. The
-output directory must be new and outside the input. Open `index.html` in the
-output directory; each site links to a self-contained `report.html` with
-embedded images. Download the entire output directory to keep table/JSON links
-working. For irregular layouts, add `--manifest /path/to/order.csv` as above.
-Crop labels/scale bars with `--roi Y0 Y1 X0 X1` (exclusive stops). Add known
-`--frame-interval-s` and `--pixel-size-nm` values only when calibrated.
-
-The preset considers **every included frame** for translation-initialized affine
-estimation; frames without an accepted translation are marked unavailable. It
-also enables supplementary 5-by-5 tile diagnostics on every globally accepted frame.
-Equivalent options are `--affine-diagnostics --local-grid 5 --local-frames 0`.
-`--local-frames 16` samples up to 16 frames; the affine pass additionally
-includes the fixed reference and difference-example frames. Without
-`--affine-diagnostics` neither affine estimation nor difference panels run.
-
-#### Translation-initialized affine estimates and difference images
-
-The default `affine_method: intensity` starts from accepted translation shifts
-and refines small affine corrections against the **first included native
-frame**, keeping one coordinate system for the site. It does not require SIFT
-keypoints or distinctive local patterns. Translation must be enabled and both
-the moving frame and fixed reference must pass translation QC.
-
-Optimization uses smoothed copies, from coarse to fine, up to
-`registration_max_side`. It jointly fits geometry and brightness gain/offset;
-brightness corrections are nuisance parameters and are never applied to noise
-measurements or displayed differences. Each candidate maps original moving
-pixels into the native reference. Original pixels are resampled once only when
-making difference images; the noise statistics remain translation-based.
-
-A fixed 4-by-4 reference grid holds out cells where `(column + row) % 3 == 0`.
-Those regions never enter affine optimization or the separately refined
-translation baseline. Both models are scored on identical interior pixels,
-with a smoothing-width buffer at region boundaries. Acceptance requires:
-
-- At least 2% held-out RMS reduction (`affine_refine_min_relative_improvement`)
-  and improvement in a majority of held-out regions.
-- At least `affine_min_improvement_px` (0.05 native px) additional corner motion.
-- Two-dimensional texture (`affine_min_texture_ratio`, default 0.02) and a
-  well-conditioned photometric/geometric fit.
-- Maximum corner disagreement between fits to two disjoint sets of training
-  cells at most `affine_max_stability_px` (0.25 native px).
-- Estimated overlap at least `affine_refine_min_overlap` (0.5).
-
-The inverse warp's linear entries may depart from identity by at most
-`affine_refine_max_linear_change` (0.03), and its extra center translation is
-bounded by `affine_refine_max_translation_px` (3 native px) per axis. Fits that
-reach these bounds are rejected. These defaults target small acquisition
-motion, not arbitrary rotations. Insufficient improvement, weak texture,
-unstable fits, or failed initialization leave affine unavailable and retain the
-accepted translation. This is not recorded as a successful affine transform.
-
-Validation is conditional on the existing whole-image translation initializer;
-it is not a statistically independent uncertainty estimate. The fixed reference
-is still noisy, and spatially varying/non-affine specimen changes may be rejected.
-The training-region spread measures sensitivity, not a confidence interval.
-
-For output compatibility, results retain the `feature_affine.json/.csv/.png`
-names and `feature_affine` summary key. The JSON summary's `estimator` identifies
-`intensity` or `features`. Intensity rows report training/validation pixel counts,
-held-out translation and affine RMS in DN, relative improvement, texture/design
-conditioning, and training-region corner spread when those stages are reached.
-`selected_model: translation` means a tried refinement was unsupported;
-`selected_model: affine` means it passed. No rejected affine matrix is saved.
-`feature_matches.csv` is empty for intensity registration.
-
-#### Optional feature estimator
-
-Set `affine_method: features` in YAML to use the previous SIFT estimator.
-The `feature_*` settings below apply only to that estimator. It can also run
-without translation initialization, unlike the default intensity estimator.
-
-The feature estimator detects SIFT keypoints on smoothed, percentile-normalized
-copies of each **original native frame**. It performs no translation
-pre-alignment and uses no repeat mean. The first included, nonduplicate frame
-is the fixed reference for the entire site. Weak reference texture produces
-an explicit failure rather than an identity fallback. Feature estimation can
-attempt frames rejected by translation QC, but it does not change their
-acceptance for the existing noise statistics. The overall site still needs
-enough accepted frames for those statistics.
-
-Detector copies use `registration_sigma` and `registration_max_side`; all
-keypoint positions, thresholds, and matrices are converted to native ROI
-pixels. Feature count is capped at `feature_max_keypoints` (1500), distributed
-across the field. Mutual descriptor matching uses `feature_match_ratio` (0.75).
-Multiple orientations at the same keypoint cannot inflate correspondence counts.
-
-Reference locations are partitioned into a 4-by-4 grid. Cells where
-`(column + row) % 3 == 0` are withheld **before** fitting. Affine RANSAC uses
-three non-collinear point pairs per trial, up to 1000 trials, and a fixed
-per-frame seed. Its consensus fit uses only training matches. There is no
-intensity-based refinement or refit on held-out matches. Both training and
-validation inliers must cover at least 25% of each ROI dimension with
-non-collinear, well-conditioned geometry. Requirements include:
-
-- At least `feature_min_inliers` (8) training inliers and 4 validation inliers.
-- At least `feature_min_inlier_fraction` (50%) agreement in each partition.
-- Inlier residuals and validation median at most `feature_residual_px` (1.5 native pixels).
-- Positive determinant, linear-matrix condition number below 4, and estimated
-  overlap of at least `feature_min_overlap` (50%).
-
-These are configurable screening criteria, not a calibrated uncertainty
-estimate. Repeated patterns can still support a wrong transform. Inspect the
-actual matched coordinates, spatial coverage, held-out errors, and differences.
-The 1.5-pixel acceptance threshold is not a claim of subpixel metrology accuracy.
-
-The HTML report lists per-frame rotation, x/y scale changes, shear, center
-offset, and held-out error, with parameter trajectories. Matrices map original
-moving ROI pixel coordinates into the **same fixed native reference**; positive
-rotation is clockwise with x right and y down. The decomposition is
-`A = R(theta) [[sx, shear*sy], [0, sy]]`. This differs from the older tile
-diagnostic's per-frame leave-one-out reference. The identity reference is
-labeled explicitly and excluded from estimated-parameter summaries.
-
-#### Difference images (both estimators)
-
-`diff_examples` (3) chooses moving frames uniformly through acquisition order,
-independently of registration success. Each example displays the reference and
-moving images followed by **no correction**, **translation only**, and
-**validated affine correction** differences. Differences are moving minus
-reference in original DN, without brightness normalization. Translation uses
-the existing saved shifts relative to that same reference; affine uses the
-validated affine matrix. Each mode resamples the original moving frame only
-once with bilinear interpolation. All available differences for a pair share
-the same valid-pixel intersection, color limits, and RMS measurement region.
-Failed transforms are unavailable, never quietly replaced by translation or
-identity. Blank borders are excluded from RMS. Color limits use the pooled
-99th percentile absolute difference; stored arrays remain unclipped.
-
-Affine warps are applied **only to the difference examples**. Native and
-translation-aligned noise statistics and training/preparation remain unchanged.
-Interpolation changes variance and correlation, so reduced difference RMS by
-itself is not evidence of better metrology. Download the entire result folder
-to preserve links to the numerical outputs.
-
-| New artifact | Contents |
-|---|---|
-| `feature_affine.json`, `feature_affine.csv` | Estimator, fixed reference, matrices, per-frame parameters and validation status |
-| `feature_matches.csv` | Native point pairs, training/validation partition, residuals and threshold agreement for fitted candidates |
-| `feature_affine.png` | Validated parameter trajectories, if any estimates pass |
-| `difference_pair_*.png` | Side-by-side raw, translation, and affine difference examples |
-| `difference_examples.json` | Frame IDs, availability, shared color limits and RMS values |
-| `difference_examples.npz` | Reference/moving images, full-resolution signed differences and common masks; invalid difference pixels are NaN |
-
-Feature methods follow the [scikit-image SIFT documentation](https://scikit-image.org/docs/stable/auto_examples/features_detection/plot_sift.html)
-and [affine RANSAC example](https://scikit-image.org/docs/stable/auto_examples/transform/plot_matching.html).
-
-#### Supplementary approximate tile diagnostics
-
-The earlier tile-based estimates remain in a collapsed report section and the
-existing `affine*.csv/json` files. They do not supply the new affine parameters
-or difference warps. Tiles must be
-at least 24-by-24 pixels; use fewer tiles for small ROIs. At least eight usable,
-spatially distributed tiles are needed, so a 3-by-3 grid is the practical minimum.
-`--no-affine-diagnostics` overrides a preset. Without these options, diagnostics
-remain disabled and the established analysis defaults are preserved.
-
-For each sampled frame, the diagnostic fits translation (2 parameters), rigid
-motion (3), similarity (4), and affine motion (6) to local residual shifts.
-Fits use correlation weights and robust residual reweighting. Ambiguous peaks
-(ratio below 1.05), invalid shifts, and nearly one-dimensional texture are
-excluded. The structure-tensor eigenvalue ratio must be at least
-`affine_min_texture_ratio` (default 0.02). This detects the aperture problem,
-but it is not a complete test of registration correctness.
-
-Each tile is held out in turn and predicted from the remaining tiles. A more
-complex model must reduce median held-out displacement error by both
-`affine_min_improvement_px` (0.05 px) and
-`affine_min_relative_improvement` (15%) compared with the current simpler
-candidate. Selected models must also have median error at most
-`affine_max_cv_error_px` (0.5 px) and maximum corner prediction spread over
-tile-deletion fits at most `affine_max_stability_px` (0.25 px). These are
-configurable screening thresholds, not calibrated hypothesis tests. Untrimmed
-held-out RMS is exported too, so outliers are not hidden by the median score.
-Full and held-out tile sets must span at least 25% of each ROI axis and have a
-well-conditioned two-dimensional geometry.
-
-Reports show model-support counts, rotation/scale/shear/center-offset
-trajectories, within-site distributions, held-out error comparisons, and a
-representative local displacement field. Parameter plots use reliable
-full-affine candidates even when a simpler model is selected; small estimates
-are not automatically evidence that affine correction is needed. Failed,
-excluded, unobserved, or unsampled frames are explicitly distinguished from
-zero motion. No dataset-wide geometric fit pools unrelated sites.
-
-The `m00` through `m12` fields form the first two rows of a homogeneous 3-by-3
-matrix, with final row `[0, 0, 1]`. It maps **native ROI pixel centers to each
-frame's leave-one-out translation-aligned mean**, with x right, y down, and
-positive rotation clockwise. Coordinates are ROI-local; add the saved ROI
-origin when interpreting locations in the original image. This is not a
-common anchor specimen shape or absolute stage calibration. Center offsets
-include the original global translation. The decomposition is
-`A = R(theta) [[sx, shear*sy], [0, sy]]`, with positive scales and reported scale
-changes `100*(s-1)` percent. Geometric offsets are separate from brightness
-offsets. Optional nm offsets use the configured pixel calibration.
-
-Tile correspondences approximate **small** motion; local registration searches
-only up to 3 px per axis (or the smaller configured global shift limit).
-Large rotations, strong intra-tile deformation, repetitive features, specimen
-changes, or blurred reference means can invalidate this approximation. Rejected
-global frames are not rescued by affine diagnostics. The reported overlap is
-a 64-by-64 sampling estimate over the ROI, not a loss mask. Tile-deletion
-spreads measure sensitivity, not confidence intervals; shared references make
-tile errors dependent.
-
-These **tile diagnostics** apply no affine warp, change no noise metrics, and do
-not modify training/preparation. Decide whether rigid/similarity/affine
-correction is warranted from the support counts and residuals on real data.
-Scale and shear may absorb real dimensional changes; validate metrology before
-using them as corrections. A translation choice means no sufficiently large
-improvement was detected, not proof of zero rotation.
-
-Additional per-site files:
-
-| Artifact | Contents |
-|---|---|
-| `affine.json` | Convention, per-frame decisions, model fits, full matrices, and distributions |
-| `affine_models.csv` | Parameters, fit and held-out errors, stability, reliability, and selection |
-| `affine_frames.csv` | Every frame's decision or reason it was not assessed |
-| `affine.png` | Motion plots (when reliable affine estimates exist) |
-
-### Standard artifacts
-
 | Artifact | Contents |
 |---|---|
 | `index.html`, `summary.csv`, `summary.json` | Site comparisons, status, and all numerical results |
@@ -466,10 +306,14 @@ Additional per-site files:
 | `input_manifest.json` | Relative paths, acquisition order, metadata, file/pixel hashes |
 | `site_001/report.html`, `*.png` | Offline report and standalone figures |
 | `site_001/summary.json`, `inputs.json` | Site metrics, units/crops, flags, input audit |
-| `site_001/frames.csv`, `registration.csv` | Raw quality, shifts/exclusions, both domains' frame metrics |
-| `site_001/local_registration.csv` | Sampled tile residuals and quality |
+| `site_001/registration.csv` | Pass 2: the eight parameters with standard errors, residual RMS, corner effects, rotation/shear/scale, convergence, brightness means, panel RMS and colour limit, per frame |
+| `site_001/registration_pass1.csv` | The same numbers against the first frame |
+| `site_001/registration.json` | Both passes with the 8×8 covariance per frame, conventions, and the site summary |
+| `site_001/regions.csv` | 4×4 region RMS for before / shift only / full fit, per frame |
+| `site_001/differences/frame_NNNN.png` | Native-resolution three-panel difference image per frame |
+| `site_001/frames.csv` | Raw quality, fit summary columns, both domains' frame metrics |
 | `site_001/native_*.csv`, `aligned_*.csv` | Intensity bins, averaging, temporal/spatial ACF |
-| `site_001/maps.npz` | Numerical means/std, difference maps, masks, spatial PSD |
+| `site_001/maps.npz` | Means/std, early/late maps, masks, spatial PSD, the pass-2 reference mean and its valid mask |
 
 Decoded-content hashes include full image shape and canonical numerical pixels
 before ROI selection. Exact repeated content within a site is excluded after
@@ -480,10 +324,11 @@ all repeats of a site together and inspect cross-site duplicate groups.
 One temporary disk-backed stack is processed at a time, normally
 `frames * height * width * 4` bytes: about 2 GiB at 128×2048×2048. Float64 cache
 values use eight bytes. Scratch is inside the site's output and is closed and
-removed after success or a handled failure. Moment/map buffers still require
-several hundred MiB at 2048², plus filesystem caching. Full-resolution maps are
-not downsampled; bounded samples/crops are used for temporal, distribution,
-spectral, and registration calculations. Disk also holds every site's maps.
+removed after success or a handled failure. The fit holds one frame's design
+matrix in memory (about 0.3 GB at 2048²) and takes a few seconds per frame per
+pass at that size on one core; a 128-frame 2K site runs in roughly half an hour
+plus the difference images. Full-resolution maps are not downsampled; bounded
+samples/crops are used for temporal, distribution and spectral calculations.
 
 PNG (8/16-bit grayscale) is the intended input. Grayscale TIFF/multipage TIFF,
 BMP, JPEG (flagged as lossy), and numeric H×W/T×H×W NPY also work. RGB PNG,
@@ -516,6 +361,6 @@ Noise2Noise pairs or using a repeat mean as a target.
 
 ## References
 
-- [scikit-image registration API](https://scikit-image.org/docs/stable/api/skimage.registration.html): subpixel translation and normalization behavior; this pipeline uses unnormalized correlation on smoothed/tapered copies.
 - [NIST, Handbook of Frequency Stability Analysis](https://www.nist.gov/publications/handbook-frequency-stability-analysis): stability estimators; here the adjacent-block statistic is applied to measured intensity, not oscillator phase.
 - [Foi et al., Practical Poissonian-Gaussian noise modeling and fitting for single-image raw-data (2008)](https://pubmed.ncbi.nlm.nih.gov/18784024/): signal-dependent raw-data noise models. This pipeline instead estimates empirical variance from repeats; the reference does not establish that an SEM PNG export follows that physical model.
+- Huber, *Robust Statistics* (1981): the Huber loss and its 1.345 constant used by the fit.
