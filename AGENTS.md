@@ -58,6 +58,10 @@ imports as standard library, third-party, then local.
 
 ## Architectural Rules
 
+Never overengineer. Always start with a simple solution and build up on it.
+Preserve working baselines and add complexity only to address a demonstrated
+problem in the project's real data.
+
 Respect the flow boundary. `runctl` must not import model code; a pipeline plugs
 in by declaring a `Flow` (spec model, config parser, trainer) and registering a
 `runctl.flows` entry point — `ddim/flow.py` is the worked example and the only

@@ -112,3 +112,30 @@ def test_difference_image_indices_and_layout() -> None:
 
 def test_parameter_names_are_stable() -> None:
     assert PARAMETERS == ("dy_px", "dx_px", "a11", "a12", "a21", "a22", "gain", "offset_dn")
+
+
+def test_low_contrast_noise_exposes_gain_attenuation_in_both_passes() -> None:
+    # Deliberately preserve the specified estimator's limitation: equal true
+    # brightness does not imply gain=1 when the predictor contains noise.
+    rng = np.random.default_rng(91)
+    y, x = np.indices((128, 128))
+    clean = 70 + 2 * np.sin(x / 9) + 2 * np.cos(y / 11)
+    stack = np.stack([clean + rng.normal(0, 12, clean.shape) for _ in range(8)])
+    fit = register_site(stack, np.ones(8, dtype=bool), (None, None), sigma=1, progress=lambda _: None)
+    gain1 = np.median([row["gain"] for i, row in fit["pass1"].items() if i != 0])
+    gain2 = np.median([row["gain"] for row in fit["pass2"].values()])
+    assert 0.1 < gain1 < 0.5
+    assert gain2 < gain1
+    assert np.median([row["offset_dn"] for row in fit["pass2"].values()]) > 40
+
+
+def test_shift_only_panel_does_not_apply_brightness() -> None:
+    from sem_noise.site_registration import frame_differences
+
+    reference = specimen(64)
+    moving = (reference - 20) / 0.8
+    p = np.array([0, 0, 0, 0, 0, 0, 0.8, 20])
+    differences, valid, _, _ = frame_differences(moving, np.zeros(reference.shape, dtype=bool),
+                                               reference, np.ones(reference.shape, dtype=bool), p)
+    np.testing.assert_allclose(differences[0][valid], differences[1][valid], atol=1e-10)
+    np.testing.assert_allclose(differences[2][valid], 0, atol=1e-10)

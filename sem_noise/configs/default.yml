@@ -10,10 +10,10 @@ pixel_size_nm: null
 # Pixels at these bounds are masked out of the registration fit.
 black_level: null
 white_level: null
-# fit: one least-squares fit per frame (dy, dx, four affine terms, gain, offset)
-# on native pixels, both copies blurred by registration_sigma, no search, no
-# gates; every frame is reported with error bars. none: frames taken as aligned.
-registration: fit
+# affine: ECC geometry, then separate two-region target-to-input brightness.
+# Raw inputs stay untouched. See pairs/ and target_pairs.csv in each site.
+# fit: legacy joint eight-parameter estimator. none: frames taken as aligned.
+registration: affine
 registration_sigma: 1.0
 sample_pixels: 8192
 distribution_samples: 100000

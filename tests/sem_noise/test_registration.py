@@ -107,7 +107,7 @@ def test_identity_result_and_shift_only() -> None:
     assert result["corner_max_se"] is None and result["rotation_deg_se"] is None
     parameters = np.array([1.0, -2.0, 0.01, 0.02, 0.03, 0.04, 0.9, 5.0])
     reduced = shift_only(parameters)
-    np.testing.assert_array_equal(reduced, [1.0, -2.0, 0, 0, 0, 0, 0.9, 5.0])
+    np.testing.assert_array_equal(reduced, [1.0, -2.0, 0, 0, 0, 0, 1.0, 0.0])
     np.testing.assert_array_equal(parameters[2:6], [0.01, 0.02, 0.03, 0.04])
 
 
@@ -146,6 +146,13 @@ def test_fit_frame_rejects_unusable_inputs() -> None:
         fit_frame(np.full((32, 32), np.nan), np.ones((32, 32)))
     with pytest.raises(ValueError, match="16x16"):
         fit_frame(np.ones((8, 8)), np.ones((8, 8)))
+    for sigma in (0, -1, np.nan):
+        with pytest.raises(ValueError, match="sigma"):
+            fit_frame(np.ones((32, 32)), np.ones((32, 32)), sigma=sigma)
+    with pytest.raises(ValueError, match="masks must match"):
+        fit_frame(np.ones((32, 32)), np.ones((32, 32)), moving_invalid=np.zeros((31, 32), dtype=bool))
+    with pytest.raises(ValueError, match="fewer than 64"):
+        fit_frame(np.ones((32, 32)), np.ones((32, 32)), moving_invalid=np.ones((32, 32), dtype=bool))
 
 
 def test_constant_images_report_undetermined_error_bars_without_failing() -> None:
@@ -153,3 +160,98 @@ def test_constant_images_report_undetermined_error_bars_without_failing() -> Non
     assert not fit["converged"]
     assert all(np.isnan(fit[f"{key}_se"]) for key in PARAMETERS)
     assert fit["dy_px"] == 0 and fit["gain"] == 1
+
+
+def test_losing_pixels_cannot_by_itself_improve_the_objective() -> None:
+    from sem_noise.registration import _improves_on_common_pixels
+
+    residual = np.r_[np.ones(100), np.full(100, 20.0)]
+    valid = np.ones(200, dtype=bool)
+    cropped = np.arange(200) < 100
+    # A trial with unchanged/worse residuals must not benefit from cropping
+    # away the expensive half of the old objective.
+    assert not _improves_on_common_pixels(residual, valid, residual, cropped, 2.0)
+    assert not _improves_on_common_pixels(residual, valid, residual + 0.1, cropped, 2.0)
+    assert _improves_on_common_pixels(residual, valid, residual * 0.5, cropped, 2.0)
+
+
+def test_rejected_short_steps_are_not_reported_as_converged(monkeypatch) -> None:
+    from sem_noise import registration
+
+    monkeypatch.setattr(registration, "_improves_on_common_pixels", lambda *args: False)
+    ref, mov = noisy_pair(96, 3, 72)
+    result = fit_frame(ref, mov)
+    assert not result["converged"]
+    assert result["termination_reason"] == "line_search_stalled"
+    assert result["dy_px"] == 0
+
+
+def test_mask_covers_actual_gaussian_support_and_ignores_sentinel_values() -> None:
+    from sem_noise.registration import prepare_fit_images
+
+    ref, mov = noisy_pair(96, 3, 17)
+    bad = np.zeros(ref.shape, dtype=bool)
+    bad[40:46, 40:46] = True
+    _, _, ref_bad, _ = prepare_fit_images(ref, mov, 2, bad, bad)
+    assert ref_bad[32, 32] and not ref_bad[31, 32]
+    a, b = mov.copy(), mov.copy()
+    a[bad], b[bad] = 4095, 1e12
+    first = fit_frame(ref, a, moving_invalid=bad)
+    second = fit_frame(ref, b, moving_invalid=bad)
+    for key in PARAMETERS:
+        assert first[key] == second[key]
+
+
+def test_cubic_mask_excludes_diagonal_support() -> None:
+    image = specimen(64)
+    bad = np.zeros(image.shape, dtype=bool)
+    bad[30, 30] = True
+    _, valid = warp(image, np.array([0.2, 0.2, 0, 0, 0, 0, 1, 0]), bad)
+    assert not valid[28, 28]
+    assert valid[24, 24]
+
+
+def test_corner_magnitude_error_includes_cross_covariance() -> None:
+    from sem_noise.registration import corner_effects
+
+    p = np.array([0, 0, 0.02, 0, 0.03, 0, 1, 0], dtype=float)
+    covariance = np.zeros((8, 8))
+    covariance[2, 2] = covariance[4, 4] = 1e-4
+    covariance[2, 4] = covariance[4, 2] = 0.8e-4
+    result = corner_effects(p, covariance, (64, 64))
+    gradient = np.zeros(8)
+    magnitude = np.hypot(p[2], p[4])
+    gradient[2], gradient[4] = 31.5 * p[2] / magnitude, 31.5 * p[4] / magnitude
+    assert result["corner_bottom_right_se"] == pytest.approx(np.sqrt(gradient @ covariance @ gradient))
+
+
+def test_report_pixels_reproduce_final_fit_residual_and_mask() -> None:
+    from sem_noise.registration import fit_pixel_diagnostics, parameter_vector
+
+    ref, mov = noisy_pair(96, 3, 9)
+    bad = np.zeros(ref.shape, dtype=bool)
+    bad[20:25, 40:45] = True
+    mov[bad] = 4095
+    row = fit_frame(ref, mov, moving_invalid=bad)
+    pixels = fit_pixel_diagnostics(ref, mov, parameter_vector(row), moving_invalid=bad)
+    valid = pixels["fit_valid"]
+    assert valid.sum() == row["valid_pixels"]
+    assert np.sqrt(np.mean(pixels["fit_residual"][valid] ** 2)) == pytest.approx(row["residual_rms_dn"], abs=1e-10)
+    assert np.mean(pixels["huber_weights"][valid] < 1) == pytest.approx(row["downweighted_fraction"])
+
+
+def test_correlation_area_matches_nonperiodic_direct_calculation() -> None:
+    rng = np.random.default_rng(99)
+    residual = ndimage.gaussian_filter(rng.normal(size=(16, 19)), 1)
+    valid = np.ones(residual.shape, dtype=bool)
+    valid[:3, :4] = False
+    z = residual - residual[valid].mean()
+    variance = np.mean(z[valid] ** 2)
+    area = 0
+    for dy in range(-8, 9):
+        for dx in range(-8, 9):
+            a = (slice(max(0, dy), min(16, 16 + dy)), slice(max(0, dx), min(19, 19 + dx)))
+            b = (slice(max(0, -dy), min(16, 16 - dy)), slice(max(0, -dx), min(19, 19 - dx)))
+            both = valid[a] & valid[b]
+            area += np.mean((z[a] * z[b])[both]) / variance
+    assert _correlation_area(residual, valid) == pytest.approx(max(1, area))

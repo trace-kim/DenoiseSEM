@@ -5,12 +5,13 @@ Defaults assume 128 acquisitions per site, with independent results for each
 of 15–30 sites. This package imports none of the training packages and requires
 no GPU. Input images are read only; results go into a new output directory.
 
-Every site gets **one least-squares fit per frame** against a fixed reference:
-translation, four affine terms, gain and offset, each reported with its
-standard error, plus three native-resolution difference images and a 4×4
-region residual table per frame. The pipeline decides nothing; a reader sees
-whether a drift, rotation, shear or brightness change is real by comparing
-the number with its error bar and looking at the residual image.
+The default **target-to-input diagnostic** measures translation and affine
+geometry separately from brightness. For each included raw input A, another
+noisy frame B is sampled into A's coordinates and matched to A's brightness
+using two corresponding region means. A stays untouched. The report shows
+the regions, actual means, intermediate images, four native-resolution
+difference panels, and 4×4 residual tables. The old joint eight-parameter fit
+is available explicitly with `--registration fit` for comparison.
 
 ## Start with the PNG data
 
@@ -106,7 +107,87 @@ Retain voltage/current, detector, dwell time, frame time, scan direction, pixel
 size, working distance, and any automatic contrast/filtering/averaging settings.
 These can explain differences between otherwise comparable datasets.
 
-## The registration fit
+## Default: raw target-to-input matching
+
+```powershell
+python -m sem_noise analyze --input data/sem-real --output output/sem-pairs-01 --registration affine
+```
+
+Install `.[analysis]` in the environment running the analysis. This path uses
+`opencv-python-headless>=4.14` for ECC with separate reference and moving masks;
+no desktop OpenCV windows or GPU are needed.
+
+1. Fit translation against the first included frame using ECC on 1-pixel
+   blurred copies. Each translation starts from the last successful estimate.
+   Refine with full affine ECC, initialized by that frame's translation.
+   Affine includes translation; it is applied as one transform, not two warps.
+   The unit function also supports direct affine fitting from identity.
+2. Build a geometry-only mean to choose shared physical brightness regions.
+   Select its blurred lower and upper intensity quartiles once per site;
+   blue/low and orange/high masks are displayed and saved. This mean is a
+   region-selection aid, not a replacement target. It has no fitted brightness
+   correction. Clipped pixels and interpolation/blur support are excluded.
+3. Diagnose one target per input, half the included burst away cyclically.
+   If stored sampling matrices map reference coordinates to raw frames, the
+   matrix sampling B onto A is `W_B @ inverse(W_A)` in homogeneous coordinates.
+   Warp the original B once. Move only the region labels into A's coordinates;
+   never resample A.
+4. Measure low/high means in native DN from raw A and affine-aligned B on
+   exactly the same valid region pixels. Compute
+   `g = (high_A - low_A) / (high_B - low_B)` and
+   `b = low_A - g * low_B`. The answer for this pair is `g * warped_B + b`.
+   No pixelwise brightness regression, clipping, or quantization is applied.
+
+Both images in these pairs are noisy acquisitions. Means over corresponding
+regions reduce the influence of independent pixel noise. The method assumes
+the selected regions describe stable content and a global linear brightness
+change. Close region means make gain sensitive to noise; inspect the reported
+means and masks. A zero target-region contrast cannot determine gain and is
+reported as a failure, not replaced with gain 1. A failed geometry estimate
+likewise remains visible, and no correction PNG is fabricated for that pair.
+If only the translation comparison fails, successful affine/brightness results
+are still reported; the translation panel is grey and its RMS is blank.
+ECC scores are correlations, not standard errors or guarantees of the right
+alignment. Numerical parameter error bars are not claimed for this method.
+
+The native/aligned **noise statistics still use translations only**, with no
+gain/offset correction. If translation fails, the affected frame remains
+unshifted in those statistics and the report warns explicitly. No frame is
+dropped merely because its geometric or brightness estimate failed.
+
+Every pair has a row in `target_pairs.csv`, and each successful pair has four
+native-resolution difference panels on one shared colour scale: before,
+translation only, affine only, and affine plus brightness, all minus fixed A.
+`pair_regions.csv` gives a 4×4 RMS table for each panel. Example pairs also show
+raw/blurred images and the line through the two measured brightness points.
+The pixel cloud behind that line is explanatory; it is not fitted.
+
+| New artifact | Contents |
+|---|---|
+| `geometry.csv` | Translation, affine sampling matrices, ECC scores, corner effects, failure reasons |
+| `target_pairs.csv` | Input/target indices, pair matrix, both region means/counts, target-to-input gain/offset, residual RMS, image links |
+| `pair_registration.json` | Geometry and pair measurements with method/selection conventions |
+| `pair_regions.csv` | Native difference RMS in each 4×4 region |
+| `pairs/brightness_regions.npz` | Geometry-only mean, common validity and fixed low/high labels |
+| `pairs/input_NNNN_target_MMMM_differences.png` | Four native panels for that pair |
+| `pairs/input_NNNN_target_MMMM.npz` | Example original input/target, actual blurred copies, corrected targets, labels, masks and matrix |
+
+Reusable functions live in `sem_noise/pair_matching.py`: `estimate_geometry`,
+`pair_transform`, `warp_target`, `select_brightness_regions`, `regions_on_input`,
+`measure_brightness`, and `match_target`. `match_target` returns aligned and
+brightness-matched targets and validity; it never writes into the input arrays.
+Pass its regions on the input grid, and pass actual clipping masks when known.
+
+This implements diagnosis and reusable matching units. Training still uses
+the existing `RealPairFactory`; it does not automatically consume these files.
+In particular, this change does not modify training inputs or silently change
+the consistency loss. The reference/target distinction and pair direction are
+the same ones that future training integration must preserve.
+
+## Legacy joint registration (`--registration fit`)
+
+The following sections describe the retained older mode. It is not the default
+and its gain bias is the reason the separate region method was added.
 
 ### What is fitted
 
@@ -125,10 +206,17 @@ frame, i.e. its drift), the four affine terms `a11 a12 a21 a22`
 (dimensionless; their effect is reported as the displacement they add at the
 four ROI corners, in pixels), `gain` and `offset`. The loss is Huber
 (scale 1.345 × the residual's median absolute deviation, re-estimated each
-iteration); pixels at the clipping bounds, and a 2-px neighbourhood the blur
-contaminates, are masked. Gauss–Newton with backtracking runs until every
+iteration); pixels at the clipping bounds, the full Gaussian support
+(round(4 × sigma) pixels), and the cubic interpolation support are masked.
+Masked values are extended from the nearest valid pixel before filtering so
+clipping sentinels cannot leak through the global spline prefilter. These
+filled values never become fit observations. Gauss–Newton with backtracking runs until every
 geometric step is below 0.001 px (at most 40 iterations); a frame that does not
 reach that is marked `converged = false` and reported as it stands.
+`termination_reason` distinguishes the iteration limit, a stalled line search,
+a singular system, and the actual step tolerance. Backtracking compares the
+Huber loss on the same overlapping pixels for both parameter vectors; a tiny
+rejected/backtracked step does not establish convergence.
 
 Two passes:
 
@@ -139,12 +227,33 @@ Two passes:
    by every frame). Every frame, including the first, is fitted against it.
    **Pass 2 is the reported result**; pass 1 is saved for comparison.
 
-The mean includes the frame being fitted (1/N of it), which slightly favours
-the pass-1 solution; with the default frame counts this is negligible.
+The mean includes the frame being fitted (1/N of it), which favours the pass-1
+solution and correlates reference noise with the moving frame. Its importance
+depends on frame count, contrast, and noise; it is not generally negligible.
+
+### Gain attenuation: a limitation of the specified estimator
+
+The fit minimizes `gain * moving + offset - reference`. Moving intensities
+are noisy predictors: reducing gain suppresses their noise as well as their
+contrast. With correctly aligned independent images, ordinary least squares
+approximately gives `gain = true_gain * signal_variance /
+(signal_variance + moving_noise_variance)`, using the blurred-image variances.
+Huber weighting does not remove this errors-in-variables bias. The offset
+then compensates toward the reference mean. Building the pass-2 reference
+from contrast-suppressed pass-1 images can compound the effect.
+
+A synthetic equal-brightness case (mean about 70 DN, weak sinusoidal structure,
+12 DN independent frame noise) reproduces gains near 0.3 in pass 1 and still
+lower gains in pass 2. Such fits can converge and have small conditional error
+bars. Low gain is not by itself evidence of detector/brightness drift.
+The estimator is intentionally preserved: no gain clamp, brightness gate or
+noise-model assumption is added. See [the audit](docs/registration_audit.md) and
+the report pixel-pair plots. An errors-in-variables estimator would be a
+separate methodological change requiring a noise model.
 
 ### Error bars
 
-Each parameter's standard error is the weighted least-squares covariance of the
+Each parameter's standard error is an approximate weighted least-squares covariance of the
 fit, `σ̂² (JᵀWJ)⁻¹`, scaled by the frame's **residual correlation area**: the
 sum of the normalized residual autocorrelation over ±8 px lags. The 1-px blur
 alone makes that area about 12.6 px² for white noise (`4πσ²`), so an
@@ -155,7 +264,8 @@ scan-line noise that is coherent along a whole row, is not captured, so the
 error bar on `dy` is optimistic on such data. Corner displacements, rotation
 `(a21 − a12)/2`, shear `(a12 + a21)/2` and scale changes carry linearly
 propagated errors. These describe the fit on the two images at hand, not
-calibrated stage motion.
+calibrated stage motion. They do not include gain attenuation, uncertainty in
+the pass-1 reference construction, or error from a wrong local minimum.
 
 ### Difference images and region tables
 
@@ -164,11 +274,12 @@ three panels side by side, in original DN on one shared symmetric colour
 scale:
 
 1. **before correction** — frame minus reference;
-2. **shift only** — the same fit with its four affine terms set to zero (centre
-   translation, gain and offset kept), minus reference;
+2. **shift only** — centre translation only, with gain 1 and offset 0, minus
+   reference;
 3. **full fit** — all eight parameters, minus reference.
 
-The last two therefore differ only by the affine terms. All three use one
+The full fit adds affine and brightness corrections. Intermediate examples
+separate their effects with an additional affine-only panel. All three use one
 pixel set (inside both footprints, covered by the mean, not touching clipped
 values; grey elsewhere) and one limit, the 99th percentile of the uncorrected
 absolute difference, printed in the caption and in `registration.csv`
@@ -187,9 +298,26 @@ the reference mean on those pixels. A flat after-track is the fitted outcome,
 not independent proof: the residual images show what a global gain and offset
 cannot explain.
 
+### Intermediate examples
+
+The report shows the first included frame, the lowest-gain frame, and the frame
+with the largest affine corner displacement (duplicates appear once). Each has
+original, blurred, reference, shift-only, affine-only, and fully corrected
+images, with shared grayscale limits. Four matched-scale difference panels
+isolate the geometric and brightness changes.
+
+The brightness plots use every final valid fit pixel: x is the geometrically
+warped blurred moving intensity and y the blurred reference intensity. The
+line is the saved joint fit, not a second regression. Density, final Huber
+weights, and residual-versus-intensity panels expose noise and downweighting.
+Binning is for display only. `intermediates/frame_NNNN.npz` preserves native
+arrays, masks, weights and the eight parameters; adjacent PNGs are standalone
+figures. These examples add storage proportional to up to three native frames
+and their intermediate arrays.
+
 ### The noise statistics stay translation-based
 
-`--registration fit` (default) applies only the fitted **centre shift** to the
+`--registration fit` applies only the fitted **centre shift** to the
 noise statistics; `--registration none` takes frames as aligned and skips the
 fit, the difference images and the brightness track. No affine warp and no
 gain/offset ever enter the native/aligned noise statistics, because a warp
@@ -299,6 +427,9 @@ the IID reference. Residual specimen/motion energy can contribute to spectra.
 
 ## Output and resource use
 
+The default affine mode adds the pair artifacts listed above. Files marked
+`fit` below belong only to the legacy joint-fit mode.
+
 | Artifact | Contents |
 |---|---|
 | `index.html`, `summary.csv`, `summary.json` | Site comparisons, status, and all numerical results |
@@ -306,14 +437,14 @@ the IID reference. Residual specimen/motion energy can contribute to spectra.
 | `input_manifest.json` | Relative paths, acquisition order, metadata, file/pixel hashes |
 | `site_001/report.html`, `*.png` | Offline report and standalone figures |
 | `site_001/summary.json`, `inputs.json` | Site metrics, units/crops, flags, input audit |
-| `site_001/registration.csv` | Pass 2: the eight parameters with standard errors, residual RMS, corner effects, rotation/shear/scale, convergence, brightness means, panel RMS and colour limit, per frame |
-| `site_001/registration_pass1.csv` | The same numbers against the first frame |
-| `site_001/registration.json` | Both passes with the 8×8 covariance per frame, conventions, and the site summary |
-| `site_001/regions.csv` | 4×4 region RMS for before / shift only / full fit, per frame |
-| `site_001/differences/frame_NNNN.png` | Native-resolution three-panel difference image per frame |
-| `site_001/frames.csv` | Raw quality, fit summary columns, both domains' frame metrics |
+| `site_001/registration.csv` (`fit`) | Pass 2: the eight parameters with standard errors, residual RMS, corner effects, rotation/shear/scale, convergence, brightness means, panel RMS and colour limit, per frame |
+| `site_001/registration_pass1.csv` (`fit`) | The same numbers against the first frame |
+| `site_001/registration.json` (`fit`) | Both passes with the 8×8 covariance per frame, conventions, and the site summary |
+| `site_001/regions.csv` (`fit`) | 4×4 region RMS for before / shift only / full fit, per frame |
+| `site_001/differences/frame_NNNN.png` (`fit`) | Native-resolution three-panel difference image per frame |
+| `site_001/frames.csv` | Raw quality, registration summary columns, both domains' frame metrics |
 | `site_001/native_*.csv`, `aligned_*.csv` | Intensity bins, averaging, temporal/spatial ACF |
-| `site_001/maps.npz` | Means/std, early/late maps, masks, spatial PSD, the pass-2 reference mean and its valid mask |
+| `site_001/maps.npz` | Means/std, early/late maps, masks, spatial PSD, plus the geometry-only mean/regions (`affine`) or pass-2 reference (`fit`) |
 
 Decoded-content hashes include full image shape and canonical numerical pixels
 before ROI selection. Exact repeated content within a site is excluded after
@@ -324,7 +455,10 @@ all repeats of a site together and inspect cross-site duplicate groups.
 One temporary disk-backed stack is processed at a time, normally
 `frames * height * width * 4` bytes: about 2 GiB at 128×2048×2048. Float64 cache
 values use eight bytes. Scratch is inside the site's output and is closed and
-removed after success or a handled failure. The fit holds one frame's design
+removed after success or a handled failure. Registration processes one frame
+at a time; pair diagnostics save full-resolution difference images for every
+included input and intermediate arrays for three example inputs.
+The legacy joint fit holds one frame's design
 matrix in memory (about 0.3 GB at 2048²) and takes a few seconds per frame per
 pass at that size on one core; a 128-frame 2K site runs in roughly half an hour
 plus the difference images. Full-resolution maps are not downsampled; bounded

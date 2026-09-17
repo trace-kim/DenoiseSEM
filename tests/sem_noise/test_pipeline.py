@@ -155,7 +155,7 @@ def test_flat_frames_complete_with_undetermined_error_bars(tmp_path: Path, monke
     for i, path in enumerate(paths):
         Image.fromarray(np.full((48, 48), 500 + i, dtype=np.uint16)).save(path)
     output = tmp_path / "result"
-    result = analyze_dataset(source, output, config=AnalysisConfig(expected_frames=8))
+    result = analyze_dataset(source, output, config=AnalysisConfig(registration="fit", expected_frames=8))
     site = result["sites"][0]
     assert site["status"] == "complete"
     assert site["accepted_frames"] == 8
@@ -178,7 +178,7 @@ def test_fit_pipeline_writes_every_frame(tmp_path: Path) -> None:
     source = tmp_path / "repeats.npy"
     np.save(source, stack.astype(np.float32))
     config = tmp_path / "config.yml"
-    config.write_text("min_frames: 4\nexpected_frames: 6\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n",
+    config.write_text("registration: fit\nmin_frames: 4\nexpected_frames: 6\nsample_pixels: 500\ndistribution_samples: 3000\nspatial_pairs: 2\n",
                       encoding="utf-8")
     output = tmp_path / "fit"
     assert main(["analyze", "--input", str(source), "--output", str(output), "--config", str(config)]) == 0
@@ -199,6 +199,23 @@ def test_fit_pipeline_writes_every_frame(tmp_path: Path) -> None:
     html = (site / "report.html").read_text(encoding="utf-8")
     assert "Registration fit: one least-squares fit per frame" in html
     assert "Difference images for every frame" in html
+    assert "Brightness bias:" in html
+    assert "Intermediate examples: geometry and brightness" in html
+    assert "Affine effect at all four corners" in html
+    examples = sorted((site / "intermediates").glob("*.npz"))
+    assert 1 <= len(examples) <= 3
+    for example in examples:
+        index = int(example.stem.split("_")[-1])
+        row = saved["pass2"][index]
+        with np.load(example) as arrays:
+            assert arrays["original"].shape == (96, 96)
+            valid = arrays["fit_valid"]
+            assert valid.sum() == row["valid_pixels"]
+            assert np.sqrt(np.mean(arrays["fit_residual"][valid] ** 2)) == pytest.approx(row["residual_rms_dn"])
+            np.testing.assert_allclose(arrays["full_corrected"], row["gain"] * arrays["affine_corrected"] + row["offset_dn"])
+        for suffix in ("images", "differences", "brightness_fit"):
+            with Image.open(example.with_name(f"{example.stem}_{suffix}.png")) as image:
+                assert image.width > 1000 and image.height > 300
     assert 'src="differences/frame_0003.png"' in html
     assert "unavailable" not in html.lower()
     assert "Max corner effect" in (output / "index.html").read_text(encoding="utf-8")

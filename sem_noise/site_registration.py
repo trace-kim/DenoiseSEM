@@ -39,8 +39,9 @@ def difference_image(differences: list[np.ndarray], valid: np.ndarray, limit: fl
     gap = np.full((valid.shape[0], PANEL_GAP_PX), INVALID_INDEX, dtype=np.uint8)
     panels = []
     for delta in differences:
-        index = np.clip(np.rint(127 + 127 * np.where(valid, delta, 0) / limit), 0, 254).astype(np.uint8)
-        index[~valid] = INVALID_INDEX
+        panel_valid = valid & np.isfinite(delta)
+        index = np.clip(np.rint(127 + 127 * np.where(panel_valid, delta, 0) / limit), 0, 254).astype(np.uint8)
+        index[~panel_valid] = INVALID_INDEX
         panels.extend((index, gap))
     return np.hstack(panels[:-1])
 
@@ -75,9 +76,8 @@ def frame_differences(frame: np.ndarray, bad: np.ndarray, mean: np.ndarray, mean
                       parameters: np.ndarray) -> tuple[list[np.ndarray], np.ndarray, float, dict]:
     """Frame minus reference before correction, after the shift alone, after the full fit.
 
-    "Shift alone" is the same fit with its four affine terms set to zero: the
-    centre translation, gain and offset are kept so the last two panels differ
-    only by the affine terms. All three panels use one pixel set and one scale.
+    "Shift alone" applies only the centre translation, with unit gain and zero
+    offset. All three panels use one pixel set and one scale.
     """
     shifted, valid_shift = warp(frame, shift_only(parameters), bad)
     full, valid_full = warp(frame, parameters, bad)
@@ -195,8 +195,9 @@ def registration_summary(rows: list[dict], pass1_rows: list[dict], anchor_index:
         "convention": "corrected(x, y) = gain * frame(x + dx + a11 u + a12 v, y + dy + a21 u + a22 v) + offset, "
                       "u and v measured from the ROI centre, x right, y down; (dy, dx) is where the reference "
                       "centre's content sits in the frame (its drift); positive rotation is clockwise",
-        "standard_errors": "weighted least-squares covariance of the fit, scaled by the measured residual "
-                           "correlation area; they describe the fit on these two images, not calibrated motion",
+        "standard_errors": "approximate weighted least-squares covariance of the fit, scaled by the measured residual "
+                           "correlation area; conditional on the constructed reference, without accounting for "
+                           "errors-in-variables bias, reference uncertainty, or local-minimum error",
         "max_drift_px": float(np.max(np.linalg.norm(drift, axis=1))),
         "drift_step_rms_px": float(np.sqrt(np.mean(np.sum(steps ** 2, axis=1)))) if len(steps) else None,
         "max_corner_effect_px": float(np.max(corner)),

@@ -19,7 +19,7 @@ class AnalysisConfig:
     pixel_size_nm: float | None = None
     black_level: float | None = None
     white_level: float | None = None
-    registration: str = "fit"          # "fit": the eight-parameter fit per frame; "none": frames taken as aligned
+    registration: str = "affine"       # separate ECC geometry and target-to-input region brightness; fit: legacy joint fit
     registration_sigma: float = 1.0    # light blur (px) of both copies before the fit
     sample_pixels: int = 8192
     distribution_samples: int = 100000
@@ -57,8 +57,8 @@ class AnalysisConfig:
         if self.black_level is not None and self.white_level is not None:
             if self.black_level >= self.white_level:
                 raise ValueError("black_level must be below white_level")
-        if self.registration not in {"fit", "none"}:
-            raise ValueError("registration must be fit or none")
+        if self.registration not in {"affine", "fit", "none"}:
+            raise ValueError("registration must be affine, fit or none")
         if self.roi is not None:
             if len(self.roi) != 4 or any(type(v) is not int for v in self.roi):
                 raise ValueError("roi must contain four integers: y0, y1, x0, x1")

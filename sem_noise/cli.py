@@ -52,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--frame-interval-s", type=float)
     analyze.add_argument("--pixel-size-nm", type=float)
     analyze.add_argument("--roi", nargs=4, type=int, metavar=("Y0", "Y1", "X0", "X1"))
-    analyze.add_argument("--registration", choices=["fit", "none"],
-                         help="fit: one translation+affine+gain+offset fit per frame (default); none: frames taken as aligned")
+    analyze.add_argument("--registration", choices=["affine", "fit", "none"],
+                         help="affine: ECC geometry and target-to-input brightness (default); fit: legacy joint fit; none: skip registration")
     demo = commands.add_parser("demo", help="Generate three synthetic PNG sites with known noise and drift")
     demo.add_argument("--output", required=True, type=Path)
     demo.add_argument("--frames", type=int, default=128)
