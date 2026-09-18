@@ -242,3 +242,11 @@ def test_preview_rejects_missing_source_index(tmp_path: Path) -> None:
         _generate(tmp_path)
     with pytest.raises(FileNotFoundError, match="no clean image for source 9"):
         make_preview_grid(tmp_path / "out", source_index=9, out_path=tmp_path / "p.png")
+
+
+def test_ddim_latent_noise_type_is_rejected_before_anything_is_written(tmp_path: Path) -> None:
+    # ``ddim`` attenuates the signal (E[x_t | x0] = sqrt(alpha_bar) * x0), so burst averaging
+    # would converge to the wrong limit; the generator refuses it before writing output.
+    with pytest.raises(ValueError, match="not an observation model"):
+        _generate(tmp_path, noise_type=["poisson", "DDIM"])
+    assert not (tmp_path / "out").exists()

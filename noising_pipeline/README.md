@@ -94,6 +94,46 @@ Defaults, applied per step, are:
 | `gaussian` | `mean=0.0`, `std=0.01` |
 | `poisson` | `peak=10000` |
 | `salt_pepper` | `amount=0.001`, `salt_ratio=0.5` |
+| `ddim` | `beta_schedule="linear"`, `beta_start=0.0001`, `beta_end=0.02`, `num_diffusion_timesteps=1000` |
+
+### DDIM forward process (`ddim`)
+
+The three distributions above are observation models: the signal is never
+attenuated, so averaging replicas converges to the clean image. `ddim` is
+different in kind. It reproduces the DDPM/DDIM forward process `q(x_t | x_0)`
+used to train diffusion models (Ho et al. 2020; Song, Meng & Ermon 2021):
+
+```text
+x0  = 2 * observation - 1                                  # DDIM's "rescaled" transform
+x_t = sqrt(alpha_bar_t) * x0 + sqrt(1 - alpha_bar_t) * eps,   eps ~ N(0, I)
+alpha_bar_t = prod_{i = 1..t} (1 - beta_i)
+```
+
+- `steps` is the timestep `t`: the number of betas applied, with
+  `1 <= t <= num_diffusion_timesteps`. `steps=k` corresponds to index `k - 1`
+  of DDIM's 0-based timestep tensor.
+- `beta_schedule` (`linear`, `quad`, `const`, `jsd`, `sigmoid`), `beta_start`,
+  `beta_end` and `num_diffusion_timesteps` follow DDIM's `get_beta_schedule`
+  term for term. The defaults are Ho et al.'s; this repository's SEM DDIM
+  configs use `beta_start=0.001`, `beta_end=0.2`, `num_diffusion_timesteps=100`.
+- Fused mode draws the marginal once. Iterative mode walks the Markov kernel
+  `x_i = sqrt(1 - beta_i) * x_{i-1} + sqrt(beta_i) * eps_i` for `i = 1..t`,
+  which composes to the same marginal. Neither mode clips.
+- The output is a float32 `.npy` file, not a PNG: `x_t` is unbounded (at
+  `t = T` it is close to `N(0, I)`), and clipping or 8-bit rounding would change
+  the distribution. The clean target is still a lossless PNG.
+- `ddim` must be the last entry of `noise_type` and may appear once. In a
+  sequence such as `["poisson", "ddim"]` the observation types run first with
+  their usual fusion over `steps`, and `ddim` is applied once to the finished,
+  clipped observation with `t = steps`.
+- The manifest row records `effective_noise_params.ddim` with `t` and
+  `alpha_bar`, so the exact noise realisation is recoverable:
+  `eps = (x_t - sqrt(alpha_bar) * x0) / sqrt(1 - alpha_bar)` with
+  `x0 = 2 * clean / scale - 1`.
+
+The match with a PyTorch DDIM run is algebraic and distributional, not bitwise:
+NumPy's generator draws the normals. `ddim` is not an observation model, so
+`burst_diffusion generate` rejects it.
 
 ### Fast step fusion
 
@@ -105,6 +145,7 @@ parameters are combined before processing:
 | Gaussian | `mean * s`, `std * sqrt(s)` |
 | Poisson | `peak / s` |
 | Salt-and-pepper | `amount = 1 - (1 - amount) ** s` |
+| DDIM | `alpha_bar_t = prod_{i = 1..t} (1 - beta_i)` with `t = s`; iterative mode walks the `t` kernels instead |
 
 These preserve accumulated Gaussian mean/variance, accumulated Poisson
 mean/variance, and cumulative salt-and-pepper replacement probability. Because
@@ -158,7 +199,7 @@ Only clean targets and final noisy states are saved:
 ```text
 paired/
   clean/00000.png
-  noisy/00000_00000.png
+  noisy/00000_00000.png    # or noisy/00000_00000.npy when noise_type ends with "ddim"
   manifest.jsonl
 ```
 
@@ -166,8 +207,11 @@ There is one JSON object per noisy image. Each row has `clean_path`,
 `noisy_path`, `source_path`, `source_index`, `replica_index`, `shape`,
 `bit_depth`, ordered `noise_types`, per-step `noise_params`,
 `effective_noise_params`, `step_mode`, `steps`, the derived `sample_seed`,
-`dataset`, and `license`. Paths in the manifest are relative and use forward
-slashes. Local data is identified as `dataset="local"`; its license is the
+`dataset`, `license`, and `noisy_encoding`. The last says how the stored noisy
+file maps back to the normalized signal: `dtype`, `scale` (divide stored values
+by it), `signal_range` (`[0, 1]` for PNGs, `[-1, 1]` for `ddim` latents) and
+`clipped` (`true` for PNGs, `false` for latents). Paths in the manifest are
+relative and use forward slashes. Local data is identified as `dataset="local"`; its license is the
 supplied `source_license` or JSON `null`. Downloaded data is identified as
 `dataset="BBBC038v1-stage1-train"` with `license="CC0"`.
 

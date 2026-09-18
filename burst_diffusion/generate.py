@@ -362,6 +362,13 @@ def generate_burst_dataset(
         raise ValueError(f"replicas must be >= 1, got {replicas}")
     if not 0.0 <= margin < 0.5:
         raise ValueError(f"margin must be in [0, 0.5), got {margin}")
+    requested_types = [noise_type] if isinstance(noise_type, str) else list(noise_type)
+    if any(str(name).strip().casefold() == "ddim" for name in requested_types):
+        raise ValueError(
+            "noise_type 'ddim' is the DDPM latent corruption, not an observation model: "
+            "it attenuates the signal (E[x_t | x0] = sqrt(alpha_bar) * x0), so burst "
+            "averaging cannot recover the clean image; use gaussian or poisson"
+        )
     source_root = Path(source_dir)
     output_root = Path(output_dir)
     _guard_output_dir(output_root, source_root)

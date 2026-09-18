@@ -29,11 +29,29 @@ BBBC038_IMAGE_COUNT = 670
 
 _BBBC038_ARCHIVE_NAME = ".BBBC038v1-stage1_train.zip"
 _SUPPORTED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
-_NOISE_DEFAULTS: dict[str, dict[str, float]] = {
+NoiseParams = dict[str, float | int | str]
+
+# Parameter types are inferred from these defaults: a ``str`` default takes a
+# string, an ``int`` default an integer (integral floats are accepted), and a
+# ``float`` default any finite real number.
+_NOISE_DEFAULTS: dict[str, NoiseParams] = {
     "gaussian": {"mean": 0.0, "std": 0.01},
     "poisson": {"peak": 10000.0},
     "salt_pepper": {"amount": 0.001, "salt_ratio": 0.5},
+    # DDPM/DDIM forward process q(x_t | x_0) with Ho et al. (2020) defaults;
+    # ``steps`` is the timestep ``t`` (the number of betas applied).
+    "ddim": {
+        "beta_schedule": "linear",
+        "beta_start": 0.0001,
+        "beta_end": 0.02,
+        "num_diffusion_timesteps": 1000,
+    },
 }
+# Mirrors ``ddim.runners.diffusion.get_beta_schedule`` without importing it.
+_DDIM_BETA_SCHEDULES = ("linear", "quad", "const", "jsd", "sigmoid")
+# The one noise type that leaves the [0, 1] observation domain. It is applied
+# once, last, to the finished observation, and its output is stored as float32.
+_LATENT_NOISE_TYPE = "ddim"
 
 
 class _ProgressReporter:
@@ -124,7 +142,7 @@ def create_noisy_dataset(
     *,
     download: Literal["bbbc038"] | None = None,
     seed: int = 0,
-    noise_params: Mapping[str, Mapping[str, float]] | None = None,
+    noise_params: Mapping[str, Mapping[str, float | str]] | None = None,
     source_license: str | None = None,
     overwrite: bool | None = None,
     step_mode: Literal["fused", "iterative"] = "fused",
@@ -144,6 +162,13 @@ def create_noisy_dataset(
     prompting. The output must not contain, or be contained by, ``source_dir``.
     When ``download`` is ``"bbbc038"``, a verified copy of BBBC038v1 is
     downloaded to (or reused from) ``source_dir``.
+
+    The ``"ddim"`` noise type is the DDPM/DDIM forward process rather than an
+    observation model: the finished ``[0, 1]`` observation is mapped to
+    ``x0 = 2 * observation - 1`` and corrupted to timestep ``t = steps`` as
+    ``sqrt(alpha_bar_t) * x0 + sqrt(1 - alpha_bar_t) * eps``. It must come last
+    in ``noise_type``; its output is never clipped and is stored as a float32
+    ``.npy`` file whose manifest row records ``alpha_bar_t``.
     """
 
     replica_count = _positive_integer(n, "n")
@@ -226,8 +251,8 @@ def _generate_dataset(
     replica_count: int,
     step_count: int,
     noise_types: Sequence[str],
-    resolved_params: Mapping[str, Mapping[str, float]],
-    effective_params: Mapping[str, Mapping[str, float]],
+    resolved_params: Mapping[str, Mapping[str, float | int | str]],
+    effective_params: Mapping[str, Mapping[str, float | int | str]],
     base_seed: int,
     dataset: str,
     license_name: str | None,
@@ -240,6 +265,10 @@ def _generate_dataset(
     clean_dir.mkdir()
     noisy_dir.mkdir()
     manifest_path = output_path / "manifest.jsonl"
+    observation_types = tuple(
+        name for name in noise_types if name != _LATENT_NOISE_TYPE
+    )
+    latent_params = effective_params.get(_LATENT_NOISE_TYPE)
     reporter = _ProgressReporter(
         enabled=progress,
         source_count=len(source_files),
@@ -278,7 +307,7 @@ def _generate_dataset(
 
                     if step_mode == "iterative":
                         for _ in range(step_count):
-                            for selected_noise in noise_types:
+                            for selected_noise in observation_types:
                                 noisy = _apply_noise(
                                     noisy,
                                     selected_noise,
@@ -289,7 +318,7 @@ def _generate_dataset(
                                     np.float32, copy=False
                                 )
                     else:
-                        for selected_noise in noise_types:
+                        for selected_noise in observation_types:
                             noisy = _apply_noise(
                                 noisy,
                                 selected_noise,
@@ -300,13 +329,27 @@ def _generate_dataset(
                                 np.float32, copy=False
                             )
 
-                    noisy_name = f"{source_index:05d}_{replica_index:05d}.png"
+                    if latent_params is None:
+                        noisy_name = f"{source_index:05d}_{replica_index:05d}.png"
+                        _save_png(
+                            _denormalize_image(noisy, bit_depth),
+                            bit_depth,
+                            noisy_dir / noisy_name,
+                        )
+                        encoding = _png_encoding(bit_depth)
+                    else:
+                        latent = _apply_ddim(
+                            noisy,
+                            resolved_params[_LATENT_NOISE_TYPE],
+                            latent_params,
+                            rng,
+                            step_count=step_count,
+                            step_mode=step_mode,
+                        )
+                        noisy_name = f"{source_index:05d}_{replica_index:05d}.npy"
+                        _save_npy(latent, noisy_dir / noisy_name)
+                        encoding = _latent_encoding()
                     noisy_relative = Path("noisy") / noisy_name
-                    _save_png(
-                        _denormalize_image(noisy, bit_depth),
-                        bit_depth,
-                        noisy_dir / noisy_name,
-                    )
                     row = {
                         "bit_depth": bit_depth,
                         "clean_path": clean_relative.as_posix(),
@@ -315,6 +358,7 @@ def _generate_dataset(
                         "license": license_name,
                         "noise_params": resolved_params,
                         "noise_types": list(noise_types),
+                        "noisy_encoding": encoding,
                         "noisy_path": noisy_relative.as_posix(),
                         "replica_index": replica_index,
                         "sample_seed": sample_seed,
@@ -440,13 +484,21 @@ def _normalize_noise_types(noise_type: str | Sequence[str]) -> tuple[str, ...]:
             supported = ", ".join(_NOISE_DEFAULTS)
             raise ValueError(f"unknown noise type {name!r}; expected one of: {supported}")
         normalized.append(canonical)
+    if _LATENT_NOISE_TYPE in normalized and (
+        normalized.count(_LATENT_NOISE_TYPE) != 1
+        or normalized[-1] != _LATENT_NOISE_TYPE
+    ):
+        raise ValueError(
+            "ddim must appear exactly once and last in noise_type: it maps the "
+            "finished observation into the [-1, 1] latent domain"
+        )
     return tuple(normalized)
 
 
 def _resolve_noise_params(
     noise_types: Sequence[str],
-    overrides: Mapping[str, Mapping[str, float]] | None,
-) -> dict[str, dict[str, float]]:
+    overrides: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, NoiseParams]:
     selected = tuple(dict.fromkeys(noise_types))
     resolved = {name: dict(_NOISE_DEFAULTS[name]) for name in selected}
     if overrides is None:
@@ -454,7 +506,7 @@ def _resolve_noise_params(
     if not isinstance(overrides, Mapping):
         raise TypeError("noise_params must be a mapping or None")
 
-    normalized_overrides: dict[str, Mapping[str, float]] = {}
+    normalized_overrides: dict[str, Mapping[str, object]] = {}
     for supplied_name, supplied_params in overrides.items():
         if not isinstance(supplied_name, str):
             raise TypeError("noise_params keys must be strings")
@@ -472,30 +524,24 @@ def _resolve_noise_params(
         normalized_overrides[canonical] = supplied_params
 
     for noise_name, supplied_params in normalized_overrides.items():
-        unknown = set(supplied_params) - set(_NOISE_DEFAULTS[noise_name])
+        defaults = _NOISE_DEFAULTS[noise_name]
+        unknown = set(supplied_params) - set(defaults)
         if unknown:
             names = ", ".join(sorted(str(name) for name in unknown))
             raise ValueError(f"unknown {noise_name} parameter(s): {names}")
         for parameter_name, value in supplied_params.items():
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise TypeError(
-                    f"{noise_name}.{parameter_name} must be a real number"
-                )
-            converted = float(value)
-            if not math.isfinite(converted):
-                raise ValueError(
-                    f"{noise_name}.{parameter_name} must be finite"
-                )
-            resolved[noise_name][parameter_name] = converted
+            resolved[noise_name][parameter_name] = _coerce_parameter(
+                f"{noise_name}.{parameter_name}", value, defaults[parameter_name]
+            )
 
     _validate_resolved_params(resolved)
     return resolved
 
 
 def _fuse_noise_params(
-    params: Mapping[str, Mapping[str, float]], steps: int
-) -> dict[str, dict[str, float]]:
-    fused: dict[str, dict[str, float]] = {}
+    params: Mapping[str, Mapping[str, float | int | str]], steps: int
+) -> dict[str, NoiseParams]:
+    fused: dict[str, NoiseParams] = {}
     for noise_name, values in params.items():
         if noise_name == "gaussian":
             mean = values["mean"] * steps
@@ -520,12 +566,23 @@ def _fuse_noise_params(
                 "amount": effective_amount,
                 "salt_ratio": values["salt_ratio"],
             }
+        elif noise_name == "ddim":
+            betas = _ddim_betas(values)
+            if steps > betas.shape[0]:
+                raise ValueError(
+                    f"steps ({steps}) must not exceed ddim.num_diffusion_timesteps "
+                    f"({betas.shape[0]}): for ddim, steps is the diffusion timestep t"
+                )
+            alpha_bar = float(np.cumprod(1.0 - betas)[steps - 1])
+            fused[noise_name] = {**values, "t": steps, "alpha_bar": alpha_bar}
         else:
             raise AssertionError(f"unhandled noise type: {noise_name}")
     return fused
 
 
-def _validate_resolved_params(params: Mapping[str, Mapping[str, float]]) -> None:
+def _validate_resolved_params(
+    params: Mapping[str, Mapping[str, float | int | str]]
+) -> None:
     if "gaussian" in params and params["gaussian"]["std"] < 0.0:
         raise ValueError("gaussian.std must be greater than or equal to zero")
     if "poisson" in params and params["poisson"]["peak"] <= 0.0:
@@ -537,6 +594,22 @@ def _validate_resolved_params(params: Mapping[str, Mapping[str, float]]) -> None
             raise ValueError("salt_pepper.amount must be between zero and one")
         if not 0.0 <= salt_ratio <= 1.0:
             raise ValueError("salt_pepper.salt_ratio must be between zero and one")
+    if "ddim" in params:
+        ddim = params["ddim"]
+        if ddim["beta_schedule"] not in _DDIM_BETA_SCHEDULES:
+            supported = ", ".join(_DDIM_BETA_SCHEDULES)
+            raise ValueError(f"ddim.beta_schedule must be one of: {supported}")
+        if ddim["num_diffusion_timesteps"] < 1:
+            raise ValueError("ddim.num_diffusion_timesteps must be a positive integer")
+        if ddim["beta_start"] < 0.0 or ddim["beta_end"] < 0.0:
+            raise ValueError(
+                "ddim.beta_start and ddim.beta_end must be greater than or equal to zero"
+            )
+        betas = _ddim_betas(ddim)
+        if not np.all(np.isfinite(betas)) or np.any(betas > 1.0):
+            raise ValueError(
+                "ddim betas must stay within [0, 1]: lower beta_start or beta_end"
+            )
 
 
 def _reject_overlapping_paths(source_dir: Path, output_dir: Path) -> None:
@@ -771,6 +844,105 @@ def _save_png(array: np.ndarray, bit_depth: int, path: Path) -> None:
     else:
         image_array = np.ascontiguousarray(array, dtype=np.uint8)
     Image.fromarray(image_array).save(path, format="PNG")
+
+
+def _save_npy(array: np.ndarray, path: Path) -> None:
+    np.save(path, np.ascontiguousarray(array, dtype=np.float32), allow_pickle=False)
+
+
+def _png_encoding(bit_depth: int) -> dict[str, object]:
+    """How a stored PNG frame maps back to the normalized signal domain."""
+    return {
+        "clipped": True,
+        "dtype": "uint16" if bit_depth == 16 else "uint8",
+        "scale": 65535.0 if bit_depth == 16 else 255.0,
+        "signal_range": [0.0, 1.0],
+    }
+
+
+def _latent_encoding() -> dict[str, object]:
+    """How a stored ``ddim`` latent maps back: it already is the value, the
+    clean signal lives in [-1, 1], and the noise is free to leave that range."""
+    return {
+        "clipped": False,
+        "dtype": "float32",
+        "scale": 1.0,
+        "signal_range": [-1.0, 1.0],
+    }
+
+
+def _coerce_parameter(
+    label: str, value: object, default: float | int | str
+) -> float | int | str:
+    if isinstance(default, str):
+        if not isinstance(value, str):
+            raise TypeError(f"{label} must be a string")
+        return value.strip().casefold()
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{label} must be a real number")
+    converted = float(value)
+    if not math.isfinite(converted):
+        raise ValueError(f"{label} must be finite")
+    if isinstance(default, int):
+        if not converted.is_integer():
+            raise ValueError(f"{label} must be an integer")
+        return int(converted)
+    return converted
+
+
+def _ddim_betas(params: Mapping[str, float | int | str]) -> np.ndarray:
+    """The DDIM beta schedule, term for term the ``get_beta_schedule`` of
+    Song, Meng & Ermon's reference code (float64, ``num_diffusion_timesteps`` long)."""
+    schedule = params["beta_schedule"]
+    start = float(params["beta_start"])
+    end = float(params["beta_end"])
+    count = int(params["num_diffusion_timesteps"])
+    if schedule == "quad":
+        betas = np.linspace(start ** 0.5, end ** 0.5, count, dtype=np.float64) ** 2
+    elif schedule == "linear":
+        betas = np.linspace(start, end, count, dtype=np.float64)
+    elif schedule == "const":
+        betas = end * np.ones(count, dtype=np.float64)
+    elif schedule == "jsd":  # 1/T, 1/(T-1), 1/(T-2), ..., 1
+        betas = 1.0 / np.linspace(count, 1, count, dtype=np.float64)
+    elif schedule == "sigmoid":
+        grid = np.linspace(-6, 6, count)
+        betas = 1.0 / (np.exp(-grid) + 1.0) * (end - start) + start
+    else:
+        raise ValueError(f"unknown ddim.beta_schedule {schedule!r}")
+    return betas
+
+
+def _apply_ddim(
+    observation: np.ndarray,
+    params: Mapping[str, float | int | str],
+    effective: Mapping[str, float | int | str],
+    rng: np.random.Generator,
+    *,
+    step_count: int,
+    step_mode: str,
+) -> np.ndarray:
+    """DDPM/DDIM forward process ``q(x_t | x_0)`` on the finished observation.
+
+    The ``[0, 1]`` observation becomes ``x0 = 2 * observation - 1`` (DDIM's
+    ``rescaled`` data transform) and is corrupted to timestep ``t = step_count``,
+    i.e. after the first ``t`` betas of the schedule. Fused mode draws the
+    marginal ``sqrt(alpha_bar_t) * x0 + sqrt(1 - alpha_bar_t) * eps`` once;
+    iterative mode walks the Markov kernel
+    ``sqrt(1 - beta_i) * x_{i-1} + sqrt(beta_i) * eps_i`` for ``i = 1..t``, which
+    composes to the same marginal. Nothing is clipped: the result is a float32
+    latent whose noise is free to leave ``[-1, 1]``.
+    """
+    x = (2.0 * observation - 1.0).astype(np.float32, copy=False)
+    if step_mode == "iterative":
+        for beta in _ddim_betas(params)[:step_count].astype(np.float32):
+            eps = rng.standard_normal(size=x.shape, dtype=np.float32)
+            x = np.sqrt(np.float32(1.0) - beta) * x + np.sqrt(beta) * eps
+        return x.astype(np.float32, copy=False)
+    alpha_bar = np.float32(effective["alpha_bar"])
+    eps = rng.standard_normal(size=x.shape, dtype=np.float32)
+    latent = np.sqrt(alpha_bar) * x + np.sqrt(np.float32(1.0) - alpha_bar) * eps
+    return latent.astype(np.float32, copy=False)
 
 
 def _apply_noise(
