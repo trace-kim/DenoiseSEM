@@ -20,8 +20,8 @@ preparation and training cannot silently apply two different registrations.
   when comparing completed runs. It is not the report's translation ECC fit.
 - **Affine** uses the report's full-frame translation-initialized affine ECC,
   against the first frame, with 1-pixel fit blur and clipped pixels excluded
-  from fitting. Failed ECC estimates stop startup with the site/frame reason;
-  they are not silently replaced with identity transforms.
+  from fitting. Failed ECC estimates stop startup by default; the explicit
+  `--registration-failure skip` option retains those frames without registration.
 - **None** uses native coordinates without estimating geometry.
 - **Percentile** fits `Q_A(p) = gain * Q_B(p) + offset` at 10,15,...,90%.
   Percentiles come from every pixel of each full raw frame, including clipping
@@ -50,6 +50,38 @@ per-frame matrices, percentile points and any legacy registration skip records.
 These measurements are also saved in checkpoints and restored on resume.
 Changing matching settings requires a new run, not `--resume`. The dataset and
 all its arrays are content-verified through the existing cache loader.
+
+### Frames whose geometry cannot be measured
+
+Add `--registration-failure skip` to an inline `train` command to keep training
+when translation estimates are rejected (implausible shift/nonfinite covariance)
+or affine ECC raises a registration failure. The CLI override is saved in the
+run config. Without it, translation inherits the prepared manifest's failure
+policy and affine retains its original strict error policy. Low-contrast frames
+already identified by the translation estimator remain unmeasured under either
+policy. The estimators and their acceptance thresholds are unchanged.
+
+**Skip means skip the correction, never drop the frame.** If either A or B has
+unavailable registration, B is read at A's native crop coordinates with no
+geometric correction. Do not compose a failed frame's identity placeholder
+with the other frame's measured transform. Successful pairs still compose
+normally. This rule also applies to every member of a leave-one-out mean and
+the separately selected consistency pair. Percentile brightness matching stays
+independent and still uses the actual sampled frames.
+
+Each inline run writes `registration_report.html` and `registration_frames.csv`
+beside `real_matching.json`, after measurements/restoration and before optimizer
+updates. They remain available after training and list every measured train/val
+frame's original relative filename, zero-based prepared frame index, split,
+status, reason, available contrast/shift diagnostics and stored matrix. The HTML
+lists failed/low-contrast frames first. None are removed from their original
+split; test images are not measured. A fallback identity is labelled unmeasured,
+not a successful zero-motion estimate. The report is fully local, with no
+external resources; data and reports can stay on the training server.
+
+Registration failure is not proof of low contrast: inspect the recorded reason.
+This option does not suppress unrelated I/O, configuration or brightness errors
+(e.g. constant percentile values cannot determine a gain).
 
 ## Four independent N2N runs
 

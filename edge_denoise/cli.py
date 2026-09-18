@@ -74,6 +74,7 @@ def train(
     lr: Optional[float] = typer.Option(None, min=0.0, help="Override learning rate."),
     real_registration: Optional[str] = typer.Option(None, help="Inline real target geometry: none | translation | affine."),
     real_brightness: Optional[str] = typer.Option(None, help="Inline real target brightness: none | percentile; full-frame B to A."),
+    registration_failure: Optional[str] = typer.Option(None, help="Inline registration failure: error | skip; skip keeps frames and disables geometry for pairs involving a failed frame."),
 ) -> None:
     """Train an edge_denoise model as described by a config file."""
     import sys
@@ -90,10 +91,13 @@ def train(
     raw["training"].update({name: value for name, value in overrides.items() if value is not None})
     raw["data"].update({name: value for name, value in
                         (("dataset_dir", dataset_dir), ("image_size", image_size)) if value is not None})
-    if real_registration is not None or real_brightness is not None:
+    if registration_failure is not None and real_registration is None and not raw["data"].get("real_matching"):
+        raise typer.BadParameter("--registration-failure requires inline matching; specify --real-registration")
+    if real_registration is not None or real_brightness is not None or registration_failure is not None:
         matching = raw["data"].get("real_matching") or {}
         matching.update({name: value for name, value in
-                         (("registration", real_registration), ("brightness", real_brightness)) if value is not None})
+                         (("registration", real_registration), ("brightness", real_brightness),
+                          ("registration_failure", registration_failure)) if value is not None})
         raw["data"]["real_matching"] = matching
     loaded = Config.model_validate(raw)
     checkpoint: Path | None = resume_from

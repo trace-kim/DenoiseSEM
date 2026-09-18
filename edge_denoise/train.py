@@ -74,7 +74,8 @@ TENSORBOARD_DIR_NAME = "tb"
 # top of these (a second run would overwrite the checkpoints and provenance
 # while TensorBoard merged both histories -- exactly what happened to the
 # 2026-09-02 ft_consist run); ``overwrite=True`` deletes them first.
-RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", "real_matching.json", TENSORBOARD_DIR_NAME)
+RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", "real_matching.json",
+                      "registration_report.html", "registration_frames.csv", TENSORBOARD_DIR_NAME)
 
 
 def _masked_mean(values: torch.Tensor, valid: torch.Tensor | None, margin: int) -> torch.Tensor:
