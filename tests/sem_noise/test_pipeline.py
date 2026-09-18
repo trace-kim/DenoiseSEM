@@ -52,6 +52,7 @@ def test_end_to_end_png_report_provenance_and_duplicates(tmp_path: Path) -> None
     provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["config"]["registration"] == "none"
     assert "metrics.py" in provenance["source_sha256"]
+    assert "assets/difference_viewer.js" in provenance["source_sha256"]
     audit = json.loads((output / "input_manifest.json").read_text(encoding="utf-8"))
     assert audit[-1]["duplicate_of_frame_index"] == 1
     assert not audit[-1]["included"]

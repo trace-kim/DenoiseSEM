@@ -108,6 +108,22 @@ Retain voltage/current, detector, dwell time, frame time, scan direction, pixel
 size, working distance, and any automatic contrast/filtering/averaging settings.
 These can explain differences between otherwise comparable datasets.
 
+### Acquisition evolution and pair corrections
+
+The top of each site report shows **brightness evolution without correction**
+(raw full-image mean plus integer/subpixel-aligned means on the common crop),
+**x/y translation drift**, **x/y affine centre drift**, and **affine corner
+effect** over acquisition order. Excluded frames and failed estimates break
+the lines instead of appearing as zero drift. These plots use all acquisitions,
+not only the three representative pairs. CSV files retain exact values.
+
+Pair gain/offset tracks are separate: each value describes B→A for a different
+target/input pair. The cyclic target changes halfway through the burst, so
+these curves are not acquisition brightness evolution. Both estimators and
+both corrected means are shown. The site overview and summary CSV also include
+both gain ranges. A failed two-region fit no longer suppresses successful
+translation, affine or percentile-corrected difference panels.
+
 ### Raw image histograms
 
 Every site report includes an expandable **Raw image histograms** section for
@@ -160,7 +176,7 @@ the selected regions describe stable content and a global linear brightness
 change. Close region means make gain sensitive to noise; inspect the reported
 means and masks. A zero target-region contrast cannot determine gain and is
 reported as a failure, not replaced with gain 1. A failed geometry estimate
-likewise remains visible, and no correction PNG is fabricated for that pair.
+likewise remains visible: its panel stays grey while successful stages remain available.
 If only the translation comparison fails, successful affine/brightness results
 are still reported; the translation panel is grey and its RMS is blank.
 ECC scores are correlations, not standard errors or guarantees of the right
@@ -208,26 +224,33 @@ apply their saved values to the same affine-aligned B on the same valid pixels;
 the percentile estimator itself still uses full raw images without registration.
 If its fit fails, the fifth panel is grey and its metrics are blank.
 
-The default colour limit is the largest **95th percentile of absolute
-differences** among the five panels, calculated separately for each pair.
-The scale is linear and symmetric about zero. This retains roughly 95% or more
-of each available panel within the range; extreme speckles saturate blue/red
-instead of washing out smaller residuals. The first/middle/last examples have
-a **Difference colour range** selector: 95% (default), 99%, or full range.
-It updates the shared colourbar, all five maps, the native PNG link and the
-table's percentage of pixels beyond the range. These controls work offline.
-Additional PNGs are generated only for the three examples, keeping the full
-report's other pairs at the default 95% scale.
+Every pair has a **standalone interactive difference viewer**. The three
+representative viewers are embedded in the main report; every other pair links
+to its viewer from the full report. Enter **any positive colour limit in DN**
+or use the continuous slider. All five panels share the chosen zero-centred,
+linear scale. The initial view and **Full range** button include all finite
+values; this is a starting view, not a recommended range. There are no
+percentile presets. Exact entry supports limits smaller than the slider's
+screen resolution and larger than the observed data range.
 
-`pair_regions.csv` gives a 4×4 RMS table for each panel. Scaling affects only
-display: all valid differences remain in RMS, extrema and numerical exports.
-Subtraction is performed in signed floating-point DN, after conversion from
-the input storage dtype. The 8-bit palette PNG is a display encoding, not an
-unsigned difference array. Each pair also reports signed min/max, absolute
-difference P95/P99, RMS and the fraction beyond each colour range for each stage.
-`colour_limit_dn` is the default P95 range; `colour_limit_p99_dn` and
-`colour_limit_full_dn` record the wider ranges. Interpolation and
-brightness-corrected values are not clipped back into the original storage range.
+The viewer recolours signed native-resolution differences in the browser.
+It requires no server, external assets or new analysis run. Hover to read a
+pixel's signed DN difference, enable **Native pixels** to inspect without
+resizing, and **Save current PNG** to export the selected scale. Each stage's
+fraction beyond the chosen range updates along with the colourbar. Failed
+stages remain grey. Zero/nonfinite range entries are rejected visibly.
+
+`pair_regions.csv` gives a 4×4 RMS table for each panel. Display saturation never
+removes pixels from RMS, extrema or exports. Viewer values are gzip-compressed
+float32 differences (float64 for values that would overflow or underflow),
+without range clipping or spatial subsampling; original analysis statistics use
+the full precision arrays. This adds data to the output
+for every pair, so transfer the whole output directory and keep the full report
+separate from the representative examples. Viewers are loaded only when opened.
+Static PNGs use the full range. P95/P99 remain descriptive statistics in the
+tables; they do not control display. Subtraction uses signed floating-point DN,
+including for uint8/uint16 inputs. Corrected intensities are not clipped back
+to the original storage range.
 
 The main `report.html` shows only the first, middle, and last included input
 examples, alongside tracks covering all pairs. The linked `pair_report_full.html`
@@ -239,8 +262,8 @@ the three examples and appear in both reports.
 Each example has three pixel-to-pixel scatter plots: raw B, translation-corrected
 B, and affine-corrected B versus untouched A. Every corresponding valid pixel
 is plotted on the same mask and shared linear axes; there is no binning or
-subsampling. Only the affine panel overlays the line through the two measured
-brightness-region means. The gain/offset calculation is unchanged; no regression
+subsampling. The affine panel overlays both available brightness mappings: the line through
+the two region means and the percentile-based line. The gain/offset calculation is unchanged; no regression
 is fitted to the scatter points.
 
 | New artifact | Contents |
@@ -252,8 +275,8 @@ is fitted to the scatter points.
 | `pair_registration.json` | Geometry and pair measurements with method/selection conventions |
 | `pair_regions.csv` | Native difference RMS in each 4×4 region |
 | `pairs/brightness_regions.npz` | Geometry-only mean, common validity and fixed low/high labels |
-| `pairs/input_NNNN_target_MMMM_differences.png` | Five native panels for that pair, shared P95 scale |
-| `pairs/input_NNNN_target_MMMM_differences_p99.png`, `*_differences_full.png` | Wider scales for the three representative examples |
+| `pairs/input_NNNN_target_MMMM_differences.png` | Five native panels at the full shared range |
+| `pairs/input_NNNN_target_MMMM_differences.html` | Standalone interactive viewer for every pair, with exact DN entry, slider, pixel readout and PNG export |
 | `pairs/input_NNNN_target_MMMM.npz` | Example original input/target, actual blurred copies, corrected targets, labels, masks and matrix |
 | `pairs/input_NNNN_target_MMMM_distributions.png` | Example percentile plot and full-image before/after histogram comparison of both methods |
 
@@ -366,11 +389,12 @@ scale:
 The full fit adds affine and brightness corrections. Intermediate examples
 separate their effects with an additional affine-only panel. All three use one
 pixel set (inside both footprints, covered by the mean, not touching clipped
-values; grey elsewhere) and one limit, the largest per-panel 95th percentile of
-absolute valid differences, printed in the caption and in `registration.csv`
+values; grey elsewhere) and one limit covering every finite valid difference,
+printed in the caption and in `registration.csv`
 (`colour_limit_dn`). The PNG is an 8-bit palette image: index 127 is zero,
 0 and 254 are ∓limit or beyond, 255 is invalid. Colour saturation does not
-remove pixels from any measurement. `regions.csv` gives the RMS difference in
+remove pixels from any measurement. Each frame also links to its interactive
+viewer for direct DN range control. `regions.csv` gives the RMS difference in
 each cell of a 4×4 grid for the same three panels on the same pixels.
 
 Native-resolution PNGs of noise-like data do not compress: expect roughly

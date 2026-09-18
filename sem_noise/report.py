@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
+from .difference_viewer import write_difference_viewer
 from .registration import (CORNERS, PARAMETERS, clip_mask, fit_pixel_diagnostics,
                            parameter_vector, shift_only, warp)
 from .site_registration import PANELS, REGION_GRID, difference_limit, difference_palette
@@ -175,7 +176,11 @@ def intermediate_examples(out: Path, stack: np.ndarray, fit: dict,
             ax.set_axis_off()
         fig.colorbar(im, ax=axes, shrink=0.7, label="Corrected frame minus reference (DN)")
         body += _figure(out, f"intermediates/{stem}_differences.png", fig,
-                        "Native-pixel differences on the same mask and colour scale, set to the largest per-panel 95th percentile of absolute differences. More extreme values saturate only in colour. The affine-only and full-fit panels isolate what gain/offset changes, including any contrast suppression.")
+                        "Native-pixel differences on the same mask and full colour range. The affine-only and full-fit panels isolate what gain/offset changes, including any contrast suppression.")
+        viewer = f"intermediates/{stem}_differences.html"
+        write_difference_viewer(out / viewer, list(differences), valid, ("Raw", "Shift only", "Affine only", "Full fit"),
+                                f"Acquisition {indices[i]}: legacy intermediate differences", difference_label="Frame − reference")
+        body += f'<p><a href="{viewer}">Adjust the difference colour range interactively</a></p>'
         fig, axes = plt.subplots(1, 3, figsize=(17, 4.6), constrained_layout=True)
         density = axes[0].hexbin(x, y, gridsize=65, bins="log", mincnt=1, cmap="viridis")
         xx = np.array([x.min(), x.max()])
@@ -207,7 +212,7 @@ def _registration_report(out: Path, summary: dict, rows: list[dict], regions: li
     if diagnostic.get("method") == "affine":
         return ""  # The raw-pair report is rendered from its own pair records.
     if not diagnostic.get("enabled"):
-        return '<section><h2>Registration fit</h2><p>Registration was disabled for this run; frames were taken as aligned and no fit, difference images or brightness track exist.</p></section>'
+        return '<section><h2>Registration fit</h2><p>Registration was disabled for this run; frames were taken as aligned. No registration or brightness correction was fitted. Raw acquisition brightness remains plotted above.</p></section>'
     body = '<section><h2>Registration fit: one least-squares fit per frame</h2>'
     body += '<p><b>Brightness bias:</b> this least-squares model treats the moving-image intensity as an error-free predictor, although both images contain noise. Gain can therefore shrink toward zero and offset compensate toward the reference mean even when true brightness is unchanged. Building the mean from pass-1 corrected images can compound this in pass 2. Huber loss, convergence and small standard errors do not remove this bias. The error bars are conditional approximations, not evidence that the fitted brightness change is physical. Inspect the pixel-pair plots and original/corrected contrast below. No gain is clamped or frame discarded.</p>'
     body += '<p><a href="registration.csv">Pass 2 per-frame numbers (CSV)</a> · <a href="registration_pass1.csv">Pass 1 (against the first frame)</a> · <a href="registration.json">Both passes with covariances</a> · <a href="regions.csv">4×4 region residuals</a> · <a href="differences/">Native-resolution difference images</a></p>'
@@ -279,7 +284,7 @@ def _difference_report(out: Path, rows: list[dict], regions: list[dict]) -> str:
     plt.close(fig)
     scale = base64.b64encode((out / "difference_scale.png").read_bytes()).decode("ascii")
     body = '<section><h3>Difference images for every frame</h3>'
-    body += f'<p>Each row is one native-resolution PNG with three panels, left to right: <b>frame minus reference before correction</b>, <b>after the shift alone</b> (centre translation only; gain 1, offset 0), and <b>after the full fit</b>. The three panels share one symmetric colour scale, set per frame to the largest per-panel 95th percentile of absolute valid differences and printed in the caption. More extreme values saturate only in colour; all valid pixels remain in the measurements. Grey marks pixels outside the common valid area or touching clipped values. The full-fit panel adds both affine and brightness corrections; the intermediate examples separate their effects.</p>'
+    body += f'<p>Each row is one native-resolution PNG with three panels, left to right: <b>frame minus reference before correction</b>, <b>after the shift alone</b> (centre translation only; gain 1, offset 0), and <b>after the full fit</b>. The PNG shows the full symmetric range. Open its interactive viewer to enter any positive DN limit or adjust the continuous slider; all valid pixels remain in the measurements. Grey marks pixels outside the common valid area or touching clipped values. The full-fit panel adds both affine and brightness corrections; the intermediate examples separate their effects.</p>'
     body += f'<img src="data:image/png;base64,{scale}" alt="difference colour scale" style="max-width:420px">'
     body += f'<p>Below each image, the {REGION_GRID}×{REGION_GRID} tables give the RMS difference (DN) per region for the same three panels on the same pixels, so a corner that improves only under the full fit is visible as a number.</p>'
     by_frame: dict[int, list[dict]] = {}
@@ -289,6 +294,8 @@ def _difference_report(out: Path, rows: list[dict], regions: list[dict]) -> str:
         if "difference_image" not in row:
             continue
         body += f'<div class="frame"><h4>Acquisition {row["frame_index"]}</h4>'
+        if row.get("difference_viewer"):
+            body += f'<p><a href="{escape(row["difference_viewer"])}">Interactive difference colour range</a></p>'
         body += f'<a href="{escape(row["difference_image"])}"><img src="{escape(row["difference_image"])}" loading="lazy" alt="difference panels for acquisition {row["frame_index"]}"></a>'
         body += f'<p class="muted">Colour limit ± {_number(row["colour_limit_dn"], 3)} DN over {row["difference_pixels"]} shared pixels. RMS: before {_number(row["before_rms_dn"], 3)}, shift only {_number(row["shift_only_rms_dn"], 3)}, full fit {_number(row["full_fit_rms_dn"], 3)} DN. Drift ({_number(row["dy_px"], 3)}, {_number(row["dx_px"], 3)}) px, gain {_number(row["gain"], 4)}, offset {_number(row["offset_dn"], 3)} DN, corner max {_number(row["corner_max_px"], 3)} px.</p>'
         body += '<div class="regions">'
@@ -302,13 +309,52 @@ def _difference_report(out: Path, rows: list[dict], regions: list[dict]) -> str:
     return body + '</section>'
 
 
+def _acquisition_figure(frames: list[dict], geometry: list[dict], registration: dict) -> plt.Figure:
+    """Plot acquisition history, independently of which target each input uses."""
+    affine = registration.get("method") == "affine"
+    fig, axes = plt.subplots(2 if affine else 1, 2, figsize=(13, 8 if affine else 4), constrained_layout=True)
+    axes = np.asarray(axes).ravel()
+    x = [r["frame_index"] for r in frames]
+    by_index = {r["frame_index"]: r for r in geometry}
+    def frame_values(key):
+        return [r.get(key, np.nan) if r["included"] else np.nan for r in frames]
+    def fitted_values(key):
+        return [by_index.get(r["frame_index"], {}).get(key, np.nan) if r["included"] else np.nan for r in frames]
+    for key, label in (("raw_mean_dn", "Raw full-image mean"), ("native_mean_dn", "Integer-aligned common-crop mean"),
+                       ("aligned_mean_dn", "Subpixel-aligned common-crop mean")):
+        axes[0].plot(x, frame_values(key), ".-", label=label)
+    axes[0].set(title="Brightness evolution — no brightness correction", ylabel="Mean intensity (DN)")
+    for key, label in (("dx_px", "x drift"), ("dy_px", "y drift")):
+        axes[1].plot(x, fitted_values(key), ".-", label=label)
+    axes[1].set(title="Translation drift from anchor" if affine else "Fitted centre displacement", ylabel="Pixels")
+    if not registration.get("enabled"):
+        axes[1].text(0.5, 0.5, "Registration disabled — no drift estimated", ha="center", transform=axes[1].transAxes)
+    if affine:
+        for key, label in (("affine_dx_px", "x drift"), ("affine_dy_px", "y drift")):
+            axes[2].plot(x, fitted_values(key), ".-", label=label)
+        axes[2].set(title="Affine centre drift from anchor", ylabel="Pixels")
+        axes[3].plot(x, fitted_values("corner_max_px"), ".-", label="Maximum corner effect")
+        axes[3].set(title="Affine deformation beyond translation", ylabel="Pixels at corners")
+    for ax in axes:
+        for row in frames:
+            if not row["included"]:
+                ax.axvline(row["frame_index"], color="gray", alpha=0.2)
+        ax.set_xlabel("Acquisition index")
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=8)
+    return fig
+
+
 def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: list[dict],
                 registration_rows: list[dict], regions: list[dict], intermediate_html: str = "") -> None:
     """Render quantitative diagnostics without treating the repeat mean as truth."""
     native, aligned = summary["modes"]["native"], summary["modes"]["aligned"]
-    body = '<p><a href="../index.html">All sites</a> · <a href="#raw-image-histograms">Raw image histograms</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
+    body = '<p><a href="../index.html">All sites</a> · <a href="#acquisition-evolution">Acquisition evolution</a> · <a href="#raw-image-histograms">Raw image histograms</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
     body += f'<section><h2>{summary["accepted_frames"]} / {summary["input_frames"]} frames analysed</h2><p>Native flat-region temporal σ: <b>{_number(native["flat_temporal_sigma_dn"])} DN</b>. Aligned: <b>{_number(aligned["flat_temporal_sigma_dn"])} DN</b>. Largest drift: <b>{_number(summary["max_drift_px"])} px</b>. Largest corner displacement from the affine terms: <b>{_number(summary["max_corner_effect_px"])} px</b>.</p><p>DN means digital number: the original exported pixel units. Native statistics use integer translations; aligned statistics use bilinear translations of the fitted centre shift only (no affine warp, no brightness correction). The latter changes noise variance and spatial correlation. The predicted mean variance multiplier for independent white noise is {_number(summary["bilinear_white_noise_variance_factor_mean"])}; no universal correction is applied.</p></section>'
     body += _warnings(summary["warnings"])
+    body += '<section id="acquisition-evolution"><h2>Acquisition brightness and motion</h2><p>All acquisitions in order. These tracks describe the measured sequence; the pair-correction tracks below describe different B→A mappings.</p></section>'
+    body += _figure(out, "acquisition_evolution.png", _acquisition_figure(frames, registration_rows, summary["registration"]),
+                    "Raw brightness uses the full supplied image. The two geometrically aligned means use the shared crop for noise statistics; none receives a gain/offset correction. Drift is content displacement (x right, y down), not the negative shift applied for alignment. Affine drift is measured at the image centre, separately from deformation at the corners. Excluded acquisitions and failed estimates break the lines; grey lines mark exclusions. Exact values are in frames.csv and geometry.csv (registration.csv in legacy fit mode).")
     body += _registration_report(out, summary, registration_rows, regions)
     body += intermediate_html
     fig, axes = plt.subplots(2, 3, figsize=(13, 8), constrained_layout=True)
@@ -322,13 +368,17 @@ def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: l
         stride = max(1, int(np.ceil(max(array.shape) / 600)))
         vmin, vmax = np.quantile(array.astype(float), [0.01, 0.99])
         if "delta" in key:
-            vmax = max(abs(vmin), abs(vmax))
+            vmax = max(float(np.max(np.abs(array))), 1e-9)
             vmin = -vmax
         im = ax.imshow(array[::stride, ::stride], cmap=cmap, vmin=vmin, vmax=max(vmax, vmin + 1e-9))
         ax.set_title(title, fontsize=11)
         ax.set_axis_off()
         fig.colorbar(im, ax=ax, shrink=0.75)
-    body += _figure(out, "maps.png", fig, "Display limits use the 1st–99th percentiles; maps.npz preserves numerical values. The early/late difference is descriptive and retains gain/offset changes.")
+    body += _figure(out, "maps.png", fig, "Grayscale/variance display limits use the 1st–99th percentiles; maps.npz preserves numerical values. The early/late difference uses its full symmetric range and retains gain/offset changes.")
+    delta = maps["aligned_early_late_delta"]
+    write_difference_viewer(out / "early_late_difference.html", [delta], np.isfinite(delta), ("Last quarter − first quarter",),
+                            "Early/late brightness and structure", difference_label="Last quarter − first quarter")
+    body += '<p><a href="early_late_difference.html">Inspect early/late differences with an adjustable colour range</a></p>'
     fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
     accepted = [r for r in frames if r["included"]]
     x = np.array([r["frame_index"] for r in accepted])
@@ -411,17 +461,18 @@ def index_report(out: Path, overview: dict) -> None:
     if overview["cross_site_duplicate_groups"]:
         warnings.append(f'{len(overview["cross_site_duplicate_groups"])} decoded duplicate groups cross site boundaries; inspect summary.json before creating train/validation splits.')
     body += _warnings(warnings)
-    body += '<section><div class="scroll"><table><thead><tr><th>Site</th><th>Frames</th><th>Native flat σ (DN)</th><th>Aligned flat σ (DN)</th><th>Max drift (px)</th><th>Max corner effect (px)</th><th>Gain range</th><th>Flags / status</th></tr></thead><tbody>'
+    body += '<section><div class="scroll"><table><thead><tr><th>Site</th><th>Frames</th><th>Native flat σ (DN)</th><th>Aligned flat σ (DN)</th><th>Max drift (px)</th><th>Max corner effect (px)</th><th>Two-region / legacy gain range</th><th>Percentile gain range</th><th>Flags / status</th></tr></thead><tbody>'
     for site in overview["sites"]:
         name = escape(site["site"])
         if site["status"] != "complete":
-            body += f'<tr><td>{name}</td><td colspan="7">Failed: {escape(site["error"])}</td></tr>'
+            body += f'<tr><td>{name}</td><td colspan="8">Failed: {escape(site["error"])}</td></tr>'
             continue
         brightness = site.get("brightness", {})
         gain = f'{_number(brightness.get("gain_min"), 3)} – {_number(brightness.get("gain_max"), 3)}' if brightness.get("enabled") else "n/a"
+        quantile_gain = f'{_number(brightness.get("quantile_gain_min"), 3)} – {_number(brightness.get("quantile_gain_max"), 3)}'
         body += f'<tr><td><a href="{site["directory"]}/report.html">{name}</a></td><td>{site["accepted_frames"]}/{site["input_frames"]}</td>'
         for value in [site["modes"]["native"]["flat_temporal_sigma_dn"], site["modes"]["aligned"]["flat_temporal_sigma_dn"], site["max_drift_px"], site["max_corner_effect_px"]]:
             body += f'<td>{_number(value)}</td>'
-        body += f'<td>{gain}</td><td>{len(site["warnings"])} flags / complete</td></tr>'
+        body += f'<td>{gain}</td><td>{quantile_gain}</td><td>{len(site["warnings"])} flags / complete</td></tr>'
     body += '</tbody></table></div><p>Compare sites with matched acquisition settings. These are descriptive observed-noise estimates; the site is the unit of comparison, not millions of independent pixels. In affine mode, gain ranges describe the reported target-to-input pairs; in legacy fit mode they describe frame-to-reference fits. Open a site for the geometry, brightness measurements and difference images.</p></section>'
     (out / "index.html").write_text(_document("Repeated SEM acquisition — noise and stability", body), encoding="utf-8")

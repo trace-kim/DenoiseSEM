@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("matplotlib")
 pytest.importorskip("scipy")
 
-from sem_noise.report import _errorbar, _with_error, raw_histogram_examples
+from sem_noise.report import _acquisition_figure, _errorbar, _with_error, raw_histogram_examples
 
 
 def test_corner_error_is_used_in_both_text_and_plot() -> None:
@@ -48,3 +48,22 @@ def test_raw_histograms_count_every_uint8_value_including_clipping(tmp_path: Pat
     assert "Clipped pixels are included" in html and 'id="raw-image-histograms"' in html
     assert (tmp_path / "raw_histograms.png").is_file()
     np.testing.assert_array_equal(stack, before)
+
+
+def test_acquisition_plots_use_frame_order_and_show_failed_estimates_as_gaps() -> None:
+    import matplotlib.pyplot as plt
+    frames = [{"frame_index": i, "included": i != 3, "raw_mean_dn": 70 + 2 * i,
+               "native_mean_dn": 60 + i, "aligned_mean_dn": 61 + i} for i in range(5)]
+    geometry = [{"frame_index": i, "dx_px": i * 0.2, "dy_px": -i * 0.1,
+                 "affine_dx_px": i * 0.3, "affine_dy_px": -i * 0.4, "corner_max_px": i * 0.05}
+                for i in (0, 1, 3, 4)]  # frame 2 failed; frame 3 explicitly excluded
+    fig = _acquisition_figure(frames, geometry, {"enabled": True, "method": "affine"})
+    try:
+        assert len(fig.axes) == 4
+        np.testing.assert_allclose(fig.axes[0].lines[0].get_ydata(), [70, 72, 74, np.nan, 78])
+        np.testing.assert_allclose(fig.axes[1].lines[0].get_ydata(), [0, 0.2, np.nan, np.nan, 0.8])
+        np.testing.assert_allclose(fig.axes[2].lines[0].get_ydata(), [0, 0.3, np.nan, np.nan, 1.2])
+        np.testing.assert_allclose(fig.axes[3].lines[0].get_ydata(), [0, 0.05, np.nan, np.nan, 0.2])
+        assert all(ax.get_xlabel() == "Acquisition index" for ax in fig.axes)
+    finally:
+        plt.close(fig)

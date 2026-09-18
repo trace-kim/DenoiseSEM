@@ -118,12 +118,12 @@ def test_difference_scale_ignores_sparse_extremes_but_preserves_full_range_optio
     corrected[8, 8] = -30  # one extreme must not wash out the other pixels
     corrected[0, 0] = 1e9  # masked values do not set the display range
     failed = np.full(valid.shape, np.nan)
-    assert difference_limit([before, corrected, failed], valid) == 2
+    assert difference_limit([before, corrected, failed], valid, percentile=95) == 2
     assert difference_limit([before, corrected, failed], valid, percentile=99) == 2
     assert difference_limit([before, corrected, failed], valid, percentile=100) == 30
     assert corrected[8, 8] == -30  # display choice never modifies numerical values
     corrected[2:6] = -12  # a widespread residual still sets the shared scale
-    assert difference_limit([before, corrected, failed], valid) == 12
+    assert difference_limit([before, corrected, failed], valid, percentile=95) == 12
     assert difference_limit([np.zeros(valid.shape), failed], valid) > 0
     for percentile in (0, 101, np.nan):
         with pytest.raises(ValueError, match="percentile"):

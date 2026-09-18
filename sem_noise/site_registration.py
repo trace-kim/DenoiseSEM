@@ -47,7 +47,7 @@ def difference_image(differences: list[np.ndarray], valid: np.ndarray, limit: fl
     return np.hstack(panels[:-1])
 
 
-def difference_limit(differences: Sequence[np.ndarray], valid: np.ndarray, *, percentile: float = 95) -> float:
+def difference_limit(differences: Sequence[np.ndarray], valid: np.ndarray, *, percentile: float = 100) -> float:
     """Shared symmetric display range: largest per-panel absolute percentile.
 
     Outliers saturate only in the rendered image. Use 100 for the full range;
@@ -157,6 +157,7 @@ def difference_outputs(stack: np.ndarray, fit: dict, levels: tuple[float | None,
                        directory: Path, frame_indices: np.ndarray,
                        progress: Callable[[str], None]) -> tuple[dict[int, dict], list[dict]]:
     """Write one native-resolution PNG per frame; return per-frame extras and region rows."""
+    from .difference_viewer import write_difference_viewer
     directory.mkdir(parents=True, exist_ok=True)
     mean, mean_valid = fit["mean"], fit["mean_valid"]
     extras, regions = {}, []
@@ -168,8 +169,11 @@ def difference_outputs(stack: np.ndarray, fit: dict, levels: tuple[float | None,
                                                                   parameter_vector(fit["pass2"][i]))
         name = f"frame_{int(frame_indices[i]):04d}.png"
         write_difference_png(directory / name, differences, valid, limit)
+        viewer = Path(name).with_suffix(".html").name
+        write_difference_viewer(directory / viewer, differences, valid, ("Raw", "Shift only", "Full fit"),
+                                f"Acquisition {int(frame_indices[i])}: legacy fit", difference_label="Frame − reference")
         extra = dict(brightness, difference_image=f"{directory.name}/{name}", colour_limit_dn=limit,
-                     difference_pixels=int(valid.sum()))
+                     difference_viewer=f"{directory.name}/{viewer}", difference_pixels=int(valid.sum()))
         for panel, delta in zip(PANELS, differences):
             extra[f"{panel}_rms_dn"] = float(np.sqrt(np.mean(delta[valid] ** 2)))
         extras[int(i)] = extra

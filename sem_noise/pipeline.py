@@ -24,7 +24,8 @@ from .site_registration import (csv_rows, difference_outputs, fit_rows, register
                                 registration_summary)
 
 FRAME_TABLE_KEYS = ("dy_px", "dy_px_se", "dx_px", "dx_px_se", "gain", "gain_se", "offset_dn", "offset_dn_se",
-                    "residual_rms_dn", "corner_max_px", "corner_max_se", "converged")
+                    "residual_rms_dn", "corner_max_px", "corner_max_se", "converged",
+                    "affine_dx_px", "affine_dy_px", "translation_status", "affine_status")
 
 
 def _json_value(value):
@@ -53,6 +54,8 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def _provenance(config: AnalysisConfig, order_source: str) -> dict:
+    package_root = Path(__file__).parent
+    sources = [*package_root.glob("*.py"), *package_root.glob("assets/*.js")]
     versions = {}
     for package in ("numpy", "scipy", "scikit-image", "opencv-python-headless", "matplotlib", "Pillow", "tifffile"):
         try:
@@ -62,8 +65,8 @@ def _provenance(config: AnalysisConfig, order_source: str) -> dict:
     return {"schema_version": 2, "created_utc": datetime.now(timezone.utc).isoformat(),
             "config": asdict(config), "python": platform.python_version(), "platform": platform.system(),
             "dependencies": versions, "order_source": order_source,
-            "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                              for p in sorted(Path(__file__).parent.glob("*.py"))}}
+            "source_sha256": {p.relative_to(package_root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in sorted(sources)}}
 
 
 def _timing(frames: list[Frame], config: AnalysisConfig) -> tuple[float | None, bool, list[str]]:
@@ -197,8 +200,8 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                     warnings.append(f"{registration['translation_failures']} translation estimates failed. Those frames "
                                     "remain unshifted in the noise statistics; inspect geometry.csv before interpreting aligned statistics.")
                 if registration["pair_failures"]:
-                    warnings.append(f"{registration['pair_failures']} target-to-input diagnostics failed; every pair and "
-                                    "its reason remain in target_pairs.csv. Failed corrections are not replaced with identity values.")
+                    warnings.append(f"{registration['pair_failures']} two-region pair corrections failed; every pair and "
+                                    "its reason remain in target_pairs.csv. Successful geometric and percentile stages are retained; failed stages are grey.")
                 if registration["quantile_failures"]:
                     warnings.append(f"{registration['quantile_failures']} full-image percentile brightness fits failed; "
                                     "see quantile_status and quantile_error in target_pairs.csv.")
@@ -360,6 +363,8 @@ def analyze_dataset(input_path: str | Path, output_path: str | Path, *,
                                        "max_corner_effect_px": r.get("max_corner_effect_px"),
                                        "gain_min": r.get("brightness", {}).get("gain_min"),
                                        "gain_max": r.get("brightness", {}).get("gain_max"),
+                                       "quantile_gain_min": r.get("brightness", {}).get("quantile_gain_min"),
+                                       "quantile_gain_max": r.get("brightness", {}).get("quantile_gain_max"),
                                        "native_flat_sigma_dn": r.get("modes", {}).get("native", {}).get("flat_temporal_sigma_dn"),
                                        "aligned_flat_sigma_dn": r.get("modes", {}).get("aligned", {}).get("flat_temporal_sigma_dn"),
                                        "error": r.get("error", "")}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from html import escape
-import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -12,29 +11,15 @@ import numpy as np
 
 from .pair_diagnostics import PAIR_PANELS, PAIR_TITLES
 from .report import _document, _figure, _number
-from .site_registration import difference_palette
 
 REGION_COLOURS = ListedColormap(["#eeeeee", "#2878bd", "#e89a27"])
-
-DIFFERENCE_CONTROLS = """<script>
-function chooseDifferenceScale(control) {
-    const section = control.closest('section');
-    const option = control.selectedOptions[0];
-    section.querySelector('[data-difference-image]').src = option.dataset.image;
-    section.querySelector('[data-difference-link]').href = option.dataset.image;
-    section.querySelector('[data-colour-negative]').textContent = '≤ −' + option.dataset.limit;
-    section.querySelector('[data-colour-positive]').textContent = '≥ +' + option.dataset.limit;
-    const saturation = JSON.parse(option.dataset.saturationValues);
-    section.querySelectorAll('td[data-saturation]').forEach((cell, i) => cell.textContent = saturation[i]);
-}
-</script>"""
 
 
 def pair_report(out: Path, result: dict) -> str:
     """Return representative examples and write the full comparison report."""
     registration = result["registration"]
     rows = result["pair_rows"]
-    body = DIFFERENCE_CONTROLS + '<section><h2>Raw target-to-input matching</h2>'
+    body = '<section><h2>Raw target-to-input matching</h2>'
     body += '<p><b>A is the untouched noisy input. B is a different noisy target.</b> Only B is resampled and brightness-corrected. A registered mean selects shared brightness regions; it is never the answer image in these diagnostics.</p>'
     body += '<p><a href="geometry.csv">Per-frame geometry CSV</a> · <a href="target_pairs.csv">Both brightness estimates CSV</a> · <a href="pair_quantiles.csv">Percentile fit points CSV</a> · <a href="pair_regions.csv">4×4 residual tables CSV</a> · <a href="pair_registration.json">All measurements JSON</a> · <a href="pairs/brightness_regions.npz">Native mean and region labels</a></p>'
     body += f'<p>Geometry: translation ECC, then full affine ECC initialized by that translation, using {_number(registration["blur_sigma_px"])} px blurred copies against acquisition {registration["anchor_index"]}. The full affine contains translation. Pair transforms compose the saved matrices and resample the original target once. {escape(registration["pair_selection"])}.</p>'
@@ -58,24 +43,24 @@ def pair_report(out: Path, result: dict) -> str:
     quantile_good = [row for row in rows if row["quantile_status"] == "complete"]
     if good or quantile_good:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
-        for measured, prefix, label, style in ((good, "", "Two-region", ".-"),
-                                               (quantile_good, "quantile_", "Full-image percentiles", "x--")):
+        for prefix, label, style in (("", "Two-region", ".-"), ("quantile_", "Full-image percentiles", "x--")):
             for ax, key in zip(axes[:2], ("gain", "offset_dn")):
-                ax.plot([r["input_index"] for r in measured], [r[prefix + key] for r in measured], style, label=label)
+                ax.plot([r["input_index"] for r in rows], [r.get(prefix + key, np.nan) for r in rows], style, label=label)
                 ax.legend(fontsize=8)
         axes[0].set(title="Target-to-input gain: both methods", ylabel="Gain")
         axes[1].set(title="Target-to-input offset: both methods", ylabel="DN")
-        x = [row["input_index"] for row in good]
+        x = [row["input_index"] for row in rows]
         for key, label in (("input_mean_dn", "Fixed input A"), ("target_mean_before_dn", "Raw target B"),
-                           ("target_mean_after_dn", "Corrected target B")):
-            axes[2].plot(x, [row[key] for row in good], ".-", label=label)
-        axes[2].set(title="Two-region means on common pixels", ylabel="Mean DN")
+                           ("target_mean_after_dn", "Two-region corrected B"),
+                           ("target_mean_after_quantile_dn", "Percentile corrected B")):
+            axes[2].plot(x, [row.get(key, np.nan) for row in rows], ".-", label=label)
+        axes[2].set(title="Pair means on common pixels", ylabel="Mean DN")
         axes[2].legend(fontsize=8)
         for ax in axes:
             ax.set_xlabel("Input acquisition index")
             ax.grid(alpha=0.2)
         body += _figure(out, "pairs/brightness_track.png", fig,
-                        "Both brightness estimates describe B→A for the target listed in the pair table. A remains untouched. Each method reports failures independently; percentile estimates remain available when geometry fails. The mean track retains the original two-region correction.")
+                        "Pair corrections B→A, with both methods shown. These are not acquisition brightness trends: the target changes halfway through the cyclic pairing. A remains untouched. Missing estimates break the lines; failures remain in the tables. Acquisition brightness and drift are plotted separately at the top of the site report.")
     selected = {rows[k]["input_index"] for k in (0, len(rows) // 2, len(rows) - 1)} if rows else set()
     examples = [row for row in rows if row["input_index"] in selected]
     overview = '<section><h3>Representative comparisons</h3><p>Only the first, middle, and last included inputs are shown here. The tracks use all measured pairs. <a href="pair_report_full.html">Open the full report: every pair, difference image, and measurement table</a>.</p></section>' + body
@@ -84,12 +69,9 @@ def pair_report(out: Path, result: dict) -> str:
     full = '<p><a href="report.html">Back to the site summary and representative examples</a> · <a href="report.html#raw-image-histograms">Raw image histograms</a></p>' + body
     full += _geometry_table(result["geometry_rows"]) + _pair_table(rows)
     for row in rows:
-        if row["status"] == "complete":
-            section = _pair_section(row, result["region_rows"])
-        else:
-            section = f'<section><h3>Input A = {row["input_index"]}, target B = {row["target_index"]}</h3><p>Original pair correction failed: {escape(row["error"])}</p></section>'
+        section = _pair_section(row, result["region_rows"], interactive=row["input_index"] in selected)
         if "example_arrays" in row:
-            if row["status"] == "complete":
+            if row.get("difference_status") == "complete":
                 section += _example(out, row)
             if row["quantile_status"] == "complete":
                 points = [p for p in result["quantile_rows"] if p["input_index"] == row["input_index"]]
@@ -97,7 +79,7 @@ def pair_report(out: Path, result: dict) -> str:
                     fig = _distribution_comparison(saved["input"], saved["target"], row, points)
                 stem = Path(row["example_arrays"]).with_suffix("").as_posix()
                 section += _figure(out, f"{stem}_distributions.png", fig,
-                                   f"Full-image brightness comparison: target B {row['target_index']} → input A {row['input_index']}. The 17 percentile points come from all {row['quantile_input_pixels']} input and {row['quantile_target_pixels']} target pixels. Both histogram corrections are applied to the same raw B without resampling or clipping; A is unchanged. Percentile fit RMS is {_number(row['quantile_fit_rms_dn'])} DN. Histograms use 64 shared linear bins for display only. Different noise strengths can affect the percentile gain; curvature in the points exposes differences a straight line cannot explain.")
+                                   f"Full-image brightness comparison: target B {row['target_index']} → input A {row['input_index']}. The 17 percentile points come from all {row['quantile_input_pixels']} input and {row['quantile_target_pixels']} target pixels. Available histogram corrections are applied to the same raw B without resampling or clipping; A is unchanged. Percentile fit RMS is {_number(row['quantile_fit_rms_dn'])} DN. Histograms use 64 shared linear bins for display only. Different noise strengths can affect the percentile gain; curvature in the points exposes differences a straight line cannot explain.")
         full += section
         if row["input_index"] in selected:
             overview += section
@@ -125,56 +107,51 @@ def _pair_table(rows: list[dict]) -> str:
     return body + '</table></div></section>'
 
 
-def _pair_section(row: dict, regions: list[dict]) -> str:
+def _pair_section(row: dict, regions: list[dict], *, interactive: bool = False) -> str:
     body = f'<section><h3>Input A = {row["input_index"]}, target B = {row["target_index"]}</h3>'
-    if row.get("translation_error"):
-        body += f'<p>{escape(row["translation_error"])} Its panel is grey.</p>'
-    if row["quantile_status"] != "complete":
-        body += f'<p>Percentile brightness failed: {escape(row["quantile_error"])} Its panel is grey.</p>'
-    if "difference_image_p99" in row:
-        body += '<p><label>Difference colour range: <select onchange="chooseDifferenceScale(this)">'
-        for suffix, label in (("", "95% — detail (default)"), ("_p99", "99% — wider"), ("_full", "Full range — all extremes")):
-            saturation = json.dumps([_number(row.get(f"{panel}_saturated{suffix}_pct"), 3) for panel in PAIR_PANELS])
-            body += f'<option data-image="{row[f"difference_image{suffix}"]}" data-limit="{_number(row[f"colour_limit{suffix}_dn"], 4)}" data-saturation-values="{escape(saturation, quote=True)}">{label}</option>'
-        body += '</select></label></p>'
-    body += '<div style="display:grid;grid-template-columns:repeat(5,1fr);text-align:center;font-size:14px">'
-    body += ''.join(f'<b>{title}</b>' for title in PAIR_TITLES) + '</div>'
-    body += f'<a data-difference-link href="{row["difference_image"]}"><img data-difference-image loading="lazy" src="{row["difference_image"]}" alt="Target minus fixed input: raw, translation, affine, affine plus two-region, affine plus percentiles"></a>'
-    palette = np.array(difference_palette()).reshape(-1, 3)
-    colours = [f'rgb({r},{g},{b})' for r, g, b in palette[[0, 127, 254]]]
-    limit = row["colour_limit_dn"]
-    body += '<div style="max-width:480px;margin:12px auto" aria-label="Difference colour scale in DN">'
-    body += f'<div style="height:16px;background:linear-gradient(to right,{",".join(colours)})"></div>'
-    body += f'<div style="display:flex;justify-content:space-between"><span data-colour-negative>≤ −{_number(limit, 4)}</span><span>0</span><span data-colour-positive>≥ +{_number(limit, 4)}</span></div><div style="text-align:center">Target − input (DN)</div></div>'
-    body += '<p>All five panels share a zero-centred linear colour scale and the same valid pixels. Default range: the largest per-panel 95th percentile of |difference|. Extreme pixels saturate blue/red instead of setting the range; grey is invalid or a failed estimate. The representative examples offer 95%, 99% and full-range views. Only colour changes: numerical differences, RMS and extrema include every valid pixel. Both brightness corrections use the same affine-aligned target. No smoothing or clipping of corrected intensities is applied.</p>'
-    body += '<table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P95 |difference| (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th><th>Beyond colour range (%)</th></tr>'
+    for key, label in (("translation_error", "Translation"), ("affine_error", "Affine"),
+                       ("error", "Two-region brightness"), ("quantile_error", "Percentile brightness")):
+        if row.get(key):
+            body += f'<p>{label}: {escape(row[key])} Successful stages remain available; failed panels are grey.</p>'
+    if row.get("difference_status") != "complete":
+        return body + f'<p>{escape(row.get("difference_error", "No valid comparison pixels."))}</p></section>'
+    body += f'<p><a href="{row["difference_viewer"]}" target="_blank">Open interactive differences at full size</a> · <a href="{row["difference_image"]}">Full-range native PNG</a></p>'
+    if interactive:
+        body += f'<iframe loading="lazy" title="Interactive differences: input {row["input_index"]}, target {row["target_index"]}" src="{row["difference_viewer"]}" style="width:100%;height:740px;border:1px solid #d9e2eb"></iframe>'
+    else:
+        body += '<div style="display:grid;grid-template-columns:repeat(5,1fr);text-align:center;font-size:14px">'
+        body += ''.join(f'<b>{title}</b>' for title in PAIR_TITLES) + '</div>'
+        body += f'<a href="{row["difference_viewer"]}"><img loading="lazy" src="{row["difference_image"]}" alt="Raw, translation, affine, two-region, percentile differences"></a>'
+        body += f'<p>Static PNG range: ±{_number(row["colour_limit_dn"])} DN. Open the interactive viewer to enter any positive DN limit or drag the continuous slider.</p>'
+    body += '<p>Both brightness corrections use the same affine-aligned target and common valid pixels. Input A stays untouched. The viewer changes only colour, with no fitting or smoothing. The statistics below always include all valid differences.</p>'
+    body += '<div class="scroll"><table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P95 |difference| (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th></tr>'
     for panel, title in zip(PAIR_PANELS, PAIR_TITLES):
         body += f'<tr><td>{title}</td>' + ''.join(f'<td>{_number(row.get(panel + suffix))}</td>' for suffix in
-                                               ("_min_dn", "_max_dn", "_abs_p95_dn", "_abs_p99_dn", "_rms_dn"))
-        body += f'<td data-saturation>{_number(row.get(panel + "_saturated_pct"), 3)}</td></tr>'
-    body += '</table><div class="regions">'
+                                               ("_min_dn", "_max_dn", "_abs_p95_dn", "_abs_p99_dn", "_rms_dn")) + '</tr>'
+    body += '</table></div><div class="regions">'
     cells = [cell for cell in regions if cell["input_index"] == row["input_index"]]
     for panel, title in zip(PAIR_PANELS[1:], PAIR_TITLES[1:]):
         body += f'<table><caption>{title}: RMS (DN)</caption>'
         for r in range(4):
             body += '<tr>' + ''.join('<td>' + _number(next((c["rms_dn"] for c in cells if c["panel"] == panel and c["row"] == r and c["col"] == col), None), 3) + '</td>' for col in range(4)) + '</tr>'
         body += '</table>'
-    body += '</div></section>'
-    return body
+    return body + '</div></section>'
 
 
 def _example(out: Path, row: dict) -> str:
     with np.load(out / row["example_arrays"], allow_pickle=False) as saved:
         arrays = {key: saved[key] for key in saved.files}
     fixed, target = arrays["input"], arrays["target"]
-    valid, labels = arrays["brightness_valid"], arrays["regions"]
+    valid, labels = arrays["difference_valid"], arrays["regions"]
     lo, hi = np.percentile(np.r_[fixed[valid], target[valid]], [1, 99])
     panels = ((fixed, "Raw input A — untouched"), (target, "Raw target B"),
               (np.ma.array(arrays["input_blurred"], mask=~arrays["input_blur_valid"]), "Blurred input copy"),
               (np.ma.array(arrays["target_blurred"], mask=~arrays["target_blur_valid"]), "Blurred target copy"),
               (arrays["translated_target"], "Target after translation"), (arrays["aligned_target"], "Target after affine"),
-              (arrays["corrected_target"], "Target after affine + two-region"), (labels, "Region labels on input A"))
-    fig, axes = plt.subplots(2, 4, figsize=(17, 8), constrained_layout=True)
+              (arrays["corrected_target"], "Target after affine + two-region"),
+              (arrays["quantile_corrected_target"], "Target after affine + percentiles"),
+              (labels, "Region labels on input A"))
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12), constrained_layout=True)
     for ax, (array, title) in zip(axes.flat, panels):
         if title.startswith("Region"):
             ax.imshow(np.where(valid, array, 0), cmap=REGION_COLOURS, vmin=0, vmax=2, interpolation="nearest")
@@ -187,8 +164,8 @@ def _example(out: Path, row: dict) -> str:
                    f"Raw-pair intermediate images: input {row['input_index']}, target {row['target_index']}. Shared grayscale limits; these are the blurred copies used to estimate each frame's geometry against the anchor. Brightness means use raw A and the unblurred, geometrically aligned B.")
     fig = _pixel_scatter(arrays, row)
     body += _figure(out, f"{stem}_brightness.png", fig,
-                    f"All {int(arrays['difference_valid'].sum())} corresponding valid pixels are plotted for each available stage, using the same mask and shared linear axes. Each dot is one pixel pair; no binning or subsampling. The affine panel's line passes through the two measured region means from the unchanged brightness calculation. No line is fitted to the scatter. Neither image is assumed clean.")
-    return body + f'<section><a href="{row["example_arrays"]}">Native original images, corrected targets, masks and pair matrix (NPZ)</a></section>'
+                    f"All {int(arrays['difference_valid'].sum())} corresponding valid pixels are plotted for each available stage, using the same mask and shared linear axes. Each dot is one pixel pair; no binning or subsampling. The affine panel compares the saved brightness mappings when available: the two-region line passes through the two measured region means, and the percentile line comes from the full raw distributions. No line is fitted to the scatter. Neither image is assumed clean.")
+    return body + f'<section><a href="{row["example_arrays"]}">Native original images, available corrected targets, masks and pair matrix (NPZ)</a></section>'
 
 
 def _distribution_comparison(input_image: np.ndarray, target_image: np.ndarray,
@@ -248,17 +225,21 @@ def _pixel_scatter(arrays: dict[str, np.ndarray], row: dict) -> plt.Figure:
             ax.scatter(x[finite], y[finite], s=1, alpha=0.2, color="#315d83", edgecolors="none", rasterized=True)
             xmin, xmax = min(xmin, float(x[finite].min())), max(xmax, float(x[finite].max()))
         else:
-            ax.text(0.5, 0.5, "Translation estimate failed", ha="center", transform=ax.transAxes)
+            ax.text(0.5, 0.5, "Geometry estimate failed", ha="center", transform=ax.transAxes)
         ax.set(title=title, xlabel="Target B (DN)")
         ax.grid(alpha=0.15)
     xx = np.array([xmin, xmax])
     for ax in axes:
         ax.plot(xx, xx, "--", color="gray", lw=0.9, label="Identity: y = x")
-    axes[2].plot(xx, row["gain"] * xx + row["offset_dn"], color="#c23928",
-                 label=f"Region fit: y = {row['gain']:.5g} x {row['offset_dn']:+.5g}")
-    axes[2].scatter([row["target_low_dn"], row["target_high_dn"]],
-                    [row["input_low_dn"], row["input_high_dn"]],
-                    c=["#2878bd", "#e89a27"], s=60, edgecolors="black", zorder=3, label="Measured low/high means")
+    if "gain" in row:
+        axes[2].plot(xx, row["gain"] * xx + row["offset_dn"], color="#2878bd",
+                     label=f"Region fit: y = {row['gain']:.5g} x {row['offset_dn']:+.5g}")
+        axes[2].scatter([row["target_low_dn"], row["target_high_dn"]],
+                        [row["input_low_dn"], row["input_high_dn"]],
+                        c=["#2878bd", "#e89a27"], s=60, edgecolors="black", zorder=3, label="Measured low/high means")
+    if "quantile_gain" in row and np.isfinite(arrays["aligned_target"][valid]).any():
+        axes[2].plot(xx, row["quantile_gain"] * xx + row["quantile_offset_dn"], color="#d27a15",
+                     label=f"Percentiles: y = {row['quantile_gain']:.5g} x {row['quantile_offset_dn']:+.5g}")
     xpad = max((xmax - xmin) * 0.03, 1e-6)
     ymin, ymax = float(y.min()), float(y.max())
     ypad = max((ymax - ymin) * 0.03, 1e-6)

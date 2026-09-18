@@ -74,12 +74,9 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
                 mask = example["difference_valid"]
                 differences = [example[key][mask] - example["input"][mask] for key in
                                ("target", "translated_target", "aligned_target", "corrected_target", "quantile_corrected_target")]
-                for suffix, percentile in (("", 95), ("_p99", 99), ("_full", 100)):
-                    limit = max(np.percentile(np.abs(delta), percentile) for delta in differences)
-                    assert row[f"colour_limit{suffix}_dn"] == pytest.approx(limit)
-                    with Image.open(site / row[f"difference_image{suffix}"]) as image:
-                        assert image.size == (5 * 128 + 4 * 8, 128)
-                    assert row[f"quantile_brightness_saturated{suffix}_pct"] == pytest.approx(100 * np.mean(np.abs(differences[-1]) > limit))
+                limit = max(np.max(np.abs(delta)) for delta in differences)
+                assert row["colour_limit_dn"] == pytest.approx(limit)
+                assert (site / row["difference_viewer"]).is_file()
                 assert row["quantile_brightness_rms_dn"] == pytest.approx(np.sqrt(np.mean(differences[-1] ** 2)))
                 for label, name in ((1, "low"), (2, "high")):
                     mask = (example["regions"] == label) & example["brightness_valid"]
@@ -106,9 +103,14 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert "Signed minimum (DN)" in html and "P99 |difference| (DN)" in html
     assert "Percentile gain" in html and "Two-region gain" in html
     assert "Full-image brightness comparison" in html
-    assert html.count('<select onchange="chooseDifferenceScale(this)">') == 3
-    assert full.count('<select onchange="chooseDifferenceScale(this)">') == 3
-    assert "Beyond colour range (%)" in html and "Affine + percentiles" in html
+    assert html.count('<iframe ') == full.count('<iframe ') == 3
+    assert "chooseDifferenceScale" not in html
+    assert 'id="acquisition-evolution"' in html and (site / "acquisition_evolution.png").is_file()
+    assert html.index('id="acquisition-evolution"') < html.index('id="raw-image-histograms"')
+    assert "Pair corrections B→A" in html and "Affine + percentiles" in html
+    assert "Percentile gain range" in (output / "index.html").read_text(encoding="utf-8")
+    assert saved["brightness"]["quantile_gain_min"] == min(r["quantile_gain"] for r in rows)
+    assert all((site / row["difference_viewer"]).is_file() for row in rows)
     assert (site / "pair_quantiles.csv").is_file()
     assert (site / "geometry.csv").is_file() and (site / "target_pairs.csv").is_file()
 
@@ -175,6 +177,42 @@ def test_quantile_failure_preserves_original_brightness_results(tmp_path: Path, 
             assert np.all(np.asarray(image)[:, 4 * (64 + 8):] == 255)
     assert "test percentile failure" in pair_report(tmp_path, result)
 
+
+def test_region_failure_keeps_geometry_and_percentile_differences(tmp_path: Path, monkeypatch) -> None:
+    from sem_noise import pair_diagnostics
+    from sem_noise.pair_matching import identity_transform
+    from test_difference_viewer import read_viewer
+
+    def fail(*args):
+        raise ValueError("test region means failure")
+
+    monkeypatch.setattr(pair_diagnostics, "measure_brightness", fail)
+    monkeypatch.setattr(pair_diagnostics, "estimate_geometry", lambda *a, **k: (identity_transform(), 1.0))
+    stack = np.stack([specimen(64) + i for i in range(4)])
+    result = diagnose_pairs(stack, np.ones(4, dtype=bool), np.arange(4), (None, None),
+                            tmp_path / "pairs", sigma=1, progress=lambda _: None)
+    for row in result["pair_rows"]:
+        assert row["status"] == "failed" and "gain" not in row
+        assert row["difference_status"] == row["affine_status"] == row["quantile_status"] == "complete"
+        assert row["brightness_rms_dn"] is None and row["quantile_brightness_rms_dn"] < 1e-10
+        _, values = read_viewer(tmp_path / row["difference_viewer"])
+        assert np.isnan(values[3]).all()
+        assert np.isfinite(values[0]).any() and np.isfinite(values[2]).any() and np.isfinite(values[4]).any()
+    from sem_noise.pair_report import pair_report
+    html = pair_report(tmp_path, result)
+    assert "test region means failure" in html and html.count('<iframe ') == 3
+
+
+def test_affine_drift_is_measured_at_centre_not_matrix_origin(tmp_path: Path, monkeypatch) -> None:
+    from sem_noise import pair_diagnostics
+    matrix = np.array([[1.02, 0.03, 2], [-0.01, 0.99, -3]])
+    monkeypatch.setattr(pair_diagnostics, "estimate_geometry", lambda *a, **k: (matrix.copy(), 1.0))
+    stack = np.stack([specimen(64) + i for i in range(4)])
+    result = diagnose_pairs(stack, np.ones(4, dtype=bool), np.arange(4), (None, None),
+                            tmp_path / "pairs", sigma=1, progress=lambda _: None)
+    for row in result["geometry_rows"][1:]:
+        centre = matrix @ [31.5, 31.5, 1] - [31.5, 31.5]
+        assert [row["affine_dx_px"], row["affine_dy_px"]] == pytest.approx(centre)
 
 def test_failed_translation_does_not_discard_successful_affine_pair(tmp_path: Path, monkeypatch) -> None:
     from sem_noise import pair_diagnostics
@@ -243,7 +281,7 @@ def test_uint8_png_differences_preserve_negative_dn_and_explain_extreme_scale(tm
     assert valid[20, 20] and valid[20, 21]
     assert differences[0][20, 20] == -220  # uint8 subtraction would incorrectly give +36
     assert differences[0][20, 21] == 220
-    assert 0 < limit < 1  # two speckles no longer wash out the whole map
+    assert limit >= 220  # full range is only the initial view; the viewer accepts any DN limit
     site = output / "site_001"
     saved = json.loads((site / "pair_registration.json").read_text(encoding="utf-8"))
     row = saved["pair_rows"][0]
@@ -251,12 +289,7 @@ def test_uint8_png_differences_preserve_negative_dn_and_explain_extreme_scale(tm
     assert row["before_abs_p99_dn"] == 0  # two pixels set the range; most differences are zero
     assert row["colour_limit_full_dn"] >= 220
     assert row["before_rms_dn"] == pytest.approx(np.sqrt(np.mean(expected[valid] ** 2)))
-    assert row["before_saturated_pct"] == pytest.approx(200 / valid.sum())
-    full_differences, full_valid, full_limit = captured["input_0000_target_0002_differences_full.png"]
-    assert full_limit >= 220
-    np.testing.assert_array_equal(full_valid, valid)
-    for delta, original in zip(full_differences, differences):
-        np.testing.assert_array_equal(delta, original)
+    assert (site / row["difference_viewer"]).is_file()
     html = (site / "report.html").read_text(encoding="utf-8")
     assert "Original dtype: <b>uint8</b>" in html
     assert "One bin per integer DN" in html

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from html.parser import HTMLParser
-import json
-
 import numpy as np
 import pytest
 
@@ -13,7 +10,6 @@ pytest.importorskip("scipy")
 import matplotlib.pyplot as plt
 
 from sem_noise.pair_matching import measure_quantile_brightness
-from sem_noise.pair_diagnostics import PAIR_PANELS
 from sem_noise.pair_report import _distribution_comparison, _pair_section, _pixel_scatter
 
 
@@ -76,30 +72,42 @@ def test_distribution_plot_compares_both_mappings_on_every_native_pixel() -> Non
         plt.close(fig)
 
 
-def test_difference_range_controls_keep_options_separate_from_saturation_cells() -> None:
-    class Elements(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.items = []
+def test_every_pair_links_to_an_interactive_viewer_but_only_examples_embed_it() -> None:
+    row = {"input_index": 0, "target_index": 4, "quantile_status": "complete",
+           "difference_status": "complete", "difference_image": "pairs/example.png",
+           "difference_viewer": "pairs/example.html", "colour_limit_dn": 220}
+    for interactive in (False, True):
+        html = _pair_section(row, [], interactive=interactive)
+        assert 'href="pairs/example.html"' in html
+        assert ('<iframe ' in html) == interactive
+        assert '95% ?' not in html and '<select' not in html
 
-        def handle_starttag(self, tag, attrs):
-            self.items.append((tag, dict(attrs)))
 
-    row = {"input_index": 0, "target_index": 4, "quantile_status": "complete"}
-    for suffix, limit, saturated in (("", 20, 4.5), ("_p99", 30, 0.7), ("_full", 220, 0)):
-        row[f"difference_image{suffix}"] = f"pairs/example{suffix}.png"
-        row[f"colour_limit{suffix}_dn"] = limit
-        row.update({f"{panel}_saturated{suffix}_pct": saturated for panel in PAIR_PANELS})
-    original = row.copy()
-    parsed = Elements()
-    parsed.feed(_pair_section(row, []))
-    options = [attrs for tag, attrs in parsed.items if tag == "option"]
-    assert len(options) == 3
-    for option, suffix, limit, saturated in zip(options, ("", "_p99", "_full"), (20, 30, 220), (4.5, 0.7, 0)):
-        assert option["data-image"] == row[f"difference_image{suffix}"]
-        assert float(option["data-limit"]) == limit
-        assert list(map(float, json.loads(option["data-saturation-values"]))) == [saturated] * 5
-    # The update targets only the five metric cells, never the option labels.
-    cells = [(tag, attrs) for tag, attrs in parsed.items if "data-saturation" in attrs]
-    assert len(cells) == 5 and all(tag == "td" for tag, _ in cells)
-    assert row == original
+def test_intermediate_examples_show_both_saved_brightness_corrections(tmp_path, monkeypatch) -> None:
+    from sem_noise import pair_report
+
+    fixed = np.arange(64, dtype=float).reshape(8, 8)
+    valid = np.ones(fixed.shape, dtype=bool)
+    arrays = {key: fixed.copy() for key in ("input", "target", "input_blurred", "target_blurred",
+                                           "translated_target", "aligned_target")}
+    arrays.update(corrected_target=fixed + 2, quantile_corrected_target=fixed * 1.1 - 3,
+                  regions=np.zeros_like(fixed), difference_valid=valid,
+                  input_blur_valid=valid, target_blur_valid=valid)
+    np.savez(tmp_path / "example.npz", **arrays)
+    seen = []
+
+    def capture(out, name, fig, caption):
+        if name.endswith("_images.png"):
+            images = {ax.get_title(): ax.images[0] for ax in fig.axes}
+            for title, key in (("Raw input A — untouched", "input"),
+                               ("Target after affine + two-region", "corrected_target"),
+                               ("Target after affine + percentiles", "quantile_corrected_target")):
+                np.testing.assert_array_equal(images[title].get_array(), arrays[key])
+                assert images[title].get_clim() == images["Raw input A — untouched"].get_clim()
+            seen.append(name)
+        plt.close(fig)
+        return ""
+
+    monkeypatch.setattr(pair_report, "_figure", capture)
+    pair_report._example(tmp_path, {"input_index": 0, "target_index": 1, "example_arrays": "example.npz"})
+    assert seen == ["example_images.png"]
