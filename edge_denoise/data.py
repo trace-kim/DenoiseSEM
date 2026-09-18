@@ -93,11 +93,15 @@ class PairInfo:
 @dataclass
 class PairBatch:
     inputs: torch.Tensor  # [B, 1, S, S] float32 in [-1, 1]
-    targets: torch.Tensor  # [B, 1, S, S] float32 in [-1, 1]
+    targets: torch.Tensor  # [B, 1, S, S]; corrected real targets may exceed nominal [-1, 1].
     second: torch.Tensor | None  # [B, 1, S, S] float32 in [-1, 1]
     gradient_targets: torch.Tensor | None = None  # [B, 1, S, S]; None for mode "target"
     second_shifts: torch.Tensor | None = None
     loss_margin: int = 0
+    target_valid: torch.Tensor | None = None
+    second_matrices: torch.Tensor | None = None  # Output A crop -> native second crop, pixel coordinates.
+    second_brightness: torch.Tensor | None = None  # Second prediction -> A, gain/offset in model units.
+    second_valid: torch.Tensor | None = None
 
 
 @dataclass
@@ -109,6 +113,10 @@ class ValPairBatch:
     gradient_targets: torch.Tensor | None = None
     second_shifts: torch.Tensor | None = None
     loss_margin: int = 0
+    target_valid: torch.Tensor | None = None
+    second_matrices: torch.Tensor | None = None
+    second_brightness: torch.Tensor | None = None
+    second_valid: torch.Tensor | None = None
 
 
 def _to_model_chw(crop: np.ndarray) -> np.ndarray:

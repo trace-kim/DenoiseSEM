@@ -69,6 +69,11 @@ def train(
     device: Optional[str] = typer.Option(None, help="auto | cpu | cuda."),
     seed: Optional[int] = typer.Option(None, min=0, help="Base training seed."),
     init_checkpoint: Optional[Path] = typer.Option(None, help="Weights-only initialization for a fresh run."),
+    dataset_dir: Optional[Path] = typer.Option(None, help="Override data.dataset_dir."),
+    image_size: Optional[int] = typer.Option(None, min=8, help="Override native training crop size."),
+    lr: Optional[float] = typer.Option(None, min=0.0, help="Override learning rate."),
+    real_registration: Optional[str] = typer.Option(None, help="Inline real target geometry: none | translation | affine."),
+    real_brightness: Optional[str] = typer.Option(None, help="Inline real target brightness: none | percentile; full-frame B to A."),
 ) -> None:
     """Train an edge_denoise model as described by a config file."""
     import sys
@@ -81,8 +86,15 @@ def train(
     raw = loaded.model_dump()
     overrides = {"run_dir": run_dir, "max_steps": max_steps, "batch_size": batch_size,
                  "accumulation_steps": accumulation_steps, "precision": precision,
-                 "device": device, "seed": seed, "init_checkpoint": init_checkpoint}
+                 "device": device, "seed": seed, "init_checkpoint": init_checkpoint, "lr": lr}
     raw["training"].update({name: value for name, value in overrides.items() if value is not None})
+    raw["data"].update({name: value for name, value in
+                        (("dataset_dir", dataset_dir), ("image_size", image_size)) if value is not None})
+    if real_registration is not None or real_brightness is not None:
+        matching = raw["data"].get("real_matching") or {}
+        matching.update({name: value for name, value in
+                         (("registration", real_registration), ("brightness", real_brightness)) if value is not None})
+        raw["data"]["real_matching"] = matching
     loaded = Config.model_validate(raw)
     checkpoint: Path | None = resume_from
     if resume and checkpoint is None:

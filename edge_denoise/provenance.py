@@ -40,6 +40,7 @@ def dataset_fingerprint(config: Config, *, cache: BurstCache | None = None) -> d
             "sources": len(cache.all_sources),
             "normalization": cache.real_metadata["normalization"],
             "registration": cache.real_metadata["registration"],
+            "pair_matching": None if config.data.real_matching is None else config.data.real_matching.model_dump(),
             "split": {split: [source.source_index for source in cache.sources_for_split(split)]
                       for split in ("train", "val", "test")},
         }

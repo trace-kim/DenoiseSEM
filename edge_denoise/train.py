@@ -74,7 +74,22 @@ TENSORBOARD_DIR_NAME = "tb"
 # top of these (a second run would overwrite the checkpoints and provenance
 # while TensorBoard merged both histories -- exactly what happened to the
 # 2026-09-02 ft_consist run); ``overwrite=True`` deletes them first.
-RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", TENSORBOARD_DIR_NAME)
+RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", "real_matching.json", TENSORBOARD_DIR_NAME)
+
+
+def _masked_mean(values: torch.Tensor, valid: torch.Tensor | None, margin: int) -> torch.Tensor:
+    """Give each crop equal weight, excluding warp footprints and loss borders."""
+    if margin:
+        values = values[..., margin:-margin, margin:-margin]
+        if valid is not None:
+            valid = valid[..., margin:-margin, margin:-margin]
+    if valid is None:
+        return values.mean()
+    mask = valid.to(device=values.device, dtype=torch.bool).expand_as(values)
+    counts = mask.flatten(1).sum(1)
+    if torch.any(counts == 0):
+        raise ValueError("no valid supervised pixels remain in a real-SEM crop; inspect registration and crop size")
+    return (torch.where(mask, values, 0).flatten(1).sum(1) / counts).mean()
 
 
 def existing_run_artifacts(run_dir: str | Path) -> list[Path]:
@@ -216,6 +231,8 @@ class Trainer:
             self.config = config
         elif config.data.white_level is not None:
             raise ValueError("explicit intensity levels require a prepared real SEM dataset")
+        if config.data.real_matching is not None and self.cache.real_metadata is None:
+            raise ValueError("data.real_matching requires a prepared real SEM dataset")
         summary = self.cache.summary()
         logger.info(
             "dataset: %d train / %d val sources, min %d frames, %.0f MB cached",
@@ -230,7 +247,12 @@ class Trainer:
         if self.cache.real_metadata is not None:
             from .real_data import RealPairFactory
 
-            self.factory = RealPairFactory(self.cache, config, seed=factory_seed)
+            if config.data.real_matching is None:
+                self.factory = RealPairFactory(self.cache, config, seed=factory_seed)
+            else:
+                from .real_matching import MatchedRealPairFactory
+
+                self.factory = MatchedRealPairFactory(self.cache, config, seed=factory_seed)
         elif objective.fusion is not None:
             self.factory = FusionFactory(
                 self.cache,
@@ -295,6 +317,9 @@ class Trainer:
         if resume_from is not None:
             self._restore(Path(resume_from))
 
+        if config.data.real_matching is not None:
+            self.runtime.on_primary(lambda: self.factory.write_measurements(self.run_dir / "real_matching.json"))
+
         self.runtime.on_primary(lambda: (self.run_dir / "config.yml").write_text(
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=True),
             encoding="utf-8",
@@ -333,6 +358,8 @@ class Trainer:
         if payload.get("dataset_fingerprint") != getattr(self.cache, "real_fingerprint", None):
             raise ValueError("resume dataset differs from the checkpoint; use init_checkpoint for a new dataset")
         stored_config = Config.model_validate(payload["config"])
+        if stored_config.data.real_matching != self.config.data.real_matching:
+            raise ValueError("resume real pair matching differs from checkpoint; use init_checkpoint for a new arm")
         if stored_config != self.config:
             warnings.warn(
                 f"checkpoint {checkpoint_path} was written with a different config; "
@@ -411,8 +438,13 @@ class Trainer:
             prediction_second=None if prediction_second is None else prediction_second.float(),
             second_shifts=None if batch.second_shifts is None else batch.second_shifts.to(self.device),
             margin=batch.loss_margin,
+            **self._matching_arguments(batch),
         )
         return prediction, terms
+
+    def _matching_arguments(self, batch) -> dict:
+        return {key: None if getattr(batch, key) is None else getattr(batch, key).to(self.device)
+                for key in ("target_valid", "second_matrices", "second_brightness", "second_valid")}
 
     def _loss_terms(
         self,
@@ -424,37 +456,44 @@ class Trainer:
         prediction_second: torch.Tensor | None = None,
         second_shifts: torch.Tensor | None = None,
         margin: int = 0,
+        target_valid: torch.Tensor | None = None,
+        second_matrices: torch.Tensor | None = None,
+        second_brightness: torch.Tensor | None = None,
+        second_valid: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Per-term mean losses; keys are absent when their weight is zero."""
         objective = self.config.objective
         reference = targets if gradient_targets is None else gradient_targets
 
-        def distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-            if margin:
-                a, b = a[..., margin:-margin, margin:-margin], b[..., margin:-margin, margin:-margin]
-            if objective.loss == "l1":
-                return (a - b).abs().mean()
-            return ((a - b) ** 2).mean()
+        def distance(a: torch.Tensor, b: torch.Tensor, *, gradient: bool = False) -> torch.Tensor:
+            valid = target_valid
+            if gradient and valid is not None:
+                # Sobel's neighbours also need valid target samples.
+                valid = torch.nn.functional.max_pool2d((~valid).float(), 3, stride=1, padding=1) == 0
+            error = (a - b).abs() if objective.loss == "l1" else (a - b) ** 2
+            return _masked_mean(error, valid, margin)
 
         terms: dict[str, torch.Tensor] = {}
         if objective.representation == "gradient":
-            terms["gradient"] = distance(prediction, sobel(reference))
+            terms["gradient"] = distance(prediction, sobel(reference), gradient=True)
         else:
             if objective.lambda_image > 0.0:
                 terms["image"] = distance(prediction, targets)
             if objective.lambda_gradient > 0.0:
-                terms["gradient"] = distance(sobel(prediction), sobel(reference))
+                terms["gradient"] = distance(sobel(prediction), sobel(reference), gradient=True)
         if objective.lambda_consistency > 0.0:
             if second is None:
                 raise RuntimeError("consistency loss requires a second realization")
             if prediction_second is None:
                 prediction_second = self.model(second).float()
-            if second_shifts is not None:
+            if second_matrices is not None:
+                from .real_matching import match_prediction
+
+                prediction_second = match_prediction(prediction_second, second_matrices, second_brightness)
+            elif second_shifts is not None:
                 prediction_second = warp_prediction(prediction_second, second_shifts)
             difference = prediction - prediction_second
-            if margin:
-                difference = difference[..., margin:-margin, margin:-margin]
-            terms["consistency"] = (difference ** 2).mean()
+            terms["consistency"] = _masked_mean(difference ** 2, second_valid, margin)
         return terms
 
     @property
@@ -613,6 +652,7 @@ class Trainer:
                 gradient_targets,
                 second_shifts=None if batch.second_shifts is None else batch.second_shifts.to(self.device),
                 margin=batch.loss_margin,
+                **self._matching_arguments(batch),
             )
             writer.add_scalar("val/loss", float(self._combine(terms).item()), self.step)
 
@@ -629,13 +669,15 @@ class Trainer:
 
             # Live repeatability readout: RMS disagreement of two independent
             # frames' denoised images, in [0, 1] units (model range is 2x).
-            if batch.second_shifts is not None:
+            if batch.second_matrices is not None:
+                from .real_matching import match_prediction
+
+                denoised_second = match_prediction(denoised_second, batch.second_matrices.to(self.device),
+                                                    batch.second_brightness.to(self.device))
+            elif batch.second_shifts is not None:
                 denoised_second = warp_prediction(denoised_second, batch.second_shifts.to(self.device))
             difference = denoised - denoised_second
-            if batch.loss_margin:
-                m = batch.loss_margin
-                difference = difference[..., m:-m, m:-m]
-            consistency = (difference ** 2).mean()
+            consistency = _masked_mean(difference ** 2, batch.second_valid, batch.loss_margin)
             writer.add_scalar(
                 "val/consistency_sigma",
                 float(torch.sqrt(consistency / 2.0).item()) / 2.0,

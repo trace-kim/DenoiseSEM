@@ -17,6 +17,12 @@ Run commands from the repository root. Commands below use a Linux shell for
 the training server. Data and run paths are relative and can be changed in
 the YAML recipes. The existing synthetic workflows keep their original format.
 
+For registration/brightness ablations using one existing prepared `align none`
+dataset, see [inline target matching](real_sem_inline_matching.md). It adds
+translation/affine/none and percentile/none choices at training time, with four
+independent N2N commands and matching consistency continuations. The original
+prepared-data workflow below remains unchanged when those options are omitted.
+
 ## 1. Set up the server environment
 
 Use a server environment with a CUDA-enabled PyTorch installation compatible

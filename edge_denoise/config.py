@@ -25,6 +25,18 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RealMatchingConfig(_StrictModel):
+    """Match raw real-SEM targets at sampling time; inputs stay native.
+
+    Translation retains prepare-real's estimator/settings. Affine uses the
+    report's translation-initialized ECC (1 px fit blur). Percentiles always
+    describe the full raw frame, before cropping or registration.
+    """
+
+    registration: Literal["none", "translation", "affine"] = "none"
+    brightness: Literal["none", "percentile"] = "none"
+
+
 class DataConfig(_StrictModel):
     """Burst-dataset access; fields mirror burst_diffusion so the identical
     content-group split (and therefore the identical held-out sources) falls
@@ -40,6 +52,7 @@ class DataConfig(_StrictModel):
     # Filled from a prepared real dataset and persisted in its checkpoint.
     black_level: float | None = Field(default=None, allow_inf_nan=False)
     white_level: float | None = Field(default=None, allow_inf_nan=False)
+    real_matching: RealMatchingConfig | None = None  # None preserves the prepared-data workflow.
 
     @model_validator(mode="after")
     def _check_holdout_fractions(self) -> "DataConfig":
