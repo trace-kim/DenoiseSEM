@@ -345,14 +345,55 @@ def _acquisition_figure(frames: list[dict], geometry: list[dict], registration: 
     return fig
 
 
+def acquisition_brightness_report(out: Path, rows: list[dict]) -> str:
+    """Show raw and actually corrected full-image means on one fixed reference."""
+    anchor = rows[0]["reference_index"]
+    x = [row["frame_index"] for row in rows]
+    fig, axes = plt.subplots(3, 1, figsize=(13, 10), sharex=True, constrained_layout=True)
+    for key, label, style, color in (("raw_mean_dn", "Raw", ".-", "#777777"),
+                                      ("two_region_mean_dn", "Two-region gain/offset", ".-", "#2878bd"),
+                                      ("quantile_mean_dn", "Percentile gain/offset", "x--", "#d27a15")):
+        axes[0].plot(x, [r.get(key, np.nan) for r in rows], style, label=label, color=color)
+    axes[0].axhline(rows[0]["reference_mean_dn"], color="gray", ls=":",
+                   label=f"Reference: acquisition {anchor}")
+    axes[0].set(title=f"Acquisition brightness matched to acquisition {anchor}", ylabel="Mean intensity (DN)")
+    for prefix, label, style, color in (("two_region_", "Two-region", ".-", "#2878bd"),
+                                        ("quantile_", "Percentiles", "x--", "#d27a15")):
+        for ax, key in zip(axes[1:], ("gain", "offset_dn")):
+            ax.plot(x, [r.get(prefix + key, np.nan) for r in rows], style, label=label, color=color)
+    axes[1].set(title="Gain to the same reference", ylabel="Gain")
+    axes[2].set(title="Offset to the same reference", ylabel="Offset (DN)")
+    for ax in axes:
+        for row in rows:
+            if not row["included"]:
+                ax.axvline(row["frame_index"], color="gray", alpha=0.2)
+        ax.set_xlabel("Acquisition index")
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=9)
+    body = f'<section id="acquisition-brightness"><h2>Before/after brightness: one fixed reference</h2><p>Every included acquisition is matched to <b>raw acquisition {anchor}</b>, the first included image. Training input A stays untouched; these are diagnostic copies. Excluded acquisitions retain their raw means and grey markers; missing corrections break the lines.</p>'
+    body += '<p>All three curves average every supplied pixel, including clipping bounds, over the same full image (or explicitly configured ROI). Each corrected mean is measured from <code>gain × raw image + offset</code>, with no resampling, comparison crop, blur, output clipping, or additional mean normalization. Geometry is used only to estimate the two-region coefficients against the reference; its fixed low/high labels and corresponding valid pixels are the same as in the pair workflow. Percentiles use every supplied raw pixel. Neither estimator is changed.</p>'
+    body += '<p>A flat corrected curve near the dotted reference level indicates consistent whole-image brightness. Remaining trends or excursions expose mismatch; motion bringing different content into the field, specimen changes, clipping, or noise-distribution changes can still affect these means. This is separate from the cyclic B→A pair tracks.</p>'
+    body += '<p><a href="acquisition_brightness.csv">All plotted means, gains, offsets, pixel counts and status/reasons (CSV)</a> · <a href="pair_registration.json">Measurements JSON</a></p></section>'
+    body += _figure(out, "acquisition_brightness.png", fig,
+                    f"One brightness reference: acquisition {anchor}. Raw, two-region gain/offset, and percentile gain/offset means use identical full-image support. Corrected curves are measurements of corrected diagnostic images, not forced-flat means.")
+    body += '<section><details><summary>Acquisition correction status and diagnostic arrays</summary><table><tr><th>Acquisition</th><th>Two-region status / reason</th><th>Percentile status / reason</th><th>Native diagnostic arrays</th></tr>'
+    for row in rows:
+        link = f'<a href="{escape(row["example_arrays"])}">Raw, reference and available corrected images (NPZ)</a>' if "example_arrays" in row else ""
+        statuses = [escape(row.get(f"{prefix}_error", row[f"{prefix}_status"])) for prefix in ("two_region", "quantile")]
+        body += f'<tr><td>{row["frame_index"]}</td><td>{statuses[0]}</td><td>{statuses[1]}</td><td>{link}</td></tr>'
+    return body + '</table></details></section>'
+
+
 def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: list[dict],
-                registration_rows: list[dict], regions: list[dict], intermediate_html: str = "") -> None:
+                registration_rows: list[dict], regions: list[dict], intermediate_html: str = "",
+                acquisition_html: str = "") -> None:
     """Render quantitative diagnostics without treating the repeat mean as truth."""
     native, aligned = summary["modes"]["native"], summary["modes"]["aligned"]
     body = '<p><a href="../index.html">All sites</a> · <a href="#acquisition-evolution">Acquisition evolution</a> · <a href="#raw-image-histograms">Raw image histograms</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
     body += f'<section><h2>{summary["accepted_frames"]} / {summary["input_frames"]} frames analysed</h2><p>Native flat-region temporal σ: <b>{_number(native["flat_temporal_sigma_dn"])} DN</b>. Aligned: <b>{_number(aligned["flat_temporal_sigma_dn"])} DN</b>. Largest drift: <b>{_number(summary["max_drift_px"])} px</b>. Largest corner displacement from the affine terms: <b>{_number(summary["max_corner_effect_px"])} px</b>.</p><p>DN means digital number: the original exported pixel units. Native statistics use integer translations; aligned statistics use bilinear translations of the fitted centre shift only (no affine warp, no brightness correction). The latter changes noise variance and spatial correlation. The predicted mean variance multiplier for independent white noise is {_number(summary["bilinear_white_noise_variance_factor_mean"])}; no universal correction is applied.</p></section>'
     body += _warnings(summary["warnings"])
     body += '<section id="acquisition-evolution"><h2>Acquisition brightness and motion</h2><p>All acquisitions in order. These tracks describe the measured sequence; the pair-correction tracks below describe different B→A mappings.</p></section>'
+    body += acquisition_html
     body += _figure(out, "acquisition_evolution.png", _acquisition_figure(frames, registration_rows, summary["registration"]),
                     "Raw brightness uses the full supplied image. The two geometrically aligned means use the shared crop for noise statistics; none receives a gain/offset correction. Drift is content displacement (x right, y down), not the negative shift applied for alignment. Affine drift is measured at the image centre, separately from deformation at the corners. Excluded acquisitions and failed estimates break the lines; grey lines mark exclusions. Exact values are in frames.csv and geometry.csv (registration.csv in legacy fit mode).")
     body += _registration_report(out, summary, registration_rows, regions)

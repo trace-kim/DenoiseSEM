@@ -110,7 +110,36 @@ These can explain differences between otherwise comparable datasets.
 
 ### Acquisition evolution and pair corrections
 
-The top of each site report shows **brightness evolution without correction**
+In default affine mode, the top of each site report now shows **before/after
+acquisition brightness against one fixed reference**, the first included raw
+image (its acquisition index is printed). The three curves are **Raw**,
+**Two-region gain/offset**, and **Percentile gain/offset**; both methods' gain
+and offset tracks are directly below. These cover every acquisition, with raw
+means retained for excluded frames and gaps for excluded/failed corrections.
+Independent method statuses and failure reasons are available beside the plot.
+
+Coefficients are estimated anew against that same reference, never taken from
+the cyclic pairs. Two-region estimation uses the existing fixed site labels
+and valid corresponding reference/affine-aligned target pixels. Percentile
+estimation uses the entire supplied raw reference and target, including
+clipping bounds, without automatic spatial selection. Both estimators are
+unchanged. Each gain/offset is then applied to an **unresampled raw diagnostic
+copy**. All three plotted means include **every supplied pixel** (the full
+image, or the same explicitly configured ROI), including clipped pixels.
+There is no comparison crop, interpolation, blur, output clipping, or added
+mean normalization in these means. Thus changing geometric support cannot
+masquerade as successful brightness correction. Content entering/leaving the
+field, specimen changes and different noise distributions can still prevent
+a flat corrected curve; the plot does not hide these effects.
+
+`acquisition_brightness.csv` and `pair_registration.json` export every plotted
+mean/coefficient, reference index, pixel count and status. Native raw/reference
+and corrected diagnostic arrays for the first, middle and last included frames
+are saved in `acquisition_brightness/frame_NNNN.npz`. Training input A and the
+noise statistics remain untouched. The separate full report includes the same
+fixed-reference plot.
+
+The site report also retains **brightness evolution without correction**
 (raw full-image mean plus integer/subpixel-aligned means on the common crop),
 **x/y translation drift**, **x/y affine centre drift**, and **affine corner
 effect** over acquisition order. Excluded frames and failed estimates break
@@ -233,7 +262,18 @@ values; this is a starting view, not a recommended range. There are no
 percentile presets. Exact entry supports limits smaller than the slider's
 screen resolution and larger than the observed data range.
 
-The viewer recolours signed native-resolution differences in the browser.
+Interactive maps use **Gaussian-blurred diagnostic images, σ = 2 pixels**,
+with the blur applied after each correction stage. Filtering the signed
+difference is equivalent to subtracting these blurred images because the
+Gaussian filter is linear. This reduces noise so displaced edges stand out.
+The same finite Gaussian kernel (radius 8 pixels) is used for all panels;
+pixels whose support touches an invalid pixel or image border are grey.
+Failed stages do not suppress successful panels. The viewer labels the blur,
+and its statistics/readout describe these blurred differences. The static
+PNGs, residual tables, estimators, and training images remain unblurred.
+Early/late and legacy-fit interactive viewers use the same display blur.
+
+The viewer recolours these signed native-resolution differences in the browser.
 It requires no server, external assets or new analysis run. Hover to read a
 pixel's signed DN difference, enable **Native pixels** to inspect without
 resizing, and **Save current PNG** to export the selected scale. Each stage's
@@ -270,6 +310,8 @@ is fitted to the scatter points.
 |---|---|
 | `pair_report_full.html` | All pair comparisons and measurement tables; linked from the concise site report |
 | `geometry.csv` | Translation, affine sampling matrices, ECC scores, corner effects, failure reasons |
+| `acquisition_brightness.png`, `acquisition_brightness.csv` | Raw and both corrected acquisition means against the first included frame, both gain/offset tracks, pixel counts, statuses and reasons |
+| `acquisition_brightness/frame_NNNN.npz` | Three examples of the actual full-image diagnostic copies used to calculate the means, with reference and available region-fit arrays |
 | `target_pairs.csv` | Input/target indices, pair matrix, both region means/counts, original and percentile gain/offset values, independent statuses, residual RMS, image links |
 | `pair_quantiles.csv` | The 17 full-image percentile pairs used by each new brightness fit, with corrected target percentiles |
 | `pair_registration.json` | Geometry and pair measurements with method/selection conventions |

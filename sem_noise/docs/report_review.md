@@ -4,6 +4,44 @@ The report must explain acquisition stability and let a reader compare changes
 to noisy target B while raw input A remains untouched. An acquisition trend,
 a B-to-A correction, and noise about a repeat mean answer different questions.
 
+## Fixed-reference brightness and blurred difference review
+
+The cyclic pair means could not demonstrate acquisition-wide brightness
+consistency: every B was matched to a different A. The report now starts with
+raw, two-region gain/offset and percentile gain/offset means against the first
+included raw acquisition, clearly identified by index. Both coefficient tracks
+use that same reference. Each mean is measured from the actual unresampled
+diagnostic image over every supplied pixel, including clipping bounds. No
+extra mean normalization is used. Geometry affects two-region estimation only;
+changing overlap, resampling or cropping cannot change the plotted pixel support.
+Percentile estimation remains full-image. Excluded frames keep their raw means;
+failed/excluded corrections leave gaps with independent reasons.
+
+`acquisition_brightness.csv` and the JSON export contain all plotted values.
+Three native NPZ examples retain the reference, raw frames and available
+corrected copies. The graph appears in both the site and full pair reports,
+while the original motion/raw-brightness tracks, histograms, scatter plots,
+three pair examples and all residual/noise diagnostics remain available.
+
+Interactive differences now represent images Gaussian-blurred at σ = 2 pixels
+after each correction stage. Linearity allows the equivalent filtering of
+signed differences. Full kernel support is required: an 8-pixel margin around
+invalid pixels and borders is grey, and failed stages remain independent.
+The viewer explicitly identifies its blur and its statistics as blurred;
+static PNGs and residual tables remain unblurred. Colour entry, slider, full
+range, pixel readout and PNG export are preserved.
+
+Regression checks cover known gain/offset recovery, actual corrected-image
+means, outliers outside geometric support that must prevent a flat track,
+excluded frames, independent failures, and blur that suppresses noise while
+retaining displaced edges without invalid-pixel leakage. The SEM suite and
+real-pair training compatibility checks passed (120 tests, including the
+offline browser controls). A complete 128-acquisition synthetic report was
+also generated for workflow review. These checks validate implementation,
+not physical estimator accuracy on the user's server dataset.
+
+## Earlier report review
+
 The review compared the current report, exported measurements and failure paths
 with the reports before and after the registration rewrite (`5e42751` and
 `6033065`). It found and addressed these problems:

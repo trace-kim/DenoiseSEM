@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -45,6 +46,23 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert all(row["input_index"] != row["target_index"] for row in rows)
     assert len(saved["region_rows"]) == 6 * 5 * 16
     assert len(saved["quantile_rows"]) == 6 * 17
+    acquisition_rows = saved["acquisition_brightness_rows"]
+    assert [row["frame_index"] for row in acquisition_rows] == list(range(6))
+    assert {row["reference_index"] for row in acquisition_rows} == {0}
+    with (site / "acquisition_brightness.csv").open(encoding="utf-8", newline="") as stream:
+        exported = list(csv.DictReader(stream))
+    for row, csv_row in zip(acquisition_rows, exported):
+        q = measure_quantile_brightness(stack[0], stack[row["frame_position"]])
+        assert row["quantile_gain"] == q["gain"]
+        assert row["quantile_offset_dn"] == q["offset_dn"]
+        for key in ("raw_mean_dn", "two_region_mean_dn", "quantile_mean_dn",
+                    "two_region_gain", "two_region_offset_dn", "quantile_gain", "quantile_offset_dn"):
+            assert float(csv_row[key]) == row[key]
+        if "example_arrays" in row:
+            with np.load(site / row["example_arrays"]) as example:
+                for key, array in (("raw_mean_dn", "raw"), ("two_region_mean_dn", "two_region_corrected"),
+                                   ("quantile_mean_dn", "quantile_corrected")):
+                    assert row[key] == example[array].mean()
     for row in rows:
         a, b = row["input_index"], row["target_index"]
         expected_gain = truths[b]["gain"] / truths[a]["gain"]
@@ -92,6 +110,9 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert "one least-squares fit per frame" not in html
     assert 'href="pair_report_full.html"' in html
     full = (site / "pair_report_full.html").read_text(encoding="utf-8")
+    assert 'id="acquisition-brightness"' in html and 'id="acquisition-brightness"' in full
+    assert html.index('id="acquisition-brightness"') < html.index('id="raw-image-histograms"')
+    assert "no resampling" in html and (site / "acquisition_brightness.png").is_file()
     assert html.count("<h3>Input A = ") == 3
     assert full.count("<h3>Input A = ") == 6
     for row in rows:

@@ -22,6 +22,67 @@ def matrix_fields(matrix: np.ndarray) -> dict[str, float]:
     return {f"m{r}{c}": float(matrix[r, c]) for r in range(2) for c in range(3)}
 
 
+def acquisition_brightness(stack: np.ndarray, included: np.ndarray, frame_indices: np.ndarray,
+                           levels: tuple[float | None, float | None], affines: dict[int, np.ndarray],
+                           labels: np.ndarray, region_error: str, directory: Path) -> list[dict]:
+    """Match every included acquisition to the first included raw frame.
+
+    Geometry is used only to measure corresponding two-region means. Apply
+    each mapping to an unresampled diagnostic copy and average ALL supplied
+    pixels, including clipping bounds, identically before and after correction.
+    This separates brightness changes from interpolation/overlap changes; scene
+    content entering or leaving the field can still change the whole-image mean.
+    """
+    positions = np.flatnonzero(included)
+    anchor = int(positions[0])
+    reference = np.asarray(stack[anchor], dtype=np.float64)
+    reference_bad = clip_mask(reference, levels)
+    examples = {int(positions[k]) for k in (0, len(positions) // 2, len(positions) - 1)}
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for i, source in enumerate(stack):
+        frame = np.asarray(source, dtype=np.float64)
+        row = {"frame_position": i, "frame_index": int(frame_indices[i]), "included": bool(included[i]),
+               "reference_index": int(frame_indices[anchor]), "mean_pixels": int(frame.size),
+               "reference_mean_dn": float(reference.mean()), "raw_mean_dn": float(frame.mean())}
+        rows.append(row)
+        if not included[i]:
+            row.update(two_region_status="excluded", quantile_status="excluded")
+            continue
+        example = {"reference": reference, "raw": frame} if i in examples else None
+        try:
+            if i not in affines:
+                raise ValueError("no affine estimate for this acquisition; see geometry.csv")
+            if region_error:
+                raise ValueError(region_error)
+            aligned, valid = warp_target(frame, affines[i], invalid=clip_mask(frame, levels))
+            valid &= ~reference_bad
+            measured = measure_brightness(reference, aligned, labels, valid)
+            corrected = measured["gain"] * frame + measured["offset_dn"]
+            row.update(two_region_status="complete", two_region_mean_dn=float(corrected.mean()))
+            row.update({f"two_region_{key}": value for key, value in measured.items()})
+            if example is not None:
+                example.update(two_region_corrected=corrected, aligned_for_region_fit=aligned,
+                               region_fit_valid=valid, regions=labels)
+        except ValueError as error:
+            row.update(two_region_status="failed", two_region_error=str(error))
+        try:
+            measured = measure_quantile_brightness(reference, frame)
+            corrected = measured["gain"] * frame + measured["offset_dn"]
+            row.update(quantile_status="complete", quantile_mean_dn=float(corrected.mean()))
+            row.update({f"quantile_{key}": measured[key] for key in
+                        ("gain", "offset_dn", "fit_rms_dn", "input_pixels", "target_pixels")})
+            if example is not None:
+                example["quantile_corrected"] = corrected
+        except ValueError as error:
+            row.update(quantile_status="failed", quantile_error=str(error))
+        if example is not None:
+            name = f"frame_{frame_indices[i]:04d}.npz"
+            np.savez_compressed(directory / name, **example)
+            row["example_arrays"] = f"acquisition_brightness/{name}"
+    return rows
+
+
 def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.ndarray,
                    levels: tuple[float | None, float | None], directory: Path, *,
                    sigma: float, progress: Callable[[str], None]) -> dict:
@@ -91,6 +152,10 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
     except ValueError as error:
         region_error = str(error)
     np.savez_compressed(directory / "brightness_regions.npz", mean=mean, valid=mean_valid, labels=labels)
+
+    progress("brightness history: matching acquisitions to the first included frame")
+    acquisition_rows = acquisition_brightness(stack, included, frame_indices, levels, affines, labels,
+                                             region_error, directory.parent / "acquisition_brightness")
 
     examples = {positions[k] for k in (0, len(positions) // 2, len(positions) - 1)}
     pair_rows, region_rows, quantile_rows = [], [], []
@@ -227,5 +292,6 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
             brightness[f"{method}{prefix}_min{suffix}"] = min(values) if values else None
             brightness[f"{method}{prefix}_max{suffix}"] = max(values) if values else None
     return {"geometry_rows": rows, "pair_rows": pair_rows, "region_rows": region_rows, "quantile_rows": quantile_rows,
+            "acquisition_brightness_rows": acquisition_rows,
             "shifts": shifts, "registration": registration, "brightness": brightness,
             "maps": {"pair_reference_mean": mean, "pair_reference_valid": mean_valid, "brightness_regions": labels}}

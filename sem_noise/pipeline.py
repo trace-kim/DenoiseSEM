@@ -148,7 +148,7 @@ def _load_stack(frames: list[Frame], config: AnalysisConfig, scratch: Path) -> t
 
 def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                   progress: Callable[[str], None]) -> dict:
-    from .report import intermediate_examples, raw_histogram_examples, site_report
+    from .report import acquisition_brightness_report, intermediate_examples, raw_histogram_examples, site_report
 
     site = frames[0].site
     if len(frames) < config.min_frames:
@@ -175,6 +175,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
             positions = np.flatnonzero(included)
             shifts = np.zeros((len(frames), 2), dtype=float)
             registration_rows, pass1_rows, regions, maps = [], [], [], {}
+            acquisition_html = ""
             progress(f"{site}: rendering raw image histograms")
             intermediate_html = raw_histogram_examples(out, stack, included, frame_indices, audit[0]["dtype"], levels)
             if config.registration == "affine":
@@ -192,10 +193,13 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_csv(out / "target_pairs.csv", pairs["pair_rows"])
                 write_csv(out / "pair_regions.csv", pairs["region_rows"])
                 write_csv(out / "pair_quantiles.csv", pairs["quantile_rows"])
+                write_csv(out / "acquisition_brightness.csv", pairs["acquisition_brightness_rows"])
                 write_json(out / "pair_registration.json", {key: pairs[key] for key in
-                           ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows", "quantile_rows")})
+                           ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows", "quantile_rows",
+                            "acquisition_brightness_rows")})
+                acquisition_html = acquisition_brightness_report(out, pairs["acquisition_brightness_rows"])
                 progress(f"{site}: rendering raw target-to-input examples")
-                intermediate_html += pair_report(out, pairs)
+                intermediate_html += pair_report(out, pairs, acquisition_html=acquisition_html)
                 if registration["translation_failures"]:
                     warnings.append(f"{registration['translation_failures']} translation estimates failed. Those frames "
                                     "remain unshifted in the noise statistics; inspect geometry.csv before interpreting aligned statistics.")
@@ -302,7 +306,8 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
             np.savez_compressed(out / "maps.npz", **maps)
             write_json(out / "summary.json", summary)
             progress(f"{site}: writing report")
-            site_report(out, summary, maps, list(by_position.values()), registration_rows, regions, intermediate_html)
+            site_report(out, summary, maps, list(by_position.values()), registration_rows, regions,
+                        intermediate_html, acquisition_html)
             return summary
         finally:
             stack._mmap.close()

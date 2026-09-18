@@ -15,7 +15,7 @@ from .report import _document, _figure, _number
 REGION_COLOURS = ListedColormap(["#eeeeee", "#2878bd", "#e89a27"])
 
 
-def pair_report(out: Path, result: dict) -> str:
+def pair_report(out: Path, result: dict, *, acquisition_html: str = "") -> str:
     """Return representative examples and write the full comparison report."""
     registration = result["registration"]
     rows = result["pair_rows"]
@@ -66,7 +66,7 @@ def pair_report(out: Path, result: dict) -> str:
     overview = '<section><h3>Representative comparisons</h3><p>Only the first, middle, and last included inputs are shown here. The tracks use all measured pairs. <a href="pair_report_full.html">Open the full report: every pair, difference image, and measurement table</a>.</p></section>' + body
     overview += _geometry_table([row for row in result["geometry_rows"] if row["frame_index"] in selected])
     overview += _pair_table(examples)
-    full = '<p><a href="report.html">Back to the site summary and representative examples</a> · <a href="report.html#raw-image-histograms">Raw image histograms</a></p>' + body
+    full = '<p><a href="report.html">Back to the site summary and representative examples</a> · <a href="report.html#raw-image-histograms">Raw image histograms</a></p>' + acquisition_html + body
     full += _geometry_table(result["geometry_rows"]) + _pair_table(rows)
     for row in rows:
         section = _pair_section(row, result["region_rows"], interactive=row["input_index"] in selected)
@@ -123,7 +123,7 @@ def _pair_section(row: dict, regions: list[dict], *, interactive: bool = False) 
         body += ''.join(f'<b>{title}</b>' for title in PAIR_TITLES) + '</div>'
         body += f'<a href="{row["difference_viewer"]}"><img loading="lazy" src="{row["difference_image"]}" alt="Raw, translation, affine, two-region, percentile differences"></a>'
         body += f'<p>Static PNG range: ±{_number(row["colour_limit_dn"])} DN. Open the interactive viewer to enter any positive DN limit or drag the continuous slider.</p>'
-    body += '<p>Both brightness corrections use the same affine-aligned target and common valid pixels. Input A stays untouched. The viewer changes only colour, with no fitting or smoothing. The statistics below always include all valid differences.</p>'
+    body += '<p>Both brightness corrections use the same affine-aligned target and common valid pixels. Input A stays untouched. Interactive maps show differences of Gaussian-blurred diagnostic copies (σ = 2 px, applied after each correction stage); pixels touching invalid data within the blur support are grey. This suppresses noise to reveal misaligned edges. Viewer statistics describe those blurred differences. The static PNG and residual statistics below remain unblurred and include all original valid differences.</p>'
     body += '<div class="scroll"><table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P95 |difference| (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th></tr>'
     for panel, title in zip(PAIR_PANELS, PAIR_TITLES):
         body += f'<tr><td>{title}</td>' + ''.join(f'<td>{_number(row.get(panel + suffix))}</td>' for suffix in

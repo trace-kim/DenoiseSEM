@@ -9,7 +9,8 @@ import pytest
 pytest.importorskip("matplotlib")
 pytest.importorskip("scipy")
 
-from sem_noise.report import _acquisition_figure, _errorbar, _with_error, raw_histogram_examples
+from sem_noise.report import (_acquisition_figure, _errorbar, _with_error,
+                              acquisition_brightness_report, raw_histogram_examples)
 
 
 def test_corner_error_is_used_in_both_text_and_plot() -> None:
@@ -67,3 +68,31 @@ def test_acquisition_plots_use_frame_order_and_show_failed_estimates_as_gaps() -
         assert all(ax.get_xlabel() == "Acquisition index" for ax in fig.axes)
     finally:
         plt.close(fig)
+
+
+def test_fixed_reference_plot_uses_measured_means_and_breaks_failed_tracks(tmp_path, monkeypatch) -> None:
+    from sem_noise import report
+    import matplotlib.pyplot as plt
+
+    rows = [{"frame_index": i * 3, "reference_index": 0, "included": i != 2,
+             "reference_mean_dn": 70, "raw_mean_dn": 70 + 2 * i,
+             "two_region_status": "complete" if i == 0 else "failed",
+             "quantile_status": "complete" if i != 2 else "excluded"} for i in range(4)]
+    rows[0].update(two_region_mean_dn=70, two_region_gain=1, two_region_offset_dn=0)
+    for i in (0, 1, 3):
+        rows[i].update(quantile_mean_dn=70 + i, quantile_gain=1 + i * 0.1, quantile_offset_dn=-i)
+
+    def capture(out, name, fig, caption):
+        for line, expected in zip(fig.axes[0].lines[:3],
+                                  ([70, 72, 74, 76], [70, np.nan, np.nan, np.nan], [70, 71, np.nan, 73])):
+            np.testing.assert_array_equal(line.get_xdata(), [0, 3, 6, 9])
+            np.testing.assert_allclose(line.get_ydata(), expected)
+        np.testing.assert_allclose(fig.axes[1].lines[1].get_ydata(), [1, 1.1, np.nan, 1.3])
+        np.testing.assert_allclose(fig.axes[2].lines[1].get_ydata(), [0, -1, np.nan, -3])
+        plt.close(fig)
+        return "captured"
+
+    monkeypatch.setattr(report, "_figure", capture)
+    html = acquisition_brightness_report(tmp_path, rows)
+    assert "captured" in html and "acquisition_brightness.csv" in html
+    assert "first included image" in html and "including clipping bounds" in html
