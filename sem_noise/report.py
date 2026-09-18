@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 from html import escape
 from pathlib import Path
 
@@ -55,6 +56,58 @@ def _figure(out: Path, name: str, figure, caption: str) -> str:
     plt.close(figure)
     encoded = base64.b64encode((out / name).read_bytes()).decode("ascii")
     return f'<section><img src="data:image/png;base64,{encoded}" alt="{escape(caption)}"><p>{escape(caption)}</p></section>'
+
+
+def raw_histogram_examples(out: Path, stack: np.ndarray, included: np.ndarray,
+                           indices: np.ndarray, source_dtype: str,
+                           levels: tuple[float | None, float | None]) -> str:
+    """Show all uncorrected ROI pixels, including clipping, for three raw frames."""
+    positions = np.flatnonzero(included)
+    selected = list(dict.fromkeys(positions[k] for k in (0, len(positions) // 2, len(positions) - 1)))
+    images = [np.asarray(stack[i], dtype=np.float64) for i in selected]
+    dtype = np.dtype(source_dtype)
+    if dtype.kind in "ui" and dtype.itemsize == 1:
+        limits = np.iinfo(dtype)
+        edges = np.arange(limits.min - 0.5, limits.max + 1.5)
+        bin_description = "One bin per integer DN across the full 8-bit storage range."
+    else:
+        lo, hi = min(float(a.min()) for a in images), max(float(a.max()) for a in images)
+        if lo == hi:
+            lo, hi = lo - 0.5, hi + 0.5
+        edges = np.linspace(lo, hi, 257)
+        bin_description = "256 shared bins covering the full observed range of these examples."
+    fig, axes = plt.subplots(1, len(selected), figsize=(15, 4.2), squeeze=False,
+                             sharex=True, sharey=True, constrained_layout=True)
+    stats_rows, count_rows = [], []
+    for ax, i, values in zip(axes.flat, selected, images):
+        counts, _ = np.histogram(values, bins=edges)
+        ax.stairs(counts, edges, fill=True, color="#315d83", alpha=0.8)
+        ax.set(title=f"Raw acquisition {int(indices[i])}", xlabel="Raw intensity (DN)", xlim=(edges[0], edges[-1]))
+        ax.grid(alpha=0.15)
+        p01, median, p99 = np.percentile(values, [1, 50, 99])
+        stats_rows.append([int(indices[i]), int(values.size), float(values.min()), p01, median, p99,
+                           float(values.max()), float(values.mean()), float(values.std()),
+                           int((values <= levels[0]).sum()) if levels[0] is not None else None,
+                           int((values >= levels[1]).sum()) if levels[1] is not None else None])
+        count_rows.extend({"frame_index": int(indices[i]), "bin_left_dn": float(left),
+                           "bin_right_dn": float(right), "pixel_count": int(count)}
+                          for left, right, count in zip(edges[:-1], edges[1:], counts))
+    axes[0, 0].set_ylabel("Pixel count")
+    with (out / "raw_histograms.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["frame_index", "bin_left_dn", "bin_right_dn", "pixel_count"])
+        writer.writeheader()
+        writer.writerows(count_rows)
+    body = '<section id="raw-image-histograms"><h2>Raw image histograms</h2><details open><summary>First, middle, and last included acquisitions</summary>'
+    body += f'<p>Original dtype: <b>{escape(source_dtype)}</b>. These are all raw pixels within the configured ROI, or the whole image when no ROI is set. Clipped pixels are included. No registration, blur, brightness correction, normalization, or comparison mask is applied. Axes show intensity in DN and pixel counts on linear scales. {bin_description}</p>'
+    body += _figure(out, "raw_histograms.png", fig,
+                    "Histograms of the original pixel values, including clipping bounds. All pixels contribute; bins and axes are shared across examples.")
+    body += '<div class="scroll"><table><tr>' + ''.join(f'<th>{label}</th>' for label in
+             ("Frame", "Pixels", "Min", "P1", "Median", "P99", "Max", "Mean", "Std. dev.",
+              f"Pixels ≤ {_number(levels[0])}", f"Pixels ≥ {_number(levels[1])}")) + '</tr>'
+    for row in stats_rows:
+        body += '<tr>' + ''.join(f'<td>{value if isinstance(value, int) else _number(value, 5)}</td>' for value in row) + '</tr>'
+    body += '</table></div><p>Intensity statistics are in DN. Clipping counts use the configured or storage bounds. <a href="raw_histograms.csv">Download exact bin counts (CSV)</a> · <a href="raw_histograms.png">Open histogram figure</a>.</p></details></section>'
+    return body
 
 
 def _warnings(messages: list[str]) -> str:
@@ -253,7 +306,7 @@ def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: l
                 registration_rows: list[dict], regions: list[dict], intermediate_html: str = "") -> None:
     """Render quantitative diagnostics without treating the repeat mean as truth."""
     native, aligned = summary["modes"]["native"], summary["modes"]["aligned"]
-    body = '<p><a href="../index.html">All sites</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
+    body = '<p><a href="../index.html">All sites</a> · <a href="#raw-image-histograms">Raw image histograms</a> · <a href="summary.json">Metrics JSON</a> · <a href="frames.csv">Frame audit CSV</a> · <a href="maps.npz">Full-resolution maps (NumPy)</a></p>'
     body += f'<section><h2>{summary["accepted_frames"]} / {summary["input_frames"]} frames analysed</h2><p>Native flat-region temporal σ: <b>{_number(native["flat_temporal_sigma_dn"])} DN</b>. Aligned: <b>{_number(aligned["flat_temporal_sigma_dn"])} DN</b>. Largest drift: <b>{_number(summary["max_drift_px"])} px</b>. Largest corner displacement from the affine terms: <b>{_number(summary["max_corner_effect_px"])} px</b>.</p><p>DN means digital number: the original exported pixel units. Native statistics use integer translations; aligned statistics use bilinear translations of the fitted centre shift only (no affine warp, no brightness correction). The latter changes noise variance and spatial correlation. The predicted mean variance multiplier for independent white noise is {_number(summary["bilinear_white_noise_variance_factor_mean"])}; no universal correction is applied.</p></section>'
     body += _warnings(summary["warnings"])
     body += _registration_report(out, summary, registration_rows, regions)

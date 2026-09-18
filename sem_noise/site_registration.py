@@ -90,6 +90,7 @@ def frame_differences(frame: np.ndarray, bad: np.ndarray, mean: np.ndarray, mean
     "Shift alone" applies only the centre translation, with unit gain and zero
     offset. All three panels use one pixel set and one scale.
     """
+    frame, mean = np.asarray(frame, dtype=np.float64), np.asarray(mean, dtype=np.float64)
     shifted, valid_shift = warp(frame, shift_only(parameters), bad)
     full, valid_full = warp(frame, parameters, bad)
     valid = mean_valid & ~bad & valid_shift & valid_full

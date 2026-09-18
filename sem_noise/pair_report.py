@@ -62,7 +62,7 @@ def pair_report(out: Path, result: dict) -> str:
     overview = '<section><h3>Representative comparisons</h3><p>Only the first, middle, and last included inputs are shown here. The tracks use all measured pairs. <a href="pair_report_full.html">Open the full report: every pair, difference image, and measurement table</a>.</p></section>' + body
     overview += _geometry_table([row for row in result["geometry_rows"] if row["frame_index"] in selected])
     overview += _pair_table(examples)
-    full = '<p><a href="report.html">Back to the site summary and representative examples</a></p>' + body
+    full = '<p><a href="report.html">Back to the site summary and representative examples</a> · <a href="report.html#raw-image-histograms">Raw image histograms</a></p>' + body
     full += _geometry_table(result["geometry_rows"]) + _pair_table(rows)
     for row in rows:
         if row["status"] != "complete":
@@ -107,7 +107,12 @@ def _pair_section(row: dict, regions: list[dict]) -> str:
     body += '<div style="max-width:480px;margin:12px auto" aria-label="Difference colour scale in DN">'
     body += f'<div style="height:16px;background:linear-gradient(to right,{",".join(colours)})"></div>'
     body += '<div style="display:flex;justify-content:space-between">' + ''.join(f'<span>{_number(v, 3)}</span>' for v in (-limit, 0, limit)) + '</div><div style="text-align:center">Target − input (DN)</div></div>'
-    body += f'<p>Left to right: target minus input <b>before</b>, after <b>translation</b>, after <b>affine</b>, after <b>affine + brightness</b>. Automatic shared scale ±{_number(limit)} DN covers the largest absolute valid difference across all four maps; grey is invalid. RMS: ' + ', '.join(f'{name} {_number(row[name + "_rms_dn"])}' for name in PAIR_PANELS) + ' DN.</p><div class="regions">'
+    body += f'<p>Left to right: target minus input <b>before</b>, after <b>translation</b>, after <b>affine</b>, after <b>affine + brightness</b>. Automatic shared scale ±{_number(limit)} DN covers the largest absolute valid difference across all four maps; grey is invalid. Subtraction uses signed floating-point DN. One extreme pixel can set the range; the absolute-difference P99 below shows how much smaller most differences are. Corrected target values are not clipped to the original storage range.</p>'
+    body += '<table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th></tr>'
+    for panel in PAIR_PANELS:
+        body += f'<tr><td>{panel}</td>' + ''.join(f'<td>{_number(row.get(panel + suffix))}</td>' for suffix in
+                                               ("_min_dn", "_max_dn", "_abs_p99_dn", "_rms_dn")) + '</tr>'
+    body += '</table><div class="regions">'
     cells = [cell for cell in regions if cell["input_index"] == row["input_index"]]
     for panel in PAIR_PANELS[1:]:
         body += f'<table><caption>{panel}: RMS (DN)</caption>'

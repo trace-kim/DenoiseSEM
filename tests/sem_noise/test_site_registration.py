@@ -151,3 +151,17 @@ def test_shift_only_panel_does_not_apply_brightness() -> None:
                                                reference, np.ones(reference.shape, dtype=bool), p)
     np.testing.assert_allclose(differences[0][valid], differences[1][valid], atol=1e-10)
     np.testing.assert_allclose(differences[2][valid], 0, atol=1e-10)
+
+
+def test_legacy_difference_helper_accepts_uint8_without_wraparound() -> None:
+    from sem_noise.site_registration import frame_differences
+
+    reference = np.full((32, 32), 225, dtype=np.uint8)
+    moving = np.full((32, 32), 5, dtype=np.uint8)
+    parameters = np.array([0, 0, 0, 0, 0, 0, 1, 0], dtype=float)
+    differences, valid, limit, _ = frame_differences(moving, np.zeros(reference.shape, dtype=bool),
+                                                   reference, np.ones(reference.shape, dtype=bool), parameters)
+    for delta in differences:
+        assert delta.dtype.kind == "f"
+        np.testing.assert_allclose(delta[valid], -220)
+    assert limit == pytest.approx(220)

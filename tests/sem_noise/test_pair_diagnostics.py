@@ -85,6 +85,8 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
         assert heading in full
         assert (heading in html) == (row["input_index"] in {0, 3, 5})
     assert "no binning or subsampling" in html and "log scale" not in full
+    assert 'id="raw-image-histograms"' in html
+    assert "Signed minimum (DN)" in html and "P99 |difference| (DN)" in html
     assert (site / "geometry.csv").is_file() and (site / "target_pairs.csv").is_file()
 
 
@@ -145,3 +147,50 @@ def test_failed_translation_does_not_discard_successful_affine_pair(tmp_path: Pa
     assert all(row["pixels"] == 0 and row["rms_dn"] is None for row in result["region_rows"]
                if row["panel"] == "translation")
     assert "Translation comparison failed" in pair_report(tmp_path, result)
+
+
+def test_uint8_png_differences_preserve_negative_dn_and_explain_extreme_scale(tmp_path: Path, monkeypatch) -> None:
+    from sem_noise import pair_diagnostics
+    from sem_noise.pair_matching import identity_transform
+
+    yy, xx = np.indices((64, 64))
+    base = (20 + 3 * xx + yy % 7).astype(np.uint8)
+    first, target = base.copy(), base.copy()
+    first[20, 20], first[20, 21] = 225, 5
+    target[20, 20], target[20, 21] = 5, 225
+    first[8, 8], first[8, 9] = 0, 255
+    target[8, 8], target[8, 9] = 0, 255
+    stack = np.stack([first, base + 1, target, base + 2])
+    source = tmp_path / "raw"
+    source.mkdir()
+    for i, frame in enumerate(stack):
+        Image.fromarray(frame).save(source / f"frame_{i:04d}.png")
+    monkeypatch.setattr(pair_diagnostics, "estimate_geometry", lambda *a, **k: (identity_transform(), 1.0))
+    captured = {}
+    write_image = pair_diagnostics.write_difference_png
+
+    def capture(path, differences, valid, limit):
+        captured[path.name] = ([d.copy() for d in differences], valid.copy(), limit)
+        write_image(path, differences, valid, limit)
+
+    monkeypatch.setattr(pair_diagnostics, "write_difference_png", capture)
+    output = tmp_path / "report"
+    result = analyze_dataset(source, output, config=AnalysisConfig(min_frames=4, expected_frames=4,
+                             sample_pixels=500, distribution_samples=3000, spatial_pairs=2))
+    assert result["status"] == "complete"
+    differences, valid, limit = captured["input_0000_target_0002_differences.png"]
+    assert all(delta.dtype.kind == "f" for delta in differences)
+    expected = target.astype(np.float64) - first.astype(np.float64)
+    np.testing.assert_array_equal(differences[0], expected)
+    assert valid[20, 20] and valid[20, 21]
+    assert differences[0][20, 20] == -220  # uint8 subtraction would incorrectly give +36
+    assert differences[0][20, 21] == 220
+    assert limit >= 220
+    site = output / "site_001"
+    saved = json.loads((site / "pair_registration.json").read_text(encoding="utf-8"))
+    row = saved["pair_rows"][0]
+    assert row["before_min_dn"] == -220 and row["before_max_dn"] == 220
+    assert row["before_abs_p99_dn"] == 0  # two pixels set the range; most differences are zero
+    html = (site / "report.html").read_text(encoding="utf-8")
+    assert "Original dtype: <b>uint8</b>" in html
+    assert "One bin per integer DN" in html

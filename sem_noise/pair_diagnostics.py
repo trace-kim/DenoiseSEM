@@ -100,7 +100,8 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                 raise ValueError("pair needs successful affine estimates for both frames; see geometry.csv")
             if region_error:
                 raise ValueError(region_error)
-            input_image, target_image = np.asarray(stack[a], dtype=float), np.asarray(stack[b], dtype=float)
+            # Subtract signed floating-point DN, never uint8/uint16 storage values.
+            input_image, target_image = np.asarray(stack[a], dtype=np.float64), np.asarray(stack[b], dtype=np.float64)
             input_bad, target_bad = clip_mask(input_image, levels), clip_mask(target_image, levels)
             matrix = pair_transform(affines[a], affines[b])
             input_regions = regions_on_input(labels, affines[a])
@@ -129,6 +130,9 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
             for name, delta in zip(PAIR_PANELS, differences):
                 values = delta[valid & np.isfinite(delta)]
                 row[f"{name}_rms_dn"] = float(np.sqrt(np.mean(values ** 2))) if len(values) else None
+                row[f"{name}_min_dn"] = float(values.min()) if len(values) else None
+                row[f"{name}_max_dn"] = float(values.max()) if len(values) else None
+                row[f"{name}_abs_p99_dn"] = float(np.percentile(np.abs(values), 99)) if len(values) else None
             ys, xs = region_edges(reference.shape)
             for r, (y0, y1) in enumerate(zip(ys, ys[1:])):
                 for c, (x0, x1) in enumerate(zip(xs, xs[1:])):

@@ -107,6 +107,21 @@ Retain voltage/current, detector, dwell time, frame time, scan direction, pixel
 size, working distance, and any automatic contrast/filtering/averaging settings.
 These can explain differences between otherwise comparable datasets.
 
+### Raw image histograms
+
+Every site report includes an expandable **Raw image histograms** section for
+the first, middle, and last included acquisitions, even when registration is
+disabled or a pair estimate fails. These histograms use every original pixel
+inside the configured ROI (the whole image when no ROI is set), including
+clipped values, before blur, registration, brightness correction or comparison
+masking. Axes are linear intensity in DN and pixel count.
+
+Eight-bit images use one bin per integer intensity over the full storage range
+(0–255 for uint8). Other dtypes use 256 shared bins spanning the examples'
+observed range. The table shows the source dtype, pixel counts, minimum/maximum,
+P1/median/P99, mean, standard deviation and counts at the clipping bounds.
+`raw_histograms.png` and `raw_histograms.csv` save the figure and exact bin counts.
+
 ## Default: raw target-to-input matching
 
 ```powershell
@@ -162,6 +177,13 @@ The colour limit is calculated separately for each pair from the largest
 absolute valid difference across all four panels, so every displayed stage
 fits within its shared symmetric range. `pair_regions.csv` gives a 4×4 RMS
 table for each panel.
+Subtraction is performed in signed floating-point DN, after conversion from
+the input storage dtype. The 8-bit palette PNG is a display encoding, not an
+unsigned difference array. Each pair also reports signed min/max, absolute
+difference P99 and RMS for each stage, making the scale's extreme values visible.
+A single large difference sets the common limit; a ±220 DN range can be valid
+for uint8 inputs. Interpolation and brightness-corrected values are not clipped
+back into the original storage range.
 
 The main `report.html` shows only the first, middle, and last included input
 examples, alongside tracks covering all pairs. The linked `pair_report_full.html`

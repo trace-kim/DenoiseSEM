@@ -145,7 +145,7 @@ def _load_stack(frames: list[Frame], config: AnalysisConfig, scratch: Path) -> t
 
 def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                   progress: Callable[[str], None]) -> dict:
-    from .report import intermediate_examples, site_report
+    from .report import intermediate_examples, raw_histogram_examples, site_report
 
     site = frames[0].site
     if len(frames) < config.min_frames:
@@ -172,7 +172,8 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
             positions = np.flatnonzero(included)
             shifts = np.zeros((len(frames), 2), dtype=float)
             registration_rows, pass1_rows, regions, maps = [], [], [], {}
-            intermediate_html = ""
+            progress(f"{site}: rendering raw image histograms")
+            intermediate_html = raw_histogram_examples(out, stack, included, frame_indices, audit[0]["dtype"], levels)
             if config.registration == "affine":
                 from .pair_diagnostics import diagnose_pairs
                 from .pair_report import pair_report
@@ -190,7 +191,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_json(out / "pair_registration.json", {key: pairs[key] for key in
                            ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows")})
                 progress(f"{site}: rendering raw target-to-input examples")
-                intermediate_html = pair_report(out, pairs)
+                intermediate_html += pair_report(out, pairs)
                 if registration["translation_failures"]:
                     warnings.append(f"{registration['translation_failures']} translation estimates failed. Those frames "
                                     "remain unshifted in the noise statistics; inspect geometry.csv before interpreting aligned statistics.")
@@ -219,7 +220,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 maps["reference_mean"] = fit["mean"].astype(np.float32)
                 maps["reference_valid"] = fit["mean_valid"]
                 progress(f"{site}: rendering intermediate image and brightness-fit examples")
-                intermediate_html = intermediate_examples(out, stack, fit, levels, frame_indices, config.registration_sigma)
+                intermediate_html += intermediate_examples(out, stack, fit, levels, frame_indices, config.registration_sigma)
                 warnings.append("Least-squares gain is biased by noise in the moving image; pass-1 contrast suppression "
                                 "can propagate into the pass-2 reference. Convergence and small standard errors do not "
                                 "establish physical brightness changes. See the intermediate pixel-pair plots.")
