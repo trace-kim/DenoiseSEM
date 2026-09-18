@@ -30,6 +30,10 @@ def pair_report(out: Path, result: dict, *, acquisition_html: str = "") -> str:
     mean = result["maps"]["pair_reference_mean"]
     valid = result["maps"]["pair_reference_valid"]
     labels = result["maps"]["brightness_regions"]
+    if result.get("geometry_comparison_rows"):
+        from .geometry_audit import geometry_audit_report
+
+        body += geometry_audit_report(out, result["geometry_comparison_rows"], result["geometry_comparison_mode"])
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
     axes[0].imshow(np.ma.array(mean, mask=~valid), cmap="gray")
     axes[0].set_title("Geometry-only mean: region selection")

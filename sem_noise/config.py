@@ -21,6 +21,7 @@ class AnalysisConfig:
     white_level: float | None = None
     registration: str = "affine"       # separate ECC geometry and target-to-input region brightness; fit: legacy joint fit
     registration_sigma: float = 1.0    # light blur (px) of both copies before the fit
+    compare_direct_registration: str = "none"  # none | sampled | all ordered pairs; ECC audit
     sample_pixels: int = 8192
     distribution_samples: int = 100000
     intensity_bins: int = 12
@@ -59,6 +60,10 @@ class AnalysisConfig:
                 raise ValueError("black_level must be below white_level")
         if self.registration not in {"affine", "fit", "none"}:
             raise ValueError("registration must be affine, fit or none")
+        if self.compare_direct_registration not in {"none", "sampled", "all"}:
+            raise ValueError("compare_direct_registration must be none, sampled or all")
+        if self.compare_direct_registration != "none" and self.registration != "affine":
+            raise ValueError("direct registration comparison requires registration=affine")
         if self.roi is not None:
             if len(self.roi) != 4 or any(type(v) is not int for v in self.roi):
                 raise ValueError("roi must contain four integers: y0, y1, x0, x1")

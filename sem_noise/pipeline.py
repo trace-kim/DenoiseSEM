@@ -184,6 +184,7 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
 
                 pairs = diagnose_pairs(stack, included, frame_indices, levels, out / "pairs",
                                        sigma=config.registration_sigma,
+                                       compare_direct=config.compare_direct_registration,
                                        progress=lambda message: progress(f"{site}: {message}"))
                 registration_rows = pairs["geometry_rows"]
                 shifts = pairs["shifts"]
@@ -194,9 +195,11 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_csv(out / "pair_regions.csv", pairs["region_rows"])
                 write_csv(out / "pair_quantiles.csv", pairs["quantile_rows"])
                 write_csv(out / "acquisition_brightness.csv", pairs["acquisition_brightness_rows"])
+                if pairs["geometry_comparison_rows"]:
+                    write_csv(out / "geometry_comparison.csv", pairs["geometry_comparison_rows"])
                 write_json(out / "pair_registration.json", {key: pairs[key] for key in
                            ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows", "quantile_rows",
-                            "acquisition_brightness_rows")})
+                            "acquisition_brightness_rows", "geometry_comparison_rows", "geometry_comparison_mode")})
                 acquisition_html = acquisition_brightness_report(out, pairs["acquisition_brightness_rows"])
                 progress(f"{site}: rendering raw target-to-input examples")
                 intermediate_html += pair_report(out, pairs, acquisition_html=acquisition_html)

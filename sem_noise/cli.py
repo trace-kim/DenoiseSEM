@@ -54,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--roi", nargs=4, type=int, metavar=("Y0", "Y1", "X0", "X1"))
     analyze.add_argument("--registration", choices=["affine", "fit", "none"],
                          help="affine: ECC geometry and target-to-input brightness (default); fit: legacy joint fit; none: skip registration")
+    analyze.add_argument("--compare-direct-registration", choices=["none", "sampled", "all"],
+                         help="Audit independent direct versus composed ECC fits; sampled: neighbours and half-burst pairs; all: every ordered pair")
     demo = commands.add_parser("demo", help="Generate three synthetic PNG sites with known noise and drift")
     demo.add_argument("--output", required=True, type=Path)
     demo.add_argument("--frames", type=int, default=128)
@@ -71,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         from .pipeline import analyze_dataset
         config = load_config(args.config)
         overrides = {name: getattr(args, name) for name in
-                     ("frame_interval_s", "pixel_size_nm", "roi", "registration")
+                     ("frame_interval_s", "pixel_size_nm", "roi", "registration", "compare_direct_registration")
                      if getattr(args, name) is not None}
         result = analyze_dataset(args.input, args.output, config=replace(config, **overrides),
                                  manifest=args.manifest, progress=lambda message: print(message, flush=True))

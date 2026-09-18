@@ -153,6 +153,45 @@ both corrected means are shown. The site overview and summary CSV also include
 both gain ranges. A failed two-region fit no longer suppresses successful
 translation, affine or percentile-corrected difference panels.
 
+### Direct versus reference-composed geometry
+
+For an optional comparison of independently fitted A-to-B geometry with the
+stored `W_B @ inverse(W_A)` route, add:
+
+```bash
+python -m sem_noise analyze --input /path/to/raw-acquisitions --output output/sem-geometry-audit --registration affine --compare-direct-registration sampled
+```
+
+`sampled` examines each included input with targets one step forward, one step
+back, and halfway around the burst, deduplicating pairs. For 128 included frames
+this is 384 ordered pairs. `all` instead measures all 16,256 ordered pairs and
+costs substantially more. These commands run entirely where the images reside;
+neither data nor reports need to leave that machine.
+
+Direct translation starts at identity, and direct affine starts at that pair's
+independent translation fit. Neither uses the composed answer as initialization.
+Both routes sample original B once; they never resample A or successively warp B
+through the reference image. Metrics compare the two routes on exactly the same
+pixels, with clipping, cubic footprints and the full 2-pixel display-blur support
+excluded. Raw and blurred residuals share that same mask. Coordinate RMS/max
+disagreement is in native pixels; maximum disagreement at the four image corners
+also exposes affine differences. CSV additionally includes residuals after
+applying the same full-image percentile brightness mapping to both routes.
+
+The section appears in both the site report and separate full report. All pairs,
+matrices, support counts and independent failure reasons are saved in
+`geometry_comparison.csv` and `pair_registration.json`. The first, middle and last
+half-burst pairs have native NPZ arrays and interactive blurred difference viewers
+for each motion model. Missing estimates remain failures, not zero discrepancies.
+
+**This audit uses the noise pipeline's ECC estimators.** Its affine estimator
+matches inline training, but translation training retains the older coarse/refine
+estimator. The audit therefore does not certify translation training on real
+data. Direct fits are comparators, not ground truth; neither a small route
+difference nor a smaller noisy residual proves physical registration accuracy.
+Synthetic tests separately exercise training's actual translation estimator,
+matrix order, signs, non-anchor input crops, inverse directions and consistency.
+
 ### Raw image histograms
 
 Every site report includes an expandable **Raw image histograms** section for

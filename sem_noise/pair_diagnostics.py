@@ -85,7 +85,7 @@ def acquisition_brightness(stack: np.ndarray, included: np.ndarray, frame_indice
 
 def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.ndarray,
                    levels: tuple[float | None, float | None], directory: Path, *,
-                   sigma: float, progress: Callable[[str], None]) -> dict:
+                   sigma: float, progress: Callable[[str], None], compare_direct: str = "none") -> dict:
     """Measure one transform per frame; diagnose one distinct target per input.
 
     Target indices are half a burst away, cyclically, to expose drift in both
@@ -291,7 +291,15 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
             prefix, suffix = ("offset", "_dn") if key == "offset_dn" else ("gain", "")
             brightness[f"{method}{prefix}_min{suffix}"] = min(values) if values else None
             brightness[f"{method}{prefix}_max{suffix}"] = max(values) if values else None
+    comparison_rows = []
+    if compare_direct != "none":
+        from .geometry_audit import compare_direct_registration
+
+        comparison_rows = compare_direct_registration(stack, included, frame_indices, levels,
+                                                       translations, affines, directory.parent / "geometry_audit",
+                                                       mode=compare_direct, sigma=sigma, progress=progress)
     return {"geometry_rows": rows, "pair_rows": pair_rows, "region_rows": region_rows, "quantile_rows": quantile_rows,
+            "geometry_comparison_rows": comparison_rows, "geometry_comparison_mode": compare_direct,
             "acquisition_brightness_rows": acquisition_rows,
             "shifts": shifts, "registration": registration, "brightness": brightness,
             "maps": {"pair_reference_mean": mean, "pair_reference_valid": mean_valid, "brightness_regions": labels}}
