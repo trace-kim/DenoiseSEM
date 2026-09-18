@@ -9,7 +9,8 @@ pytest.importorskip("scipy")
 
 import matplotlib.pyplot as plt
 
-from sem_noise.pair_report import _pixel_scatter
+from sem_noise.pair_matching import measure_quantile_brightness
+from sem_noise.pair_report import _distribution_comparison, _pixel_scatter
 
 
 def test_scatter_uses_each_corresponding_pixel_with_shared_linear_axes() -> None:
@@ -38,6 +39,34 @@ def test_scatter_uses_each_corresponding_pixel_with_shared_linear_axes() -> None
         line = fig.axes[2].lines[1]
         np.testing.assert_allclose(line.get_ydata(), row["gain"] * line.get_xdata() + row["offset_dn"])
         np.testing.assert_array_equal(fig.axes[2].collections[1].get_offsets(), [[30, 10], [110, 50]])
+        assert row == original
+    finally:
+        plt.close(fig)
+
+
+def test_distribution_plot_compares_both_mappings_on_every_native_pixel() -> None:
+    target = np.arange(256, dtype=np.uint8).reshape(16, 16)
+    fixed = 2.0 * target + 5
+    measured = measure_quantile_brightness(fixed, target)
+    points = [{"target_dn": float(x), "input_dn": float(y)} for x, y in
+              zip(measured["target_quantiles_dn"], measured["input_quantiles_dn"])]
+    row = {"input_index": 0, "target_index": 4, "status": "complete", "gain": 1.5, "offset_dn": 10,
+           "quantile_gain": measured["gain"], "quantile_offset_dn": measured["offset_dn"]}
+    original = row.copy()
+    fig = _distribution_comparison(fixed, target, row, points)
+    try:
+        assert len(fig.axes) == 3
+        np.testing.assert_array_equal(fig.axes[0].collections[0].get_offsets(),
+                                      np.column_stack((measured["target_quantiles_dn"], measured["input_quantiles_dn"])))
+        assert len(fig.axes[1].patches) == 2 and len(fig.axes[2].patches) == 3
+        distributions = ((fixed, target), (fixed, 1.5 * target + 10, 2.0 * target + 5))
+        for ax, arrays in zip(fig.axes[1:], distributions):
+            for patch, values in zip(ax.patches, arrays):
+                histogram = patch.get_data()
+                expected, _ = np.histogram(values, bins=histogram.edges)
+                np.testing.assert_array_equal(histogram.values, expected)
+                assert histogram.values.sum() == target.size
+                assert histogram.edges[-1] == 515  # corrected values are not clipped to uint8
         assert row == original
     finally:
         plt.close(fig)

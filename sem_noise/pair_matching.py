@@ -154,6 +154,30 @@ def measure_brightness(input_image: np.ndarray, aligned_target: np.ndarray,
     return result
 
 
+def measure_quantile_brightness(input_image: np.ndarray, target_image: np.ndarray) -> dict:
+    """Fit target->input gain/offset to full-image 10:5:90 percentiles.
+
+    Both images are raw and noisy. Every supplied pixel contributes, including
+    clipping bounds: no spatial selection, registration, blur or mask is used.
+    The returned points describe the fit; neither input array is modified.
+    """
+    fixed, target = _image(input_image), _image(target_image)
+    percentiles = np.arange(10, 91, 5)
+    y, x = np.percentile(fixed, percentiles), np.percentile(target, percentiles)
+    centered = x - x.mean()
+    denominator = float(centered @ centered)
+    if denominator == 0:
+        raise ValueError("target's 10th–90th percentiles are equal: quantile gain is not measurable")
+    gain = float(centered @ (y - y.mean()) / denominator)
+    offset = float(y.mean() - gain * x.mean())
+    if not np.isfinite([gain, offset]).all():
+        raise ValueError("quantile brightness mapping is nonfinite")
+    return {"gain": gain, "offset_dn": offset,
+            "fit_rms_dn": float(np.sqrt(np.mean((gain * x + offset - y) ** 2))),
+            "input_pixels": int(fixed.size), "target_pixels": int(target.size),
+            "percentiles": percentiles, "input_quantiles_dn": y, "target_quantiles_dn": x}
+
+
 def match_target(input_image: np.ndarray, target_image: np.ndarray, matrix: np.ndarray,
                   regions: np.ndarray, *, input_invalid: np.ndarray | None = None,
                   target_invalid: np.ndarray | None = None) -> dict:

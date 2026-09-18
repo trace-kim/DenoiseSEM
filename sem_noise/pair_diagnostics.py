@@ -7,8 +7,9 @@ from typing import Callable
 
 import numpy as np
 
-from .pair_matching import (estimate_geometry, identity_transform, match_target, pair_transform,
-                            regions_on_input, select_brightness_regions, warp_target)
+from .pair_matching import (estimate_geometry, identity_transform, match_target,
+                            measure_quantile_brightness, pair_transform, regions_on_input,
+                            select_brightness_regions, warp_target)
 from .registration import clip_mask, prepare_fit_images
 from .site_registration import difference_limit, region_edges, write_difference_png
 
@@ -88,20 +89,36 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
     np.savez_compressed(directory / "brightness_regions.npz", mean=mean, valid=mean_valid, labels=labels)
 
     examples = {positions[k] for k in (0, len(positions) // 2, len(positions) - 1)}
-    pair_rows, region_rows = [], []
+    pair_rows, region_rows, quantile_rows = [], [], []
     for number, a in enumerate(positions):
         b = positions[(number + len(positions) // 2) % len(positions)]
         progress(f"target-to-input diagnostics: pair {number + 1}/{len(positions)}")
         row = {"input_position": a, "target_position": b,
                "input_index": int(frame_indices[a]), "target_index": int(frame_indices[b])}
         pair_rows.append(row)
+        # Keep the full-image distribution estimate independent of geometry and
+        # of the original region-based estimate, including their failure cases.
+        # Subtract signed floating-point DN, never uint8/uint16 storage values.
+        input_image, target_image = np.asarray(stack[a], dtype=np.float64), np.asarray(stack[b], dtype=np.float64)
+        stem = f"input_{frame_indices[a]:04d}_target_{frame_indices[b]:04d}"
+        example = {"input": stack[a], "target": stack[b]} if a in examples else None
+        try:
+            quantile = measure_quantile_brightness(input_image, target_image)
+            row["quantile_status"] = "complete"
+            row.update({f"quantile_{key}": quantile[key] for key in
+                        ("gain", "offset_dn", "fit_rms_dn", "input_pixels", "target_pixels")})
+            quantile_rows.extend({"input_index": int(frame_indices[a]), "target_index": int(frame_indices[b]),
+                                  "percentile": int(p), "input_dn": float(y), "target_dn": float(x),
+                                  "corrected_target_dn": float(quantile["gain"] * x + quantile["offset_dn"])}
+                                 for p, y, x in zip(quantile["percentiles"], quantile["input_quantiles_dn"],
+                                                    quantile["target_quantiles_dn"]))
+        except ValueError as error:
+            row.update(quantile_status="failed", quantile_error=str(error))
         try:
             if a not in affines or b not in affines:
                 raise ValueError("pair needs successful affine estimates for both frames; see geometry.csv")
             if region_error:
                 raise ValueError(region_error)
-            # Subtract signed floating-point DN, never uint8/uint16 storage values.
-            input_image, target_image = np.asarray(stack[a], dtype=np.float64), np.asarray(stack[b], dtype=np.float64)
             input_bad, target_bad = clip_mask(input_image, levels), clip_mask(target_image, levels)
             matrix = pair_transform(affines[a], affines[b])
             input_regions = regions_on_input(labels, affines[a])
@@ -120,7 +137,6 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                 raise ValueError("no shared pixels for the before/translation/affine/brightness comparison")
             differences = [image - input_image for image in (target_image, translated, matched["aligned_target"], matched["corrected_target"])]
             limit = difference_limit(differences, valid)
-            stem = f"input_{frame_indices[a]:04d}_target_{frame_indices[b]:04d}"
             write_difference_png(directory / f"{stem}_differences.png", differences, valid, limit)
             row.update(status="complete", **matrix_fields(matrix), **matched["brightness"],
                        difference_image=f"pairs/{stem}_differences.png", colour_limit_dn=limit,
@@ -143,18 +159,19 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                         region_rows.append({"input_index": int(frame_indices[a]), "target_index": int(frame_indices[b]),
                                             "panel": name, "row": r, "col": c, "pixels": int(panel_valid.sum()),
                                             "rms_dn": float(np.sqrt(np.mean(values ** 2))) if len(values) else None})
-            if a in examples:
+            if example is not None:
                 input_blur, target_blur, input_blur_bad, target_blur_bad = prepare_fit_images(
                     input_image, target_image, sigma, input_bad, target_bad)
-                np.savez_compressed(directory / f"{stem}.npz", input=stack[a], target=stack[b],
-                                    input_blurred=input_blur, target_blurred=target_blur,
-                                    input_blur_valid=~input_blur_bad, target_blur_valid=~target_blur_bad,
-                                    translated_target=translated, aligned_target=matched["aligned_target"],
-                                    corrected_target=matched["corrected_target"], matrix=matrix,
-                                    regions=input_regions, brightness_valid=matched["valid"], difference_valid=valid)
-                row["example_arrays"] = f"pairs/{stem}.npz"
+                example.update(input_blurred=input_blur, target_blurred=target_blur,
+                               input_blur_valid=~input_blur_bad, target_blur_valid=~target_blur_bad,
+                               translated_target=translated, aligned_target=matched["aligned_target"],
+                               corrected_target=matched["corrected_target"], matrix=matrix,
+                               regions=input_regions, brightness_valid=matched["valid"], difference_valid=valid)
         except ValueError as error:
             row.update(status="failed", error=str(error))
+        if example is not None:
+            np.savez_compressed(directory / f"{stem}.npz", **example)
+            row["example_arrays"] = f"pairs/{stem}.npz"
 
     completed = [row for row in pair_rows if row["status"] == "complete"]
     measured = [i for i in positions if i in translations]
@@ -168,6 +185,8 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                     "translation_failures": len(positions) - len(translations),
                     "affine_failures": len(positions) - len(affines),
                     "pair_failures": len(pair_rows) - len(completed), "region_error": region_error,
+                    "quantile_failures": sum(r["quantile_status"] != "complete" for r in pair_rows),
+                    "quantile_method": "OLS of input percentiles against target percentiles at 10,15,...,90%; all supplied raw pixels, including clipping bounds; no automatic spatial selection or registration",
                     "convention": "W maps input (x,y,1) to target sampling coordinates; pair W = W_target @ inverse(W_input)",
                     "region_selection": "lower and upper intensity quartiles of the geometry-only mean blurred by registration_sigma; labels selected once per site",
                     "pair_selection": "one target per input, half the included burst away cyclically; all frames remain included"}
@@ -177,6 +196,6 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
         prefix, suffix = ("offset", "_dn") if key == "offset_dn" else ("gain", "")
         brightness[f"{prefix}_min{suffix}"] = min(values) if values else None
         brightness[f"{prefix}_max{suffix}"] = max(values) if values else None
-    return {"geometry_rows": rows, "pair_rows": pair_rows, "region_rows": region_rows,
+    return {"geometry_rows": rows, "pair_rows": pair_rows, "region_rows": region_rows, "quantile_rows": quantile_rows,
             "shifts": shifts, "registration": registration, "brightness": brightness,
             "maps": {"pair_reference_mean": mean, "pair_reference_valid": mean_valid, "brightness_regions": labels}}

@@ -14,6 +14,7 @@ pytest.importorskip("matplotlib")
 from sem_noise.config import AnalysisConfig
 from sem_noise.pair_diagnostics import diagnose_pairs
 from sem_noise.pipeline import analyze_dataset
+from sem_noise.pair_matching import match_target, measure_quantile_brightness
 from sem_noise.registration import prepare_fit_images
 from test_registration import moving_frame, specimen
 from test_site_registration import site_truth
@@ -43,6 +44,7 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert {row["input_index"] for row in rows} == set(range(6))
     assert all(row["input_index"] != row["target_index"] for row in rows)
     assert len(saved["region_rows"]) == 6 * 4 * 16
+    assert len(saved["quantile_rows"]) == 6 * 17
     for row in rows:
         a, b = row["input_index"], row["target_index"]
         expected_gain = truths[b]["gain"] / truths[a]["gain"]
@@ -50,6 +52,11 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
         assert row["gain"] == pytest.approx(expected_gain, abs=0.012)
         assert row["offset_dn"] == pytest.approx(expected_offset, abs=6)
         assert row["brightness_rms_dn"] < row["before_rms_dn"]
+        quantile = measure_quantile_brightness(stack[a], stack[b])
+        assert row["quantile_status"] == "complete"
+        assert row["quantile_gain"] == quantile["gain"]
+        assert row["quantile_offset_dn"] == quantile["offset_dn"]
+        assert row["quantile_input_pixels"] == row["quantile_target_pixels"] == stack[a].size
         with Image.open(site / row["difference_image"]) as image:
             assert image.size == (4 * 128 + 3 * 8, 128)
         if "example_arrays" in row:
@@ -60,6 +67,9 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
                 np.testing.assert_array_equal(example["input_blurred"], blurred_a)
                 np.testing.assert_array_equal(example["target_blurred"], blurred_b)
                 np.testing.assert_allclose(example["corrected_target"], row["gain"] * example["aligned_target"] + row["offset_dn"])
+                original = match_target(stack[a], stack[b], example["matrix"], example["regions"])
+                assert row["gain"] == original["brightness"]["gain"]
+                assert row["offset_dn"] == original["brightness"]["offset_dn"]
                 mask = example["difference_valid"]
                 largest_difference = max(np.max(np.abs(example[key][mask] - example["input"][mask]))
                                          for key in ("target", "translated_target", "aligned_target", "corrected_target"))
@@ -87,6 +97,9 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert "no binning or subsampling" in html and "log scale" not in full
     assert 'id="raw-image-histograms"' in html
     assert "Signed minimum (DN)" in html and "P99 |difference| (DN)" in html
+    assert "Percentile gain" in html and "Two-region gain" in html
+    assert "Full-image brightness comparison" in html
+    assert (site / "pair_quantiles.csv").is_file()
     assert (site / "geometry.csv").is_file() and (site / "target_pairs.csv").is_file()
 
 
@@ -106,6 +119,13 @@ def test_failed_affine_keeps_diagnostic_rows_without_fake_corrections(tmp_path: 
     assert result["registration"]["affine_failures"] == 3
     assert all(row["status"] == "failed" and "gain" not in row for row in result["pair_rows"])
     assert "test affine failure" in result["geometry_rows"][1]["affine_error"]
+    assert result["registration"]["quantile_failures"] == 0
+    for row in result["pair_rows"]:
+        assert row["quantile_status"] == "complete"
+        assert row["quantile_gain"] == pytest.approx(1)
+        assert row["quantile_offset_dn"] == pytest.approx(row["input_index"] - row["target_index"])
+    from sem_noise.pair_report import pair_report
+    assert "Full-image brightness comparison" in pair_report(tmp_path, result)
 
 
 def test_region_failure_and_exclusions_are_visible(tmp_path: Path) -> None:
@@ -116,6 +136,31 @@ def test_region_failure_and_exclusions_are_visible(tmp_path: Path) -> None:
     assert {row["input_index"] for row in result["pair_rows"]} == {2, 4, 6}
     assert all(row["status"] == "failed" for row in result["pair_rows"])
     assert "no distinct" in result["registration"]["region_error"]
+    assert result["registration"]["quantile_failures"] == 3
+    assert all(row["quantile_status"] == "failed" and "quantile_gain" not in row for row in result["pair_rows"])
+
+
+def test_quantile_failure_preserves_original_brightness_results(tmp_path: Path, monkeypatch) -> None:
+    from sem_noise import pair_diagnostics
+    from sem_noise.pair_matching import identity_transform
+    from sem_noise.pair_report import pair_report
+
+    def fail(*args):
+        raise ValueError("test percentile failure")
+
+    monkeypatch.setattr(pair_diagnostics, "measure_quantile_brightness", fail)
+    monkeypatch.setattr(pair_diagnostics, "estimate_geometry", lambda *a, **k: (identity_transform(), 1.0))
+    stack = np.stack([specimen(64) + i for i in range(4)])
+    result = diagnose_pairs(stack, np.ones(4, dtype=bool), np.arange(4), (None, None),
+                            tmp_path / "pairs", sigma=1, progress=lambda _: None)
+    assert result["registration"]["pair_failures"] == 0
+    assert result["registration"]["quantile_failures"] == 4
+    assert result["quantile_rows"] == []
+    for row in result["pair_rows"]:
+        assert row["quantile_status"] == "failed" and "quantile_gain" not in row
+        assert row["gain"] == pytest.approx(1)
+        assert row["offset_dn"] == pytest.approx(row["input_index"] - row["target_index"])
+    assert "test percentile failure" in pair_report(tmp_path, result)
 
 
 def test_failed_translation_does_not_discard_successful_affine_pair(tmp_path: Path, monkeypatch) -> None:

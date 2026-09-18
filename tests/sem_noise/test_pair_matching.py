@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip("cv2")
 pytest.importorskip("scipy")
 
-from sem_noise.pair_matching import (estimate_geometry, identity_transform, match_target,
+from sem_noise.pair_matching import (estimate_geometry, identity_transform, match_target, measure_quantile_brightness,
                                      measure_brightness, pair_transform, regions_on_input,
                                      select_brightness_regions, warp_target)
 from test_registration import TRUTH, moving_frame, specimen
@@ -130,3 +130,49 @@ def test_matching_rejects_unmeasurable_inputs_instead_of_inventing_identity() ->
         estimate_geometry(constant, np.ones((33, 32)))
     with pytest.raises(ValueError, match="mask must match"):
         warp_target(constant, identity_transform(), invalid=np.zeros((16, 16), dtype=bool))
+
+
+def test_full_image_quantile_fit_recovers_brightness_despite_pixel_permutation() -> None:
+    rng = np.random.default_rng(77)
+    target = np.tile(np.arange(256, dtype=np.uint8), (64, 1))
+    target[:, :40], target[:, -40:] = 0, 255  # clipping bounds must contribute to full-image quantiles
+    fixed = rng.permutation((0.8 * target + 12).ravel()).reshape(target.shape)
+    originals = fixed.copy(), target.copy()
+    fixed.flags.writeable = target.flags.writeable = False
+    result = measure_quantile_brightness(fixed, target)
+    assert result["gain"] == pytest.approx(0.8)
+    assert result["offset_dn"] == pytest.approx(12)
+    assert result["fit_rms_dn"] < 1e-12
+    assert result["input_pixels"] == result["target_pixels"] == target.size
+    assert result["target_quantiles_dn"][0] == 0 and result["target_quantiles_dn"][-1] == 255
+    reverse = measure_quantile_brightness(target, fixed)
+    assert reverse["gain"] == pytest.approx(1.25)
+    assert reverse["offset_dn"] == pytest.approx(-15)
+    np.testing.assert_array_equal(fixed, originals[0])
+    np.testing.assert_array_equal(target, originals[1])
+
+
+def test_quantile_fit_is_not_driven_by_extreme_tail_magnitudes() -> None:
+    target = np.linspace(20, 200, 4096).reshape(64, 64)
+    fixed = 0.9 * target + 7
+    fixed[0], fixed[-1] = -1e6, 1e6  # only existing bottom/top tail pixels change
+    result = measure_quantile_brightness(fixed, target)
+    assert result["gain"] == pytest.approx(0.9)
+    assert result["offset_dn"] == pytest.approx(7)
+
+
+def test_quantile_fit_handles_two_independent_noisy_acquisitions() -> None:
+    rng = np.random.default_rng(73)
+    scene = specimen(256)
+    fixed = scene + rng.normal(0, 10, scene.shape)
+    target = (scene - 17 + rng.normal(0, 10, scene.shape)) / 0.8
+    result = measure_quantile_brightness(fixed, target)
+    assert result["gain"] == pytest.approx(0.8, abs=0.005)
+    assert result["offset_dn"] == pytest.approx(17, abs=3)
+
+
+def test_quantile_fit_reports_flat_central_distribution_as_unmeasurable() -> None:
+    target = np.full((32, 32), 70, dtype=np.uint8)
+    target[0, 0] = 250
+    with pytest.raises(ValueError, match="percentiles are equal"):
+        measure_quantile_brightness(target, target)

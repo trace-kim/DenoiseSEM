@@ -8,7 +8,8 @@ no GPU. Input images are read only; results go into a new output directory.
 The default **target-to-input diagnostic** measures translation and affine
 geometry separately from brightness. For each included raw input A, another
 noisy frame B is sampled into A's coordinates and matched to A's brightness
-using two corresponding region means. A stays untouched. The report shows
+using two corresponding region means. A full-image percentile gain/offset fit
+is also reported alongside the original method for comparison. A stays untouched. The report shows
 the regions, actual means, intermediate images, four native-resolution
 difference panels, and 4×4 residual tables. The old joint eight-parameter fit
 is available explicitly with `--registration fit` for comparison.
@@ -165,6 +166,35 @@ are still reported; the translation panel is grey and its RMS is blank.
 ECC scores are correlations, not standard errors or guarantees of the right
 alignment. Numerical parameter error bars are not claimed for this method.
 
+### Compare both brightness estimators
+
+For every diagnostic A/B pair, a second, independent estimator fits
+`Q_A(p) = g * Q_B(p) + b` by ordinary least squares at the 10th, 15th, …, 90th
+percentiles (17 points). It uses all pixels of each raw image, including
+clipping bounds, **before registration**. It selects no physical sub-area,
+overlap mask, or brightness region. If the user explicitly configured an ROI,
+the whole supplied ROI is used; no further crop is introduced.
+
+The original two-region algorithm and its corrected-image/difference outputs
+are unchanged. `target_pairs.csv` retains their `gain` and `offset_dn` columns
+and adds `quantile_gain`, `quantile_offset_dn`, `quantile_fit_rms_dn`, pixel counts,
+and independent `quantile_status`/`quantile_error` fields. The table and gain/
+offset tracks show both estimators. A failed geometry or original brightness
+measurement does not suppress a measurable full-image percentile estimate.
+Equal target percentiles make the new gain unidentifiable and retain an
+explicit failure, without replacing either estimate.
+
+The first/middle/last examples add a percentile-point plot with both fitted
+lines and before/after histogram overlays. Both histogram corrections apply
+the saved gains/offsets to the same full raw target, without interpolation or
+clipping. The input remains untouched. Histograms use 64 shared linear bins for display only;
+the percentile calculation uses all raw values directly. `pair_quantiles.csv`
+saves every percentile point, including its value after the new correction.
+
+Different noise strengths can affect distribution width and the inferred gain.
+Curvature in the percentile plot shows deviations from a global linear mapping;
+the reported fit RMS measures those deviations, not spatial image residuals.
+
 The native/aligned **noise statistics still use translations only**, with no
 gain/offset correction. If translation fails, the affected frame remains
 unshifted in those statistics and the report warns explicitly. No frame is
@@ -203,16 +233,18 @@ is fitted to the scatter points.
 |---|---|
 | `pair_report_full.html` | All pair comparisons and measurement tables; linked from the concise site report |
 | `geometry.csv` | Translation, affine sampling matrices, ECC scores, corner effects, failure reasons |
-| `target_pairs.csv` | Input/target indices, pair matrix, both region means/counts, target-to-input gain/offset, residual RMS, image links |
+| `target_pairs.csv` | Input/target indices, pair matrix, both region means/counts, original and percentile gain/offset values, independent statuses, residual RMS, image links |
+| `pair_quantiles.csv` | The 17 full-image percentile pairs used by each new brightness fit, with corrected target percentiles |
 | `pair_registration.json` | Geometry and pair measurements with method/selection conventions |
 | `pair_regions.csv` | Native difference RMS in each 4×4 region |
 | `pairs/brightness_regions.npz` | Geometry-only mean, common validity and fixed low/high labels |
 | `pairs/input_NNNN_target_MMMM_differences.png` | Four native panels for that pair |
 | `pairs/input_NNNN_target_MMMM.npz` | Example original input/target, actual blurred copies, corrected targets, labels, masks and matrix |
+| `pairs/input_NNNN_target_MMMM_distributions.png` | Example percentile plot and full-image before/after histogram comparison of both methods |
 
 Reusable functions live in `sem_noise/pair_matching.py`: `estimate_geometry`,
 `pair_transform`, `warp_target`, `select_brightness_regions`, `regions_on_input`,
-`measure_brightness`, and `match_target`. `match_target` returns aligned and
+`measure_brightness`, `measure_quantile_brightness`, and `match_target`. `match_target` returns aligned and
 brightness-matched targets and validity; it never writes into the input arrays.
 Pass its regions on the input grid, and pass actual clipping masks when known.
 

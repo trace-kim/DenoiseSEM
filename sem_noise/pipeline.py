@@ -188,8 +188,9 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 write_csv(out / "geometry.csv", registration_rows)
                 write_csv(out / "target_pairs.csv", pairs["pair_rows"])
                 write_csv(out / "pair_regions.csv", pairs["region_rows"])
+                write_csv(out / "pair_quantiles.csv", pairs["quantile_rows"])
                 write_json(out / "pair_registration.json", {key: pairs[key] for key in
-                           ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows")})
+                           ("registration", "brightness", "geometry_rows", "pair_rows", "region_rows", "quantile_rows")})
                 progress(f"{site}: rendering raw target-to-input examples")
                 intermediate_html += pair_report(out, pairs)
                 if registration["translation_failures"]:
@@ -198,6 +199,9 @@ def _analyze_site(frames: list[Frame], out: Path, config: AnalysisConfig,
                 if registration["pair_failures"]:
                     warnings.append(f"{registration['pair_failures']} target-to-input diagnostics failed; every pair and "
                                     "its reason remain in target_pairs.csv. Failed corrections are not replaced with identity values.")
+                if registration["quantile_failures"]:
+                    warnings.append(f"{registration['quantile_failures']} full-image percentile brightness fits failed; "
+                                    "see quantile_status and quantile_error in target_pairs.csv.")
             elif config.registration == "fit":
                 progress(f"{site}: fitting {len(positions)} frames in two passes")
                 fit = register_site(stack, included, levels, sigma=config.registration_sigma,
