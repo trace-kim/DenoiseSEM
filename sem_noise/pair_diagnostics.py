@@ -13,7 +13,8 @@ from .pair_matching import (estimate_geometry, identity_transform, match_target,
 from .registration import clip_mask, prepare_fit_images
 from .site_registration import difference_limit, region_edges, write_difference_png
 
-PAIR_PANELS = ("before", "translation", "affine", "brightness")
+PAIR_PANELS = ("before", "translation", "affine", "brightness", "quantile_brightness")
+PAIR_TITLES = ("Raw", "Translation", "Affine", "Affine + two-region", "Affine + percentiles")
 
 
 def matrix_fields(matrix: np.ndarray) -> dict[str, float]:
@@ -135,11 +136,22 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
             valid = matched["valid"] & translation_valid & ~target_bad
             if not valid.any():
                 raise ValueError("no shared pixels for the before/translation/affine/brightness comparison")
-            differences = [image - input_image for image in (target_image, translated, matched["aligned_target"], matched["corrected_target"])]
+            quantile_target = (row["quantile_gain"] * matched["aligned_target"] + row["quantile_offset_dn"]
+                               if row["quantile_status"] == "complete" else np.full(input_image.shape, np.nan))
+            differences = [image - input_image for image in (target_image, translated, matched["aligned_target"],
+                                                              matched["corrected_target"], quantile_target)]
             limit = difference_limit(differences, valid)
             write_difference_png(directory / f"{stem}_differences.png", differences, valid, limit)
+            limits = {"": limit, "_p99": difference_limit(differences, valid, percentile=99),
+                      "_full": difference_limit(differences, valid, percentile=100)}
+            if example is not None:
+                for suffix in ("_p99", "_full"):
+                    name = f"{stem}_differences{suffix}.png"
+                    write_difference_png(directory / name, differences, valid, limits[suffix])
+                    row[f"difference_image{suffix}"] = f"pairs/{name}"
+            row.update({f"colour_limit{suffix}_dn": value for suffix, value in limits.items()})
             row.update(status="complete", **matrix_fields(matrix), **matched["brightness"],
-                       difference_image=f"pairs/{stem}_differences.png", colour_limit_dn=limit,
+                       difference_image=f"pairs/{stem}_differences.png", colour_percentile=95,
                        difference_pixels=int(valid.sum()), input_mean_dn=float(input_image[valid].mean()),
                        target_mean_before_dn=float(target_image[valid].mean()),
                        target_mean_after_dn=float(matched["corrected_target"][valid].mean()))
@@ -148,7 +160,10 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                 row[f"{name}_rms_dn"] = float(np.sqrt(np.mean(values ** 2))) if len(values) else None
                 row[f"{name}_min_dn"] = float(values.min()) if len(values) else None
                 row[f"{name}_max_dn"] = float(values.max()) if len(values) else None
+                row[f"{name}_abs_p95_dn"] = float(np.percentile(np.abs(values), 95)) if len(values) else None
                 row[f"{name}_abs_p99_dn"] = float(np.percentile(np.abs(values), 99)) if len(values) else None
+                for suffix, display_limit in limits.items():
+                    row[f"{name}_saturated{suffix}_pct"] = float(100 * np.mean(np.abs(values) > display_limit)) if len(values) else None
             ys, xs = region_edges(reference.shape)
             for r, (y0, y1) in enumerate(zip(ys, ys[1:])):
                 for c, (x0, x1) in enumerate(zip(xs, xs[1:])):
@@ -165,7 +180,7 @@ def diagnose_pairs(stack: np.ndarray, included: np.ndarray, frame_indices: np.nd
                 example.update(input_blurred=input_blur, target_blurred=target_blur,
                                input_blur_valid=~input_blur_bad, target_blur_valid=~target_blur_bad,
                                translated_target=translated, aligned_target=matched["aligned_target"],
-                               corrected_target=matched["corrected_target"], matrix=matrix,
+                               corrected_target=matched["corrected_target"], quantile_corrected_target=quantile_target, matrix=matrix,
                                regions=input_regions, brightness_valid=matched["valid"], difference_valid=valid)
         except ValueError as error:
             row.update(status="failed", error=str(error))

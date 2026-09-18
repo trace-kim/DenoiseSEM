@@ -110,16 +110,24 @@ def test_difference_image_indices_and_layout() -> None:
     assert (image[:, 5:5 + PANEL_GAP_PX] == INVALID_INDEX).all()
 
 
-def test_difference_scale_covers_corrected_maps_and_ignores_invalid_pixels() -> None:
+def test_difference_scale_ignores_sparse_extremes_but_preserves_full_range_option() -> None:
     valid = np.ones((16, 16), dtype=bool)
     valid[0, 0] = False
     before = np.ones(valid.shape)
     corrected = np.full(valid.shape, -2.0)
-    corrected[8, 8] = -30  # one real extreme must not be clipped by a percentile
+    corrected[8, 8] = -30  # one extreme must not wash out the other pixels
     corrected[0, 0] = 1e9  # masked values do not set the display range
     failed = np.full(valid.shape, np.nan)
-    assert difference_limit([before, corrected, failed], valid) == 30
+    assert difference_limit([before, corrected, failed], valid) == 2
+    assert difference_limit([before, corrected, failed], valid, percentile=99) == 2
+    assert difference_limit([before, corrected, failed], valid, percentile=100) == 30
+    assert corrected[8, 8] == -30  # display choice never modifies numerical values
+    corrected[2:6] = -12  # a widespread residual still sets the shared scale
+    assert difference_limit([before, corrected, failed], valid) == 12
     assert difference_limit([np.zeros(valid.shape), failed], valid) > 0
+    for percentile in (0, 101, np.nan):
+        with pytest.raises(ValueError, match="percentile"):
+            difference_limit([before], valid, percentile=percentile)
 
 
 def test_parameter_names_are_stable() -> None:

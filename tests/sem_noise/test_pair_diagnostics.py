@@ -43,7 +43,7 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert len(rows) == 6 and all(row["status"] == "complete" for row in rows)
     assert {row["input_index"] for row in rows} == set(range(6))
     assert all(row["input_index"] != row["target_index"] for row in rows)
-    assert len(saved["region_rows"]) == 6 * 4 * 16
+    assert len(saved["region_rows"]) == 6 * 5 * 16
     assert len(saved["quantile_rows"]) == 6 * 17
     for row in rows:
         a, b = row["input_index"], row["target_index"]
@@ -58,7 +58,7 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
         assert row["quantile_offset_dn"] == quantile["offset_dn"]
         assert row["quantile_input_pixels"] == row["quantile_target_pixels"] == stack[a].size
         with Image.open(site / row["difference_image"]) as image:
-            assert image.size == (4 * 128 + 3 * 8, 128)
+            assert image.size == (5 * 128 + 4 * 8, 128)
         if "example_arrays" in row:
             with np.load(site / row["example_arrays"]) as example:
                 np.testing.assert_array_equal(example["input"], stack[a])
@@ -67,13 +67,20 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
                 np.testing.assert_array_equal(example["input_blurred"], blurred_a)
                 np.testing.assert_array_equal(example["target_blurred"], blurred_b)
                 np.testing.assert_allclose(example["corrected_target"], row["gain"] * example["aligned_target"] + row["offset_dn"])
+                np.testing.assert_allclose(example["quantile_corrected_target"], row["quantile_gain"] * example["aligned_target"] + row["quantile_offset_dn"])
                 original = match_target(stack[a], stack[b], example["matrix"], example["regions"])
                 assert row["gain"] == original["brightness"]["gain"]
                 assert row["offset_dn"] == original["brightness"]["offset_dn"]
                 mask = example["difference_valid"]
-                largest_difference = max(np.max(np.abs(example[key][mask] - example["input"][mask]))
-                                         for key in ("target", "translated_target", "aligned_target", "corrected_target"))
-                assert row["colour_limit_dn"] == pytest.approx(largest_difference)
+                differences = [example[key][mask] - example["input"][mask] for key in
+                               ("target", "translated_target", "aligned_target", "corrected_target", "quantile_corrected_target")]
+                for suffix, percentile in (("", 95), ("_p99", 99), ("_full", 100)):
+                    limit = max(np.percentile(np.abs(delta), percentile) for delta in differences)
+                    assert row[f"colour_limit{suffix}_dn"] == pytest.approx(limit)
+                    with Image.open(site / row[f"difference_image{suffix}"]) as image:
+                        assert image.size == (5 * 128 + 4 * 8, 128)
+                    assert row[f"quantile_brightness_saturated{suffix}_pct"] == pytest.approx(100 * np.mean(np.abs(differences[-1]) > limit))
+                assert row["quantile_brightness_rms_dn"] == pytest.approx(np.sqrt(np.mean(differences[-1] ** 2)))
                 for label, name in ((1, "low"), (2, "high")):
                     mask = (example["regions"] == label) & example["brightness_valid"]
                     assert mask.sum() == row[name + "_pixels"]
@@ -99,6 +106,9 @@ def test_raw_affine_pipeline_reports_both_pair_directions_and_preserves_inputs(t
     assert "Signed minimum (DN)" in html and "P99 |difference| (DN)" in html
     assert "Percentile gain" in html and "Two-region gain" in html
     assert "Full-image brightness comparison" in html
+    assert html.count('<select onchange="chooseDifferenceScale(this)">') == 3
+    assert full.count('<select onchange="chooseDifferenceScale(this)">') == 3
+    assert "Beyond colour range (%)" in html and "Affine + percentiles" in html
     assert (site / "pair_quantiles.csv").is_file()
     assert (site / "geometry.csv").is_file() and (site / "target_pairs.csv").is_file()
 
@@ -160,6 +170,9 @@ def test_quantile_failure_preserves_original_brightness_results(tmp_path: Path, 
         assert row["quantile_status"] == "failed" and "quantile_gain" not in row
         assert row["gain"] == pytest.approx(1)
         assert row["offset_dn"] == pytest.approx(row["input_index"] - row["target_index"])
+        assert row["quantile_brightness_rms_dn"] is None
+        with Image.open(tmp_path / row["difference_image"]) as image:
+            assert np.all(np.asarray(image)[:, 4 * (64 + 8):] == 255)
     assert "test percentile failure" in pair_report(tmp_path, result)
 
 
@@ -230,12 +243,20 @@ def test_uint8_png_differences_preserve_negative_dn_and_explain_extreme_scale(tm
     assert valid[20, 20] and valid[20, 21]
     assert differences[0][20, 20] == -220  # uint8 subtraction would incorrectly give +36
     assert differences[0][20, 21] == 220
-    assert limit >= 220
+    assert 0 < limit < 1  # two speckles no longer wash out the whole map
     site = output / "site_001"
     saved = json.loads((site / "pair_registration.json").read_text(encoding="utf-8"))
     row = saved["pair_rows"][0]
     assert row["before_min_dn"] == -220 and row["before_max_dn"] == 220
     assert row["before_abs_p99_dn"] == 0  # two pixels set the range; most differences are zero
+    assert row["colour_limit_full_dn"] >= 220
+    assert row["before_rms_dn"] == pytest.approx(np.sqrt(np.mean(expected[valid] ** 2)))
+    assert row["before_saturated_pct"] == pytest.approx(200 / valid.sum())
+    full_differences, full_valid, full_limit = captured["input_0000_target_0002_differences_full.png"]
+    assert full_limit >= 220
+    np.testing.assert_array_equal(full_valid, valid)
+    for delta, original in zip(full_differences, differences):
+        np.testing.assert_array_equal(delta, original)
     html = (site / "report.html").read_text(encoding="utf-8")
     assert "Original dtype: <b>uint8</b>" in html
     assert "One bin per integer DN" in html

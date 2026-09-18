@@ -3,29 +3,43 @@
 from __future__ import annotations
 
 from html import escape
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import numpy as np
 
-from .pair_diagnostics import PAIR_PANELS
+from .pair_diagnostics import PAIR_PANELS, PAIR_TITLES
 from .report import _document, _figure, _number
 from .site_registration import difference_palette
 
 REGION_COLOURS = ListedColormap(["#eeeeee", "#2878bd", "#e89a27"])
+
+DIFFERENCE_CONTROLS = """<script>
+function chooseDifferenceScale(control) {
+    const section = control.closest('section');
+    const option = control.selectedOptions[0];
+    section.querySelector('[data-difference-image]').src = option.dataset.image;
+    section.querySelector('[data-difference-link]').href = option.dataset.image;
+    section.querySelector('[data-colour-negative]').textContent = '≤ −' + option.dataset.limit;
+    section.querySelector('[data-colour-positive]').textContent = '≥ +' + option.dataset.limit;
+    const saturation = JSON.parse(option.dataset.saturationValues);
+    section.querySelectorAll('td[data-saturation]').forEach((cell, i) => cell.textContent = saturation[i]);
+}
+</script>"""
 
 
 def pair_report(out: Path, result: dict) -> str:
     """Return representative examples and write the full comparison report."""
     registration = result["registration"]
     rows = result["pair_rows"]
-    body = '<section><h2>Raw target-to-input matching</h2>'
+    body = DIFFERENCE_CONTROLS + '<section><h2>Raw target-to-input matching</h2>'
     body += '<p><b>A is the untouched noisy input. B is a different noisy target.</b> Only B is resampled and brightness-corrected. A registered mean selects shared brightness regions; it is never the answer image in these diagnostics.</p>'
     body += '<p><a href="geometry.csv">Per-frame geometry CSV</a> · <a href="target_pairs.csv">Both brightness estimates CSV</a> · <a href="pair_quantiles.csv">Percentile fit points CSV</a> · <a href="pair_regions.csv">4×4 residual tables CSV</a> · <a href="pair_registration.json">All measurements JSON</a> · <a href="pairs/brightness_regions.npz">Native mean and region labels</a></p>'
     body += f'<p>Geometry: translation ECC, then full affine ECC initialized by that translation, using {_number(registration["blur_sigma_px"])} px blurred copies against acquisition {registration["anchor_index"]}. The full affine contains translation. Pair transforms compose the saved matrices and resample the original target once. {escape(registration["pair_selection"])}.</p>'
     body += '<p><b>Original two-region brightness:</b> blue and orange regions are the lower and upper intensity quartiles of the blurred, geometrically aligned site mean. Their labels are fixed once per site and moved into A’s coordinates. Means are measured on the same valid pixels of raw A and affine-aligned B: <code>gain = (high_A − low_A) / (high_B − low_B)</code>, <code>offset = low_A − gain × low_B</code>. This estimator is unchanged.</p>'
-    body += '<p><b>Full-image percentile brightness:</b> ordinary least squares fits <code>Q_A(p) = gain × Q_B(p) + offset</code> at the 10th, 15th, …, 90th percentiles. Every raw pixel contributes, including clipping bounds. There is no automatic crop, overlap mask, blur or registration in this estimate. It uses the entire supplied image (the configured ROI if one was explicitly requested). Both methods map B to A. Existing corrected images and difference maps still use the original two-region values; the distribution comparison below shows both brightness mappings applied to raw B.</p>'
+    body += '<p><b>Full-image percentile brightness:</b> ordinary least squares fits <code>Q_A(p) = gain × Q_B(p) + offset</code> at the 10th, 15th, …, 90th percentiles. Every raw pixel contributes, including clipping bounds. There is no automatic crop, overlap mask, blur or registration in this estimate. It uses the entire supplied image (the configured ROI if one was explicitly requested). Both methods map B to A. Difference maps apply both saved brightness mappings to the same affine-aligned B; the distribution comparison below applies both to raw B.</p>'
     body += '<p>These are diagnostic estimates, not proof of unchanged specimen structure. Low/high regions must represent stable content. ECC reports correlation, not parameter standard errors; this method does not manufacture error bars. Failed geometry or brightness measurements retain their rows and reasons. Native/aligned noise statistics in the site report still use translations only and receive no brightness correction.</p>'
     body += f'<p>All {len(rows)} pairs were measured: {registration["pair_failures"]} failed original pair measurements, {registration["quantile_failures"]} failed percentile fits, {registration["translation_failures"]} failed translations, and {registration["affine_failures"]} failed affine estimates. Each brightness estimate keeps its own status and failure reason.</p></section>'
     mean = result["maps"]["pair_reference_mean"]
@@ -115,22 +129,33 @@ def _pair_section(row: dict, regions: list[dict]) -> str:
     body = f'<section><h3>Input A = {row["input_index"]}, target B = {row["target_index"]}</h3>'
     if row.get("translation_error"):
         body += f'<p>{escape(row["translation_error"])} Its panel is grey.</p>'
-    body += f'<a href="{row["difference_image"]}"><img loading="lazy" src="{row["difference_image"]}" alt="Target minus fixed input: before, translation, affine, brightness"></a>'
+    if row["quantile_status"] != "complete":
+        body += f'<p>Percentile brightness failed: {escape(row["quantile_error"])} Its panel is grey.</p>'
+    if "difference_image_p99" in row:
+        body += '<p><label>Difference colour range: <select onchange="chooseDifferenceScale(this)">'
+        for suffix, label in (("", "95% — detail (default)"), ("_p99", "99% — wider"), ("_full", "Full range — all extremes")):
+            saturation = json.dumps([_number(row.get(f"{panel}_saturated{suffix}_pct"), 3) for panel in PAIR_PANELS])
+            body += f'<option data-image="{row[f"difference_image{suffix}"]}" data-limit="{_number(row[f"colour_limit{suffix}_dn"], 4)}" data-saturation-values="{escape(saturation, quote=True)}">{label}</option>'
+        body += '</select></label></p>'
+    body += '<div style="display:grid;grid-template-columns:repeat(5,1fr);text-align:center;font-size:14px">'
+    body += ''.join(f'<b>{title}</b>' for title in PAIR_TITLES) + '</div>'
+    body += f'<a data-difference-link href="{row["difference_image"]}"><img data-difference-image loading="lazy" src="{row["difference_image"]}" alt="Target minus fixed input: raw, translation, affine, affine plus two-region, affine plus percentiles"></a>'
     palette = np.array(difference_palette()).reshape(-1, 3)
     colours = [f'rgb({r},{g},{b})' for r, g, b in palette[[0, 127, 254]]]
     limit = row["colour_limit_dn"]
     body += '<div style="max-width:480px;margin:12px auto" aria-label="Difference colour scale in DN">'
     body += f'<div style="height:16px;background:linear-gradient(to right,{",".join(colours)})"></div>'
-    body += '<div style="display:flex;justify-content:space-between">' + ''.join(f'<span>{_number(v, 3)}</span>' for v in (-limit, 0, limit)) + '</div><div style="text-align:center">Target − input (DN)</div></div>'
-    body += f'<p>Left to right: target minus input <b>before</b>, after <b>translation</b>, after <b>affine</b>, after <b>affine + brightness</b>. Automatic shared scale ±{_number(limit)} DN covers the largest absolute valid difference across all four maps; grey is invalid. Subtraction uses signed floating-point DN. One extreme pixel can set the range; the absolute-difference P99 below shows how much smaller most differences are. Corrected target values are not clipped to the original storage range.</p>'
-    body += '<table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th></tr>'
-    for panel in PAIR_PANELS:
-        body += f'<tr><td>{panel}</td>' + ''.join(f'<td>{_number(row.get(panel + suffix))}</td>' for suffix in
-                                               ("_min_dn", "_max_dn", "_abs_p99_dn", "_rms_dn")) + '</tr>'
+    body += f'<div style="display:flex;justify-content:space-between"><span data-colour-negative>≤ −{_number(limit, 4)}</span><span>0</span><span data-colour-positive>≥ +{_number(limit, 4)}</span></div><div style="text-align:center">Target − input (DN)</div></div>'
+    body += '<p>All five panels share a zero-centred linear colour scale and the same valid pixels. Default range: the largest per-panel 95th percentile of |difference|. Extreme pixels saturate blue/red instead of setting the range; grey is invalid or a failed estimate. The representative examples offer 95%, 99% and full-range views. Only colour changes: numerical differences, RMS and extrema include every valid pixel. Both brightness corrections use the same affine-aligned target. No smoothing or clipping of corrected intensities is applied.</p>'
+    body += '<table><tr><th>Stage</th><th>Signed minimum (DN)</th><th>Signed maximum (DN)</th><th>P95 |difference| (DN)</th><th>P99 |difference| (DN)</th><th>RMS (DN)</th><th>Beyond colour range (%)</th></tr>'
+    for panel, title in zip(PAIR_PANELS, PAIR_TITLES):
+        body += f'<tr><td>{title}</td>' + ''.join(f'<td>{_number(row.get(panel + suffix))}</td>' for suffix in
+                                               ("_min_dn", "_max_dn", "_abs_p95_dn", "_abs_p99_dn", "_rms_dn"))
+        body += f'<td data-saturation>{_number(row.get(panel + "_saturated_pct"), 3)}</td></tr>'
     body += '</table><div class="regions">'
     cells = [cell for cell in regions if cell["input_index"] == row["input_index"]]
-    for panel in PAIR_PANELS[1:]:
-        body += f'<table><caption>{panel}: RMS (DN)</caption>'
+    for panel, title in zip(PAIR_PANELS[1:], PAIR_TITLES[1:]):
+        body += f'<table><caption>{title}: RMS (DN)</caption>'
         for r in range(4):
             body += '<tr>' + ''.join('<td>' + _number(next((c["rms_dn"] for c in cells if c["panel"] == panel and c["row"] == r and c["col"] == col), None), 3) + '</td>' for col in range(4)) + '</tr>'
         body += '</table>'
@@ -148,7 +173,7 @@ def _example(out: Path, row: dict) -> str:
               (np.ma.array(arrays["input_blurred"], mask=~arrays["input_blur_valid"]), "Blurred input copy"),
               (np.ma.array(arrays["target_blurred"], mask=~arrays["target_blur_valid"]), "Blurred target copy"),
               (arrays["translated_target"], "Target after translation"), (arrays["aligned_target"], "Target after affine"),
-              (arrays["corrected_target"], "Target after affine + brightness"), (labels, "Region labels on input A"))
+              (arrays["corrected_target"], "Target after affine + two-region"), (labels, "Region labels on input A"))
     fig, axes = plt.subplots(2, 4, figsize=(17, 8), constrained_layout=True)
     for ax, (array, title) in zip(axes.flat, panels):
         if title.startswith("Region"):

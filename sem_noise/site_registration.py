@@ -47,13 +47,19 @@ def difference_image(differences: list[np.ndarray], valid: np.ndarray, limit: fl
     return np.hstack(panels[:-1])
 
 
-def difference_limit(differences: Sequence[np.ndarray], valid: np.ndarray) -> float:
-    """Cover every finite valid difference with one symmetric scale per pair."""
+def difference_limit(differences: Sequence[np.ndarray], valid: np.ndarray, *, percentile: float = 95) -> float:
+    """Shared symmetric display range: largest per-panel absolute percentile.
+
+    Outliers saturate only in the rendered image. Use 100 for the full range;
+    invalid pixels and failed (nonfinite) panels never set the scale.
+    """
+    if not 0 < percentile <= 100:
+        raise ValueError("difference display percentile must be in (0, 100]")
     limit = 0.0
     for delta in differences:
         values = delta[valid & np.isfinite(delta)]
         if values.size:
-            limit = max(limit, float(np.max(np.abs(values))))
+            limit = max(limit, float(np.percentile(np.abs(values), percentile)))
     return max(limit, 1e-9)
 
 

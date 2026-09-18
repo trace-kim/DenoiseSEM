@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
+import json
+
 import numpy as np
 import pytest
 
@@ -10,7 +13,8 @@ pytest.importorskip("scipy")
 import matplotlib.pyplot as plt
 
 from sem_noise.pair_matching import measure_quantile_brightness
-from sem_noise.pair_report import _distribution_comparison, _pixel_scatter
+from sem_noise.pair_diagnostics import PAIR_PANELS
+from sem_noise.pair_report import _distribution_comparison, _pair_section, _pixel_scatter
 
 
 def test_scatter_uses_each_corresponding_pixel_with_shared_linear_axes() -> None:
@@ -70,3 +74,32 @@ def test_distribution_plot_compares_both_mappings_on_every_native_pixel() -> Non
         assert row == original
     finally:
         plt.close(fig)
+
+
+def test_difference_range_controls_keep_options_separate_from_saturation_cells() -> None:
+    class Elements(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.items = []
+
+        def handle_starttag(self, tag, attrs):
+            self.items.append((tag, dict(attrs)))
+
+    row = {"input_index": 0, "target_index": 4, "quantile_status": "complete"}
+    for suffix, limit, saturated in (("", 20, 4.5), ("_p99", 30, 0.7), ("_full", 220, 0)):
+        row[f"difference_image{suffix}"] = f"pairs/example{suffix}.png"
+        row[f"colour_limit{suffix}_dn"] = limit
+        row.update({f"{panel}_saturated{suffix}_pct": saturated for panel in PAIR_PANELS})
+    original = row.copy()
+    parsed = Elements()
+    parsed.feed(_pair_section(row, []))
+    options = [attrs for tag, attrs in parsed.items if tag == "option"]
+    assert len(options) == 3
+    for option, suffix, limit, saturated in zip(options, ("", "_p99", "_full"), (20, 30, 220), (4.5, 0.7, 0)):
+        assert option["data-image"] == row[f"difference_image{suffix}"]
+        assert float(option["data-limit"]) == limit
+        assert list(map(float, json.loads(option["data-saturation-values"]))) == [saturated] * 5
+    # The update targets only the five metric cells, never the option labels.
+    cells = [(tag, attrs) for tag, attrs in parsed.items if "data-saturation" in attrs]
+    assert len(cells) == 5 and all(tag == "td" for tag, _ in cells)
+    assert row == original
