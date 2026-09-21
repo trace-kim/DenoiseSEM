@@ -1,5 +1,10 @@
 # Running every workflow from this repository root
 
+For server-side comparisons of the six real-N2N registration/brightness treatments against sixteen raw
+eight-frame averages, see [the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md).
+Start with `edge_denoise/configs/sem_real_compare.yml` and pilot one test site
+with `python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --site site_01`.
+
 This repository holds seven independent pieces of work, separated by ownership.
 The original packages used to share one folder. **Every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).

@@ -129,9 +129,9 @@ def _load_stack(frames: list[Frame], config: AnalysisConfig, scratch: Path) -> t
             stack[i] = region
             rows.append({"site": frame.site, "path": frame.relative_path, "page": frame.page,
                          "frame_index": frame.index, "frame_position": i, "timestamp_s": frame.timestamp_s,
-                         "included": frame.include and duplicate is None,
+                         "included": frame.include and (duplicate is None or not config.exclude_duplicates),
                          "exclusion_reason": "excluded in manifest" if not frame.include else
-                                             (f"decoded duplicate of frame {duplicate}" if duplicate is not None else ""),
+                                             (f"decoded duplicate of frame {duplicate}" if duplicate is not None and config.exclude_duplicates else ""),
                          "file_sha256": hashes[frame.path][1], "pixel_sha256": digest,
                          "duplicate_of_frame_index": duplicate, "dtype": str(dtype), "height": shape[0], "width": shape[1],
                          "minimum_dn": float(region.min()), "maximum_dn": float(region.max()),

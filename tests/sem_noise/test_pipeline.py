@@ -34,6 +34,21 @@ def _config() -> AnalysisConfig:
                           sample_pixels=500, distribution_samples=3000, spatial_pairs=2)
 
 
+def test_comparison_keeps_duplicate_observations_in_noise_analysis(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    source = tmp_path / "input"
+    paths = _site(source)
+    (source / "frame8.png").write_bytes(paths[1].read_bytes())
+    output = tmp_path / "output"
+    result = analyze_dataset(source, output, config=replace(_config(), exclude_duplicates=False))
+    assert result["status"] == "complete"
+    assert result["sites"][0]["accepted_frames"] == 9
+    audit = json.loads((output / "site_001/inputs.json").read_text())
+    duplicate = next(r for r in audit if r["duplicate_of_frame_index"] is not None)
+    assert duplicate["included"] and not duplicate["exclusion_reason"]
+
+
 def test_end_to_end_png_report_provenance_and_duplicates(tmp_path: Path) -> None:
     source, output = tmp_path / "input", tmp_path / "output"
     paths = _site(source / "site")

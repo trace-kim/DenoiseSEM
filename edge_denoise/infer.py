@@ -84,7 +84,11 @@ class Denoiser:
                 named = dict(model.named_parameters())
                 for name, value in helper.shadow.items():
                     named[name].data.copy_(value)
-        return cls(model, config=config, device=resolved)
+        result = cls(model, config=config, device=resolved)
+        result.checkpoint_step = int(payload["step"])
+        result.dataset_fingerprint = payload.get("dataset_fingerprint")
+        result.using_ema = use_ema and payload["ema"] is not None
+        return result
 
     @property
     def image_size(self) -> int:
@@ -95,15 +99,18 @@ class Denoiser:
         return load_measurement01(path, black_level=self.config.data.black_level,
                                   white_level=self.config.data.white_level)
 
-    def denoise(self, frames: torch.Tensor) -> torch.Tensor:
-        """``[B, 1, S, S]`` noisy frames in [-1, 1] -> denoised images, clamped,
-        on CPU.  S must equal the training resolution."""
+    def denoise(self, frames: torch.Tensor, *, clip_output: bool = True) -> torch.Tensor:
+        """``[B, 1, S, S]`` noisy frames in [-1, 1] -> images on CPU.
+
+        S must equal the training resolution. Clipping defaults to on; disable
+        it to inspect the model's actual output range before quantization.
+        """
         if frames.dim() != 4:
             raise ValueError(f"frames must be [B, C, H, W], got shape {tuple(frames.shape)}")
         with torch.no_grad():
             batch = frames.to(device=self.device, dtype=torch.float32)
             denoised = self.model.predict_image(batch)
-        return denoised.clamp(-1.0, 1.0).cpu()
+        return (denoised.clamp(-1.0, 1.0) if clip_output else denoised).cpu()
 
     @property
     def default_margin(self) -> int:
@@ -124,6 +131,7 @@ class Denoiser:
         stride: int = 48,
         tile_batch: int = 64,
         margin: int | None = None,
+        clip_output: bool = True,
     ) -> np.ndarray:
         """Denoise a full ``[H, W]`` float frame in [0, 1] of any size >= the
         training resolution; returns the same format.
@@ -135,10 +143,12 @@ class Denoiser:
         ``margin`` (``None`` = :attr:`default_margin`) excludes that many outer
         pixels of every tile except on sides flush with the frame border, and
         ``stride`` is clamped to the valid region ``tile - 2 * margin``.
+        Set ``clip_output=False`` to preserve excursions through tile blending
+        for a range audit before conversion to detector units.
         """
         margin = self.default_margin if margin is None else margin
         return denoise_full_frame(
-            self.denoise,
+            lambda frames: self.denoise(frames, clip_output=clip_output),
             np.asarray(frame01, dtype=np.float64),
             tile=self.image_size,
             stride=max(1, min(stride, self.image_size - 2 * margin)),

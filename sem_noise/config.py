@@ -30,8 +30,11 @@ class AnalysisConfig:
     spatial_pairs: int = 16
     spatial_max_side: int = 512
     seed: int = 17
+    exclude_duplicates: bool = True  # Comparisons retain every repeated observation.
 
     def __post_init__(self) -> None:
+        if type(self.exclude_duplicates) is not bool:
+            raise ValueError("exclude_duplicates must be boolean")
         for name in ("expected_frames", "min_frames", "sample_pixels", "distribution_samples",
                      "intensity_bins", "max_lag", "spatial_pairs", "spatial_max_side"):
             value = getattr(self, name)

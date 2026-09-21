@@ -235,6 +235,12 @@ class Trainer:
         if config.data.real_matching is not None and self.cache.real_metadata is None:
             raise ValueError("data.real_matching requires a prepared real SEM dataset")
         summary = self.cache.summary()
+        self.real_comparison_examples = []
+        if config.training.real_comparison_images:
+            from .real_comparison import prepare_examples
+
+            self.real_comparison_examples = self.runtime.on_primary(
+                lambda: prepare_examples(self.cache, config.data.image_size)) or []
         logger.info(
             "dataset: %d train / %d val sources, min %d frames, %.0f MB cached",
             summary["train_sources"],
@@ -627,6 +633,13 @@ class Trainer:
         self.model.train()
 
     def _validate(self, writer: SummaryWriter) -> None:
+        if self.real_comparison_examples:
+            from .real_comparison import log_examples
+
+            with ema_parameters(self.model, self.ema):
+                log_examples(self.model, self.real_comparison_examples, writer, self.step,
+                             device=self.device, black=self.config.data.black_level,
+                             white=self.config.data.white_level)
         if not self.cache.val_sources:
             return
         if self.is_fusion:

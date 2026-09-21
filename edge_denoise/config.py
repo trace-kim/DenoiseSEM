@@ -348,6 +348,7 @@ class TrainingConfig(_StrictModel):
     log_every: int = Field(default=50, ge=1)
     val_every: int = Field(default=1000, ge=1)
     val_images: int = Field(default=8, ge=1)
+    real_comparison_images: bool = False
     checkpoint_every: int = Field(default=2000, ge=1)
 
 

@@ -186,7 +186,9 @@ def denoise_full_frame(
             [frame01[top : top + tile, left : left + tile] for top, left in chunk]
         ).astype(np.float32)
         prediction = denoise_fn(torch.from_numpy(tiles[:, None] * 2.0 - 1.0))
-        tiles01 = ((prediction.numpy()[:, 0] + 1.0) / 2.0).astype(np.float64)
+        # Convert before the affine mapping: float32 (1 + eps) + 1 can
+        # round to exactly 2 and hide a real upper-bound excursion.
+        tiles01 = (prediction.numpy()[:, 0].astype(np.float64) + 1.0) / 2.0
         for (top, left), tile01 in zip(chunk, tiles01):
             window = window_for(top, left)
             accumulator[top : top + tile, left : left + tile] += tile01 * window

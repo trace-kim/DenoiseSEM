@@ -39,4 +39,7 @@ training:
   log_every: 50
   val_every: 1000
   val_images: 8
+  # Opt in to fixed train/val uint8 panels (input, prediction, raw 8/full means).
+  # No test images or offline metrology enter training.
+  real_comparison_images: false
   checkpoint_every: 5000
