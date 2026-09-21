@@ -122,7 +122,7 @@ def convex_hull_points(points: np.ndarray) -> np.ndarray:
     return points[hull.vertices]
 
 
-def feret_diameters(points: np.ndarray) -> tuple[float, float, float]:
+def feret_diameters(points: np.ndarray, *, hull: np.ndarray | None = None) -> tuple[float, float, float]:
     """Minimum, maximum and mean caliper width.
 
     The minimum width of a convex body is attained perpendicular to one of its
@@ -130,8 +130,10 @@ def feret_diameters(points: np.ndarray) -> tuple[float, float, float]:
     exact rather than a sampled approximation.  The mean follows from Cauchy's
     formula - the mean caliper width of a convex body is its perimeter divided
     by pi - which is also a useful internal consistency check.
+    Callers that already measured the hull of these points may supply it.
     """
-    hull = convex_hull_points(points)
+    if hull is None:
+        hull = convex_hull_points(points)
     if hull.shape[0] < 2:
         return 0.0, 0.0, 0.0
 
@@ -163,22 +165,25 @@ def chord_widths(points: np.ndarray, centroid: tuple[float, float], angles: int)
     starts = points
     ends = np.roll(points, -1, axis=0)
 
-    widths = np.empty(angles)
-    for index, angle in enumerate(theta):
-        dy, dx = np.sin(angle), np.cos(angle)
-        # Signed perpendicular distance of each vertex from the line.
+    widths = np.zeros(angles)
+    # Bound temporary arrays even for unusually long contours or many angles.
+    batch = max(1, min(angles, 262144 // max(1, len(points))))
+    for first in range(0, angles, batch):
+        dy, dx = np.sin(theta[first:first + batch, None]), np.cos(theta[first:first + batch, None])
         side_start = (starts[:, 0] - cy) * dx - (starts[:, 1] - cx) * dy
         side_end = (ends[:, 0] - cy) * dx - (ends[:, 1] - cx) * dy
-        crosses = (side_start <= 0) != (side_end <= 0)
-        if not np.any(crosses):
-            widths[index] = 0.0
-            continue
-        denominator = side_start[crosses] - side_end[crosses]
+        rows, edges = np.nonzero((side_start <= 0) != (side_end <= 0))
+        denominator = side_start[rows, edges] - side_end[rows, edges]
         denominator = np.where(np.abs(denominator) < 1e-12, 1e-12, denominator)
-        fraction = side_start[crosses] / denominator
-        hits = starts[crosses] + fraction[:, None] * (ends[crosses] - starts[crosses])
-        t = (hits[:, 0] - cy) * dy + (hits[:, 1] - cx) * dx
-        widths[index] = float(t.max() - t.min())
+        fraction = side_start[rows, edges] / denominator
+        hits = starts[edges] + fraction[:, None] * (ends[edges] - starts[edges])
+        t = (hits[:, 0] - cy) * dy[rows, 0] + (hits[:, 1] - cx) * dx[rows, 0]
+        count = len(dy)
+        lo, hi = np.full(count, np.inf), np.full(count, -np.inf)
+        np.minimum.at(lo, rows, t)
+        np.maximum.at(hi, rows, t)
+        present = np.isfinite(lo)
+        widths[first + np.flatnonzero(present)] = (hi - lo)[present]
     return widths
 
 
@@ -205,7 +210,7 @@ def measure_shape(
     hull_area = abs(polygon_area(hull)) if hull.shape[0] >= 3 else area
     hull_perimeter = polygon_perimeter(hull) if hull.shape[0] >= 3 else perimeter
 
-    feret_min, feret_max, feret_mean = feret_diameters(points)
+    feret_min, feret_max, feret_mean = feret_diameters(points, hull=hull)
     major, minor, orientation, eccentricity = equivalent_ellipse(points)
     chords = chord_widths(points, (cy, cx), config.chord_angles)
 

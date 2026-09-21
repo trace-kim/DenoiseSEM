@@ -227,43 +227,37 @@ def sample_profiles(
     return profiles, offsets, in_bounds
 
 
-def _nearest_candidate(
-    strength: np.ndarray,
-    offsets: np.ndarray,
-    *,
-    min_height: float,
-    min_prominence: float,
-) -> int | None:
-    """Index of the edge candidate nearest the mask boundary, or None.
+def _nearest_candidates(strength: np.ndarray, offsets: np.ndarray, *,
+                        min_height: np.ndarray, min_prominence: np.ndarray) -> np.ndarray:
+    """Nearest edge to the mask boundary in each profile; -1 = none.
 
-    This is the rule the whole module turns on.  A profile window wide enough to
-    be useful usually contains more than one edge: the feature's own, and a
-    neighbour's a few pixels further out.  Choosing by *strength* - the steepest
-    gradient, or the only crossing in the polarity the window happens to imply -
-    picks the neighbour whenever the neighbour is brighter, which is exactly the
-    failure that pushed small dim particles onto their bright neighbours.
-
-    The segmentation already answered "where is this feature's boundary": it is
-    ``t = 0``.  So the right question is which candidate lies nearest that, and
-    strength is only used to reject noise ripples.
+    A window can contain the feature's edge and a brighter neighbour. Strength
+    only rejects noise; proximity to the mask boundary (t = 0) selects the edge.
+    Apply the same SciPy peak rule to all profiles in one call.
     """
     from scipy.signal import find_peaks
 
-    peaks, _ = find_peaks(strength, height=min_height, prominence=min_prominence)
-    if peaks.size == 0:
-        return None
-    return int(peaks[int(np.argmin(np.abs(offsets[peaks])))])
-
-
-def _parabolic_offset(values: np.ndarray, index: int) -> float:
-    """Sub-pixel correction from a parabola through three samples."""
-    if index <= 0 or index >= values.size - 1:
-        return 0.0
-    y0, y1, y2 = values[index - 1], values[index], values[index + 1]
-    denominator = y0 - 2.0 * y1 + y2
-    if abs(denominator) < 1e-12:
-        return 0.0
-    return float(np.clip(0.5 * (y0 - y2) / denominator, -1.0, 1.0))
+    count, width = strength.shape
+    candidates = np.full(count, width, dtype=int)
+    if not count:
+        return candidates
+    # Higher-than-every-peak separators bound prominence searches to each row.
+    # They also keep profile endpoints from becoming new peaks. Reject the
+    # separators by height BEFORE computing prominence (otherwise equal infinite
+    # peaks would scan the whole buffer). This preserves plateau/tie handling.
+    separated = np.full((count, width + 1), np.inf)
+    separated[:, :width] = strength
+    heights = np.broadcast_to(min_height[:, None], separated.shape).ravel()
+    prominences = np.broadcast_to(min_prominence[:, None], separated.shape).ravel()
+    peaks, _ = find_peaks(separated.ravel(), height=(heights, np.finfo(float).max), prominence=(prominences, None))
+    rows, columns = np.divmod(peaks, width + 1)
+    distance = np.abs(offsets[columns])
+    nearest = np.full(count, np.inf)
+    np.minimum.at(nearest, rows, distance)
+    keep = distance == nearest[rows]
+    np.minimum.at(candidates, rows[keep], columns[keep])
+    candidates[candidates == width] = -1
+    return candidates
 
 
 def _contour_polarity(profiles: np.ndarray, offsets: np.ndarray) -> float:
@@ -423,29 +417,23 @@ def _estimate_gradient_peak(
 
     n = profiles.shape[0]
     positions = np.full(n, np.nan)
-    reasons = np.full(n, REJECT_OK, dtype=np.int16)
-
-    for index in range(n):
-        if contrast[index] < config.min_contrast:
-            reasons[index] = REJECT_LOW_CONTRAST
-            continue
-        row = magnitude[index]
-        peak_value = float(row.max())
-        if peak_value <= 0.0:
-            reasons[index] = REJECT_NO_CROSSING
-            continue
-        # Height and prominence are fractions of the strongest edge in this
-        # window, so the test adapts to local contrast instead of assuming one.
-        candidate = _nearest_candidate(
-            row,
-            offsets,
-            min_height=config.peak_height_fraction * peak_value,
-            min_prominence=config.peak_prominence_fraction * peak_value,
-        )
-        if candidate is None:
-            reasons[index] = REJECT_NO_CROSSING
-            continue
-        positions[index] = offsets[candidate] + _parabolic_offset(row, candidate) * step
+    reasons = np.full(n, REJECT_NO_CROSSING, dtype=np.int16)
+    reasons[contrast < config.min_contrast] = REJECT_LOW_CONTRAST
+    peak_values = magnitude.max(axis=1)
+    active = np.flatnonzero((contrast >= config.min_contrast) & (peak_values > 0))
+    candidates = _nearest_candidates(
+        magnitude[active], offsets,
+        min_height=config.peak_height_fraction * peak_values[active],
+        min_prominence=config.peak_prominence_fraction * peak_values[active],
+    )
+    selected = candidates >= 0
+    rows, peaks = active[selected], candidates[selected]
+    y0, y1, y2 = magnitude[rows, peaks - 1], magnitude[rows, peaks], magnitude[rows, peaks + 1]
+    denominator = y0 - 2.0 * y1 + y2
+    correction = np.zeros(len(rows))
+    np.divide(0.5 * (y0 - y2), denominator, out=correction, where=np.abs(denominator) >= 1e-12)
+    positions[rows] = offsets[peaks] + np.clip(correction, -1.0, 1.0) * step
+    reasons[rows] = REJECT_OK
     return positions, reasons, contrast
 
 
@@ -564,12 +552,12 @@ def _coherence_filter(
     # Circular neighbourhood medians; the ring has no ends.
     half = max(1, window // 2)
     padded = np.concatenate([filled[-half:], filled, filled[:half]])
+    neighbourhoods = np.lib.stride_tricks.sliding_window_view(padded, window)[:n]
+    neighbours = np.concatenate([neighbourhoods[:, :half], neighbourhoods[:, half + 1:]], axis=1)
+    neighbours[~np.isfinite(neighbours)] = np.nan
+    present = np.isfinite(neighbours).any(axis=1)
     local = np.full(n, np.nan)
-    for i in range(n):
-        neighbourhood = np.concatenate([padded[i : i + half], padded[i + half + 1 : i + window]])
-        finite = neighbourhood[np.isfinite(neighbourhood)]
-        if finite.size:
-            local[i] = np.median(finite)
+    local[present] = np.nanmedian(neighbours[present], axis=1)
 
     residual = np.abs(filled - local)
     finite = residual[np.isfinite(residual)]

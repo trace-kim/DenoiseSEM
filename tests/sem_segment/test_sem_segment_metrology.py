@@ -50,6 +50,33 @@ def rectangle(height=10.0, width=30.0, n_per_side=200):
 CONFIG = MetrologyConfig()
 
 
+@pytest.mark.parametrize("angles", [4, 36, 4099])
+def test_batched_chords_match_rectangle_intersections_across_chunks(angles):
+    theta = np.linspace(0, np.pi, angles, endpoint=False)
+    dy, dx = np.abs(np.sin(theta)), np.abs(np.cos(theta))
+    y_distance = np.divide(5., dy, out=np.full(angles, np.inf), where=dy > 0)
+    x_distance = np.divide(15., dx, out=np.full(angles, np.inf), where=dx > 0)
+    expected = 2 * np.minimum(y_distance, x_distance)
+    np.testing.assert_allclose(chord_widths(rectangle(), (5., 15.), angles), expected, rtol=0, atol=1e-10)
+
+
+def test_shape_measurement_reuses_its_hull(monkeypatch):
+    from sem_segment import metrology
+
+    original = metrology.convex_hull_points
+    calls = []
+
+    def counted(points):
+        calls.append(1)
+        return original(points)
+
+    monkeypatch.setattr(metrology, "convex_hull_points", counted)
+    measured = measure_shape(rectangle(), CONFIG)
+    assert len(calls) == 1
+    assert measured.feret_min_px == pytest.approx(10.)
+    assert measured.feret_max_px == pytest.approx(np.hypot(10., 30.))
+
+
 def test_polygon_moments_of_a_circle_match_the_closed_form():
     radius = 10.0
     area, cy, cx, mu_yy, mu_xx, _ = polygon_moments(circle(radius, n=2000))

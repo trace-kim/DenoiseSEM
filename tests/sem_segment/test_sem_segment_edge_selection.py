@@ -34,6 +34,74 @@ def test_gradient_is_the_default_estimator():
     assert RefineConfig().estimator == "gradient_peak"
 
 
+@pytest.mark.parametrize("width", [9, 17, 49])
+def test_batched_peak_selection_matches_independent_scipy_profiles(width, monkeypatch):
+    from scipy import signal
+    from sem_segment.refine import _nearest_candidates
+
+    rng = np.random.default_rng(311)
+    # Integer-valued rows exercise flat peaks and equal-height neighbours.
+    strength = np.concatenate([rng.integers(0, 12, (300, width)), rng.random((300, width))])
+    offsets = np.linspace(-6, 6, width)
+    heights = rng.random(len(strength)) * strength.max(axis=1)
+    prominences = rng.random(len(strength)) * strength.max(axis=1)
+    expected = []
+    for row, h, p in zip(strength, heights, prominences):
+        peaks, _ = signal.find_peaks(row, height=h, prominence=p)
+        expected.append(int(peaks[np.argmin(np.abs(offsets[peaks]))]) if len(peaks) else -1)
+    calls = []
+    original = signal.find_peaks
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(signal, "find_peaks", counted)
+    actual = _nearest_candidates(strength, offsets, min_height=heights, min_prominence=prominences)
+    np.testing.assert_array_equal(actual, expected)
+    assert len(calls) == 1
+
+
+def test_batched_peak_selection_preserves_boundaries_plateaus_and_ties():
+    from sem_segment.refine import _nearest_candidates
+
+    strength = np.array([
+        [5, 4, 3, 2, 1, 2, 3, 4, 5],  # No interior peak.
+        [0, 1, 4, 1, 0, 1, 4, 1, 0],  # Equally near: choose the left one.
+        [0, 1, 4, 4, 1, 0, 1, 3, 1],  # Even plateau: lower middle index.
+        [0, 1, 2, 3, 4, 4, 4, 4, 4],  # Plateau reaching the right endpoint.
+        [4, 4, 4, 4, 4, 3, 2, 1, 0],  # Plateau reaching the left endpoint.
+        [2, 2, 2, 2, 2, 2, 2, 2, 2],
+    ], dtype=float)
+    actual = _nearest_candidates(strength, np.arange(-4, 5), min_height=np.zeros(6), min_prominence=np.zeros(6))
+    np.testing.assert_array_equal(actual, [-1, 2, 2, -1, -1, -1])
+    assert _nearest_candidates(strength[:0], np.arange(-4, 5), min_height=np.zeros(0), min_prominence=np.zeros(0)).size == 0
+
+
+@pytest.mark.parametrize("window", [3, 7, 11])
+def test_batched_coherence_matches_circular_neighbour_medians(window):
+    rng = np.random.default_rng(75)
+    displacement = rng.normal(0, .3, 83)
+    displacement[10:15] += 3
+    valid = rng.random(83) > .2
+    valid[35:48] = False  # Includes windows without any finite neighbours.
+    filled = np.where(valid, displacement, np.nan)
+    local = []
+    half = window // 2
+    for i in range(len(filled)):
+        neighbours = [filled[(i + offset) % len(filled)] for offset in range(-half, half + 1) if offset]
+        finite = np.array(neighbours)[np.isfinite(neighbours)]
+        local.append(np.median(finite) if len(finite) else np.nan)
+    residual = np.abs(filled - local)
+    finite = residual[np.isfinite(residual)]
+    limit = max(3 * 1.4826 * np.median(np.abs(finite - np.median(finite))), .5)
+    observed = filled[np.isfinite(filled)]
+    region_limit = max(3 * 1.4826 * np.median(np.abs(observed - np.median(observed))), 1.)
+    expected = valid & ~(np.isfinite(residual) & (residual > limit))
+    expected &= ~(np.isfinite(filled) & (np.abs(filled - np.median(observed)) > region_limit))
+    np.testing.assert_array_equal(_coherence_filter(displacement, valid, window=window), expected)
+
+
 def two_edge_image(*, near_x: float, near_contrast: float, far_x: float, far_contrast: float,
                    height: int = 40, width: int = 120, sigma: float = 1.2) -> np.ndarray:
     """A weak edge near the boundary and a stronger one further out."""

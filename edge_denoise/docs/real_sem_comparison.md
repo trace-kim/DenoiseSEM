@@ -73,7 +73,13 @@ contour/CD frame counts, combined rendering and TensorBoard export. Per-series
 `segmentation_timings_s` are saved in `comparison.json` with the analysis results.
 
 Contour processing shares the image's gradient and cubic spline preparation
-across holes, and keeps one segmentation backend loaded per series. Pixel
+across holes, and keeps one segmentation backend loaded per series. Profile
+peak selection, neighbour consistency and chord measurements run in
+batches; each polygon's convex hull is computed once. These retain the same
+nearest-peak rule (including prominence, plateaus and ties), rejection masks
+and measurement definitions. Classical metrology runs on the CPU;
+`device: cuda` selects the denoiser's device and does not move this analysis to
+the GPU. No extra acceleration dependency is required. Pixel
 resolution, interpolation order, both contour methods and sample counts are
 unchanged. This reduces repeated computation; it does not remove the cost of
 eight noise analyses and inference for all checkpoints. An already running
