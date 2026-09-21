@@ -35,6 +35,55 @@ def vertical_edge_contour(*, guess_x: float, height: int = 40, n: int = 24) -> C
     return Contour(points=points, normals=normals)
 
 
+@pytest.mark.parametrize("order", [1, 3])
+@pytest.mark.parametrize("shape", [(7, 9), (64, 80)])
+def test_shared_profile_preparation_preserves_scipy_border_sampling(order, shape):
+    from sem_segment.refine import _prepare_profile_image
+
+    rng = np.random.default_rng(39)
+    image = rng.random(shape)
+    before = image.copy()
+    points = np.array([[0., 0.], [0.3, shape[1] - 0.2], [shape[0] - 0.2, 0.7],
+                       [shape[0] - 1., shape[1] - 1.], [shape[0] / 2, shape[1] / 2]])
+    normals = rng.normal(size=points.shape)
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    kwargs = dict(search_px=6., step_px=.25, interp_order=order)
+    expected = sample_profiles(image, points, normals, **kwargs)
+    actual = sample_profiles(image, points, normals, _prepared=_prepare_profile_image(image, order), **kwargs)
+    np.testing.assert_allclose(actual[0], expected[0], rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(actual[1], expected[1])
+    np.testing.assert_array_equal(actual[2], expected[2])
+    np.testing.assert_array_equal(image, before)
+
+
+@pytest.mark.parametrize("estimator", ESTIMATORS)
+@pytest.mark.parametrize("order", [1, 3])
+def test_shared_refinement_matches_individual_contours(estimator, order, monkeypatch):
+    from scipy import ndimage
+    from sem_segment.refine import refine_all
+
+    image = gaussian_blurred_step(edge_x=40.3)
+    contours = [vertical_edge_contour(guess_x=x) for x in (39.1, 41.2)]
+    config = RefineConfig(estimator=estimator, interp_order=order)
+    radii = [4., 6.]
+    expected = [refine_contour(c, image, config, search_px=r) for c, r in zip(contours, radii)]
+    calls = []
+    original = ndimage.spline_filter
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ndimage, "spline_filter", counted)
+    actual = refine_all(contours, image, config, search_px=radii)
+    assert len(calls) == (1 if order == 3 else 0)
+    for a, b in zip(actual, expected):
+        np.testing.assert_allclose(a.polygon, b.polygon, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(a.edge_width, b.edge_width, rtol=0, atol=1e-9)
+        np.testing.assert_array_equal(a.valid, b.valid)
+        np.testing.assert_array_equal(a.reasons, b.reasons)
+
+
 @pytest.mark.parametrize("estimator", ESTIMATORS)
 @pytest.mark.parametrize("true_x", [40.0, 40.25, 40.5, 40.75])
 def test_edge_position_is_recovered_to_a_hundredth_of_a_pixel(estimator, true_x):

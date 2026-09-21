@@ -139,7 +139,7 @@ class CaptureWriter:
         pass
 
 
-def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatch):
+def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatch, capsys):
     from sem_noise import pipeline
     from sem_noise.comparison_report import write_tensorboard
     from sem_segment import pipeline as segmentation
@@ -182,9 +182,12 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
         segmentation={"backend": "classical", "polarity": "dark"}))
     assert fixed_segmentation.regions
 
-    def segment(image, config):
+    used_backends = []
+
+    def segment(image, config, *, segmenter=None):
         np.testing.assert_allclose(image * 255, np.rint(image * 255), atol=1e-12)
         measured.append(image.copy())
+        used_backends.append(segmenter)
         return fixed_segmentation
 
     monkeypatch.setattr(pipeline, "analyze_dataset", noise)
@@ -203,6 +206,24 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert result["status"] == "complete"
     assert len(calls) == 8 and sum(name == "raw" for name, _ in calls) == 1
     assert len(measured) == 1 + 128 + 16 + 6 * 128  # Template + quantitative series; no full average.
+    assert used_backends[0] is None  # Template; each measurement series shares one backend.
+    start = 1
+    for count in (128, 16, *([128] * 6)):
+        group = used_backends[start:start + count]
+        assert group[0] is not None and all(backend is group[0] for backend in group)
+        start += count
+    progress = capsys.readouterr().out
+    assert progress.index("site/raw: noise analysis and report finished") < progress.index("site/raw: contours/CD starting")
+    assert "site/raw: contours/CD 1/128" in progress
+    assert "site/raw: contours/CD 128/128" in progress
+    assert "site/average8: contours/CD 16/16" in progress
+    assert "Combined comparison report finished" in progress
+    assert "TensorBoard comparison finished" in progress
+    for series in result["sites"][0]["series"].values():
+        assert series["timings_s"]["contours_cd"] >= 0
+        assert series["timings_s"]["noise_analysis_and_report"] >= 0
+        assert "edge_strength" in series["segmentation_stage_totals_s"]
+        assert "segmentation_timings_s" in series["frames"][0]
     averages = result["sites"][0]["series"]["average8"]["frames"]
     for block, frame in enumerate(averages):
         assert (frame["first_acquisition"], frame["last_acquisition"]) == (block * 8 + 1, block * 8 + 8)

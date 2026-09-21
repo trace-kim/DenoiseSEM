@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -224,6 +225,9 @@ def registration_tracks(reference: np.ndarray, paths: list[Path], sigma: float) 
     from sem_noise.pair_matching import estimate_geometry
 
     tracks = []
+    started = last_progress = time.perf_counter()
+    label = "/".join(paths[0].parts[-3:-1]) if paths else "empty series"
+    print(f"{label}: translation diagnostics starting ({len(paths)} frames)", flush=True)
     for path in paths:
         pixels = read_uint8(path)
         row = {"mean_dn": float(pixels.mean()), "p10_dn": float(np.percentile(pixels, 10)),
@@ -236,6 +240,10 @@ def registration_tracks(reference: np.ndarray, paths: list[Path], sigma: float) 
             row.update(dy_px=None, dx_px=None, registration_status="failed",
                        registration_score=None, registration_error=str(error))
         tracks.append(row)
+        now = time.perf_counter()
+        if len(tracks) == 1 or len(tracks) % 16 == 0 or len(tracks) == len(paths) or now - last_progress >= 30:
+            print(f"{label}: translation diagnostics {len(tracks)}/{len(paths)}; {now - started:.1f}s elapsed", flush=True)
+            last_progress = now
     return tracks
 
 
@@ -252,19 +260,29 @@ def output_registration_diagnostics(root: Path, reference: np.ndarray, series: d
 
 def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                    gate: float, segment_config: SegmentConfig) -> tuple[list[dict], list[dict]]:
+    from sem_segment.backends import build_segmenter
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import match_centroids
 
+    started = last_progress = time.perf_counter()
+    count = len(series["frames"])
+    label = "/".join(Path(series["frames"][0]["path"]).parts[:-1]) if count else name
+    print(f"{label}: contours/CD starting ({count} saved uint8 images)", flush=True)
+    segmenter = build_segmenter(segment_config)
     rows, contours = [], []
+    stage_totals = {}
     factor = segment_config.input.pixel_size_nm or 1.0
-    for frame in series["frames"]:
+    for number, frame in enumerate(series["frames"], 1):
         # Measurements always start by decoding the saved, quantized file.
         pixels = read_uint8(root / frame["path"])
         crop = segment_config.input.crop
         if crop:
             y0, y1, x0, x1 = crop
             pixels = pixels[y0:y1, x0:x1]
-        result = segment_image(pixels.astype(np.float64) / 255.0, segment_config)
+        result = segment_image(pixels.astype(np.float64) / 255.0, segment_config, segmenter=segmenter)
+        frame["segmentation_timings_s"] = result.diagnostics.timings_s
+        for stage, seconds in result.diagnostics.timings_s.items():
+            stage_totals[stage] = stage_totals.get(stage, 0.0) + seconds
         frame["segmentation_warnings"] = result.diagnostics.warnings
         frame["detected_regions"] = len(result.regions)
         centers = np.array([(r.coarse.centroid_y, r.coarse.centroid_x) if r.coarse else (np.nan, np.nan)
@@ -302,6 +320,15 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                                  "shift_yx": shift.tolist(),
                                  "coarse": result.coarse[index].points.tolist(),
                                  "refined": result.refined[index].polygon.tolist() if result.refined else []})
+        now = time.perf_counter()
+        if number == 1 or number % 16 == 0 or number == count or now - last_progress >= 30:
+            print(f"{label}: contours/CD {number}/{count}; {len(result.regions)} regions; "
+                  f"{now - started:.1f}s elapsed ({(now - started) / number:.2f}s/image)", flush=True)
+            last_progress = now
+    elapsed = time.perf_counter() - started
+    series.setdefault("timings_s", {})["contours_cd"] = elapsed
+    series["segmentation_stage_totals_s"] = stage_totals
+    print(f"{label}: contours/CD complete in {elapsed:.1f}s", flush=True)
     return rows, contours
 
 
@@ -315,12 +342,18 @@ def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisCo
     noise = replace(noise_config, expected_frames=len(series["frames"]), exclude_duplicates=False,
                     frame_interval_s=None if series["frames"][0]["timestamp_s"] is not None else noise_config.frame_interval_s)
     report = folder.parent / f"noise_{name}"
+    started = time.perf_counter()
+    print(f"{folder.parent.name}/{name}: noise analysis and report starting", flush=True)
     result = analyze_dataset(folder, report, config=noise, manifest=manifest,
                              progress=lambda message: print(message, flush=True))
     series["noise_report"] = (report / "index.html").relative_to(root).as_posix()
     series["noise_settings"] = asdict(noise)
     series["noise"] = result["sites"][0]
     series["noise_status"] = result["status"]
+    elapsed = time.perf_counter() - started
+    series.setdefault("timings_s", {})["noise_analysis_and_report"] = elapsed
+    print(f"{folder.parent.name}/{name}: noise analysis and report finished in {elapsed:.1f}s "
+          f"({result['status']})", flush=True)
 
 
 def run(config: ComparisonSettings) -> dict:
@@ -401,6 +434,7 @@ def run(config: ComparisonSettings) -> dict:
                 template_image = reference[y0:y1, x0:x1]
             else:
                 template_image = reference
+            print(f"{name}: segmenting correspondence template", flush=True)
             template_result = segment_image(template_image.astype(float) / 255, segment)
             template = np.array([(r.coarse.centroid_y, r.coarse.centroid_x) for r in template_result.regions
                                  if r.coarse and (not r.touches_border or segment.masks.include_border_regions)]).reshape(-1, 2)
@@ -492,9 +526,17 @@ def run(config: ComparisonSettings) -> dict:
                       for name, series in site["series"].items() for frame in series["frames"]])
         record["status"] = "complete" if all(s["noise_status"] == "complete" for site in record["sites"]
                                              for s in site["series"].values()) else "partial_failure"
+        started = time.perf_counter()
+        print("Rendering combined comparison report", flush=True)
         render_comparison(root, record)
+        record.setdefault("timings_s", {})["comparison_report"] = time.perf_counter() - started
+        print(f"Combined comparison report finished in {record['timings_s']['comparison_report']:.1f}s", flush=True)
         if record["status"] == "complete":
+            started = time.perf_counter()
+            print("Writing TensorBoard comparison", flush=True)
             write_tensorboard(root, record)
+            record["timings_s"]["tensorboard"] = time.perf_counter() - started
+            print(f"TensorBoard comparison finished in {record['timings_s']['tensorboard']:.1f}s", flush=True)
     except Exception as error:
         record.update(status="failed", error=str(error))
         raise

@@ -63,6 +63,23 @@ every configured site. Relative paths resolve from the repository root on
 Windows and Linux. The command does not launch training. Real-data piloting
 requires server access; local regression tests generate their own pixels.
 
+Each site has 912 quantitative images with six checkpoints: 128 raw frames,
+16 block means and 768 predictions. Noise reporting is followed by contour/CD
+measurement on each series. Older versions printed `writing report` and then
+ran that measurement pass silently; a long pause at that message could therefore
+be contour processing. Progress now distinguishes noise/report completion,
+contour/CD frame counts, combined rendering and TensorBoard export. Per-series
+`timings_s`, `segmentation_stage_totals_s` and each frame's
+`segmentation_timings_s` are saved in `comparison.json` with the analysis results.
+
+Contour processing shares the image's gradient and cubic spline preparation
+across holes, and keeps one segmentation backend loaded per series. Pixel
+resolution, interpolation order, both contour methods and sample counts are
+unchanged. This reduces repeated computation; it does not remove the cost of
+eight noise analyses and inference for all checkpoints. An already running
+process will not acquire this optimization. Runs do not currently resume;
+use a new `output_dir` when starting another comparison.
+
 Each site is a flat folder of exactly 128 naturally ordered images, with
 consistent dimensions and uint8 storage. RGB inputs must have exactly equal
 decoded channels; one channel is selected without luminance conversion. JPEG

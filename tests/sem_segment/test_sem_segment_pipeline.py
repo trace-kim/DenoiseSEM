@@ -131,6 +131,63 @@ def test_results_are_deterministic():
         assert a.refined.cd_px == b.refined.cd_px
 
 
+def test_image_preparations_are_shared_without_changing_measurements(monkeypatch):
+    from dataclasses import asdict
+    from scipy import ndimage
+    from sem_segment import pipeline, refine
+
+    config = make_config()
+    image, _ = disks()
+    images = [image, image * .9 + .03]
+    original_strength = refine.edge_strength_along
+
+    # Compute the previous per-contour path as an independent numerical baseline.
+    with monkeypatch.context() as old:
+        old.setattr(pipeline, "refine_all", lambda contours, pixels, settings, **kw: [
+            refine.refine_contour(c, pixels, settings, spacing_px=kw["spacing_px"], search_px=r)
+            for c, r in zip(contours, kw["search_px"])])
+        old.setattr(refine, "edge_strength_along", lambda points, pixels, **kw: original_strength(points, pixels))
+        expected = [segment_image(pixels, config) for pixels in images]
+
+    calls = []
+    original_gradient = ndimage.gaussian_gradient_magnitude
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original_gradient(*args, **kwargs)
+
+    monkeypatch.setattr(ndimage, "gaussian_gradient_magnitude", counted)
+    for pixels, baseline in zip(images, expected):
+        result = segment_image(pixels, config)
+        for a, b in zip(result.regions, baseline.regions):
+            for method in ("coarse", "refined"):
+                np.testing.assert_allclose(list(asdict(getattr(a, method)).values()),
+                                           list(asdict(getattr(b, method)).values()), rtol=0, atol=1e-10)
+        assert result.region_count == baseline.region_count
+        assert result.diagnostics.warnings == baseline.diagnostics.warnings
+        assert result.diagnostics.edge_strength_change == pytest.approx(baseline.diagnostics.edge_strength_change)
+        timings = result.diagnostics.timings_s
+        assert "edge_strength" in timings and "prepare" in timings
+        assert timings["total"] >= sum(v for k, v in timings.items() if k != "total") - .001
+    assert len(calls) == len(images)  # One per image; never retain another image's gradient.
+
+
+def test_series_can_reuse_backend_without_reusing_image_results(monkeypatch):
+    from sem_segment import pipeline
+    from sem_segment.backends import build_segmenter
+
+    config = make_config()
+    backend = build_segmenter(config)
+    image, _ = disks()
+
+    def unexpected_build(*args):
+        pytest.fail("A supplied backend must not be reloaded")
+
+    monkeypatch.setattr(pipeline, "build_segmenter", unexpected_build)
+    assert segment_image(image, config, segmenter=backend).region_count == 3
+    assert segment_image(np.full_like(image, .5), config, segmenter=backend).region_count == 0
+
+
 def test_oversized_frames_are_resized_not_tiled_by_default():
     """Resize has no seams and costs nothing measurable, so it is the default."""
     config = Config.model_validate({"segmentation": {"backend": "sam3_auto"}})

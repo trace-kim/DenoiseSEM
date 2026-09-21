@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .backends import InstanceMask, build_segmenter
+from .backends import InstanceMask, Segmenter, build_segmenter
 from .config import SAM3_NATIVE_PX, Config
 from .contours import Contour, trace_all
 from .image_io import to_model_rgb
@@ -208,13 +208,16 @@ def _plan_scaling(shape: tuple[int, int], config: Config) -> tuple[str, dict, li
     return "tile", info, warnings
 
 
-def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
+def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter | None = None) -> SegmentationResult:
     """Segment, contour, refine and measure one image.
 
     ``image01`` is a float array in [0, 1] as produced by
     :func:`sem_segment.image_io.load_image`.  It is the measurement array and is
     never modified.
+    A caller processing a series may supply a backend built from this config
+    to keep its model loaded; all image-specific measurements are recomputed.
     """
+    total_started = time.perf_counter()
     measure01 = np.asarray(image01, dtype=np.float64)
     if measure01.ndim != 2:
         raise ValueError(f"expected a 2-D image in [0, 1], got shape {measure01.shape}")
@@ -226,7 +229,9 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
     mode, scaling, scale_warnings = _plan_scaling(shape, config)
     warnings.extend(scale_warnings)
 
-    segmenter = build_segmenter(config)
+    if segmenter is None:
+        segmenter = build_segmenter(config)
+    timings["prepare"] = time.perf_counter() - total_started
 
     start = time.perf_counter()
     extra: dict = {}
@@ -300,13 +305,16 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
     # dragged onto a neighbour or into flat background lands on a weaker one, and
     # a summary that only reports what was fixed would never show it.
     strength: dict = {}
+    start = time.perf_counter()
     if refined:
+        from scipy.ndimage import gaussian_gradient_magnitude
         from .refine import edge_strength_along
 
+        magnitude = gaussian_gradient_magnitude(measure01, 1.0)
         changes = []
         for base, ref in zip(coarse, refined):
-            before = edge_strength_along(base.points, measure01)
-            after = edge_strength_along(ref.polygon, measure01)
+            before = edge_strength_along(base.points, measure01, magnitude=magnitude)
+            after = edge_strength_along(ref.polygon, measure01, magnitude=magnitude)
             if np.isfinite(before) and np.isfinite(after) and before > 0:
                 changes.append((after - before) / before)
         if changes:
@@ -318,6 +326,7 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
                 "median_change": float(np.median(values)),
                 "worst_change": float(values.min()),
             }
+    timings["edge_strength"] = time.perf_counter() - start
 
     refine_rejections: dict = {}
     for contour in refined:
@@ -353,6 +362,7 @@ def segment_image(image01: np.ndarray, config: Config) -> SegmentationResult:
             "extent is unknown."
         )
 
+    timings["total"] = time.perf_counter() - total_started
     diagnostics = Diagnostics(
         backend=segmenter.describe(),
         rejections={**tally.as_dict(), **extra},

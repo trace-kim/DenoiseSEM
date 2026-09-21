@@ -162,6 +162,22 @@ class RefinedContour:
         return Contour(points=self.polygon, is_hole=self.is_hole, region_id=self.region_id)
 
 
+def _prepare_profile_image(image01: np.ndarray, interp_order: int) -> tuple[np.ndarray, int]:
+    """Share interpolation coefficients within one image, never across images."""
+    from scipy.ndimage import spline_filter
+
+    image = np.asarray(image01, dtype=np.float64)
+    if interp_order <= 1:
+        return image, 0
+    # Match scipy.ndimage.map_coordinates(prefilter=True, mode="nearest"):
+    # its spline prefilter extends the edge by 12 pixels before filtering.
+    # Sampling must use the same offset; changing the boundary mode would move
+    # edges near the image border. Regression tests compare to SciPy directly.
+    padding = 12
+    padded = np.pad(image, padding, mode="edge")
+    return spline_filter(padded, order=interp_order, mode="nearest"), padding
+
+
 def sample_profiles(
     image01: np.ndarray,
     points: np.ndarray,
@@ -170,6 +186,7 @@ def sample_profiles(
     search_px: float,
     step_px: float,
     interp_order: int = 3,
+    _prepared: tuple[np.ndarray, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sample the image along each vertex normal.
 
@@ -195,11 +212,17 @@ def sample_profiles(
         (rows >= 0.0) & (rows <= height - 1.0) & (cols >= 0.0) & (cols <= width - 1.0)
     ).all(axis=1)
 
+    coordinates = np.vstack([rows.ravel(), cols.ravel()])
+    sampling_image = np.asarray(image01, dtype=np.float64)
+    if _prepared is not None:
+        sampling_image, padding = _prepared
+        coordinates = coordinates + padding
     profiles = map_coordinates(
-        np.asarray(image01, dtype=np.float64),
-        np.vstack([rows.ravel(), cols.ravel()]),
+        sampling_image,
+        coordinates,
         order=interp_order,
         mode="nearest",
+        prefilter=_prepared is None,
     ).reshape(rows.shape)
     return profiles, offsets, in_bounds
 
@@ -654,6 +677,7 @@ def refine_contour(
     *,
     spacing_px: float = 1.0,
     search_px: float | None = None,
+    _prepared: tuple[np.ndarray, int] | None = None,
 ) -> RefinedContour:
     """Measure the true edge position at every vertex of a coarse contour."""
     points = np.asarray(contour.points, dtype=np.float64)
@@ -683,6 +707,7 @@ def refine_contour(
         search_px=radius,
         step_px=config.step_px,
         interp_order=config.interp_order,
+        _prepared=_prepared,
     )
     polarity = _contour_polarity(profiles[in_bounds] if in_bounds.any() else profiles, offsets)
 
@@ -739,7 +764,8 @@ def refine_contour(
     )
 
 
-def edge_strength_along(points: np.ndarray, image01: np.ndarray, *, sigma: float = 1.0) -> float:
+def edge_strength_along(points: np.ndarray, image01: np.ndarray, *, sigma: float = 1.0,
+                        magnitude: np.ndarray | None = None) -> float:
     """Mean |grad I| sampled on a contour - does it sit on an edge?
 
     The only way to ask "did refinement improve this boundary" without ground
@@ -749,12 +775,15 @@ def edge_strength_along(points: np.ndarray, image01: np.ndarray, *, sigma: float
 
     It is not a proxy for accuracy: a contour can sit on a strong edge and still
     be the wrong edge.  It is a regression detector, which is what was missing.
+    ``magnitude`` may contain the gradient already computed on this same image
+    with this sigma, so multiple contours need not repeat the image filtering.
     """
     from scipy.ndimage import gaussian_gradient_magnitude, map_coordinates
 
     if points.shape[0] < 3 or not np.isfinite(points).all():
         return float("nan")
-    magnitude = gaussian_gradient_magnitude(np.asarray(image01, dtype=np.float64), sigma)
+    if magnitude is None:
+        magnitude = gaussian_gradient_magnitude(np.asarray(image01, dtype=np.float64), sigma)
     sampled = map_coordinates(magnitude, [points[:, 0], points[:, 1]], order=1, mode="nearest")
     return float(np.mean(sampled))
 
@@ -768,8 +797,11 @@ def refine_all(
     search_px: list[float] | None = None,
 ) -> list[RefinedContour]:
     """Refine every contour against the same unmodified image."""
+    if not contours:
+        return []
+    prepared = _prepare_profile_image(image01, config.interp_order)
     radii = search_px or [None] * len(contours)
     return [
-        refine_contour(c, image01, config, spacing_px=spacing_px, search_px=r)
+        refine_contour(c, image01, config, spacing_px=spacing_px, search_px=r, _prepared=prepared)
         for c, r in zip(contours, radii)
     ]
