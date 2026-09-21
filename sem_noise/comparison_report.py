@@ -27,6 +27,9 @@ def comparison_metrics(record: dict) -> list[dict]:
                 for key, value in measures.items():
                     if isinstance(value, (float, int)) and np.isfinite(value):
                         values[f"noise/{mode}/{key}"] = value
+            for stage, seconds in series.get("segmentation_stage_totals_s", {}).items():
+                if frames:
+                    values[f"time/{stage}_s_per_image"] = seconds / len(frames)
             for key, value in series["noise"].get("registration", {}).items():
                 if isinstance(value, (float, int)) and np.isfinite(value):
                     values[f"noise/registration/{key}"] = value
@@ -50,6 +53,7 @@ def comparison_metrics(record: dict) -> list[dict]:
                                     "contributing_observations", "valid_count", "failed_count")})
             arm = record["models"].get(name, {}).get("arm", {})
             metrics.append({"site": site["name"], "series": name, "step": series["step"],
+                            "refinement_device": series.get("refinement_backend", {}).get("device", "cpu"),
                             "training_registration": arm.get("registration"),
                             "training_brightness": arm.get("brightness"), "values": values})
     return metrics
@@ -207,6 +211,8 @@ def render_comparison(root: Path, record: dict) -> Path:
             body.append(f"<h3>{escape(site_name)} / {escape(name)}</h3>")
             body.append(_warning(record, [r for r in clipped if r["site"] == site_name and r["model"] == name]))
             metric = next(r for r in record["metrics"] if r["site"] == site_name and r["series"] == name)
+            body.append(f"<p>Contour refinement device: {escape(metric['refinement_device'])}. "
+                        "Classical masks and polygon geometry use the CPU. Timings include device transfers.</p>")
             body.append(_table([{"metric": k, "value": v} for k, v in metric["values"].items()], ["metric", "value"]))
             body.append(f'<p>Noise analysis: {escape(series["noise_status"])}. <a href="{series["noise_report"]}">Detailed noise report</a></p>')
             if series["noise"].get("error"):
@@ -277,6 +283,7 @@ def write_tensorboard(root: Path, record: dict, *, writer_factory=None) -> None:
             writer.add_text(f"comparison/{arm['arm']}/training_treatment", _table([arm], list(arm)), arm["step"])
         for row in record["metrics"]:
             prefix = f"{row['site']}/{row['series']}"
+            writer.add_text(f"{prefix}/refinement_device", row.get("refinement_device", "cpu"), row["step"])
             for key, value in row["values"].items():
                 if value is not None and np.isfinite(value):
                     writer.add_scalar(f"{prefix}/{key}", value, row["step"])

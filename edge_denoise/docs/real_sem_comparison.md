@@ -77,14 +77,86 @@ across holes, and keeps one segmentation backend loaded per series. Profile
 peak selection, neighbour consistency and chord measurements run in
 batches; each polygon's convex hull is computed once. These retain the same
 nearest-peak rule (including prominence, plateaus and ties), rejection masks
-and measurement definitions. Classical metrology runs on the CPU;
-`device: cuda` selects the denoiser's device and does not move this analysis to
-the GPU. No extra acceleration dependency is required. Pixel
+and measurement definitions. This CPU path needs no extra dependency.
+`device: cuda` selects the denoiser; GPU contour refinement is enabled separately
+as described below. Pixel
 resolution, interpolation order, both contour methods and sample counts are
 unchanged. This reduces repeated computation; it does not remove the cost of
 eight noise analyses and inference for all checkpoints. An already running
 process will not acquire this optimization. Runs do not currently resume;
 use a new `output_dir` when starting another comparison.
+
+### Single-GPU contour acceleration
+
+On the server, install CuPy for its CUDA Toolkit. For CUDA 12.x:
+
+```bash
+python -m pip install 'cupy-cuda12x>=13.4,<15'
+```
+
+For CUDA 13.x use `cupy-cuda13x>=14,<15` instead; install only one CuPy wheel.
+These wheels expect a working matching Toolkit, including runtime compilation
+headers. See the [CuPy installation guide](https://docs.cupy.dev/en/stable/install.html)
+for managed CUDA installations and troubleshooting. No SAM weights are needed
+for the default classical backend.
+
+Select one visible GPU for both inference and analysis. Outside a scheduler:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python tools/benchmark_sem_metrology.py --device cuda:0
+CUDA_VISIBLE_DEVICES=0 python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --site site_01 --metrology-device cuda:0
+```
+
+For Slurm, request one GPU and keep the scheduler's `CUDA_VISIBLE_DEVICES`;
+use logical `cuda:0` in the commands. Do not replace a scheduler-assigned device
+list with a physical index. Set a fresh `output_dir` before starting the comparison.
+Alternatively set `metrology_device: cuda:0` in the comparison YAML. `null`
+respects `segmentation_config`; the default remains CPU. Use `--metrology-device cpu`
+to compare with the CPU implementation.
+Automatic inference/mask devices resolve to the chosen refinement GPU. Explicit
+GPU settings that conflict are rejected, keeping the comparison on one device.
+
+The benchmark needs no checkpoints. It warms up both implementations, checks
+CPU/GPU agreement, and reports complete `segment_image` wall time including
+transfers and CPU work. Its default is a quantized 1024×1024 array of 64 holes.
+For a representative native image from an existing run:
+
+```bash
+python tools/benchmark_sem_metrology.py --device cuda:0 --image output/sem-real-comparison-pilot/site_01/raw/frame_001.png --repeats 5
+```
+
+Repeat `--image` to include an eight-frame mean and model output. If the
+comparison has a `segmentation_config`, pass that same file as `--config` to
+the benchmark; crops are respected. This benchmark uses classical masks.
+`output/sem-metrology-benchmark.json` contains warm-up costs, individual times,
+median stage times, speedup, and parity results. A label/rejection-mask mismatch,
+missing measurements, or contour/ECD/axis difference above 0.000001 px returns
+a nonzero exit. Check parity on representative saved images before a full run.
+Mocks validate the local implementation; real CuPy kernel parity and H100
+speedup must be measured on the server.
+
+GPU processing uses float64 cubic spline coefficients, normal-profile sampling,
+Gaussian derivatives, nearest qualifying peaks and parabola fitting, plus the
+image-gradient diagnostic. Profiles from different holes share bounded batches;
+the saved image is uploaded once. Adaptive search radii, native pixels, peak
+prominence and rejection rules are retained. Mask detection, contour tracing,
+coherence/gap handling, polygon geometry, registration and report rendering
+still use the CPU. Speedup therefore depends on the stage breakdown; small
+images may not benefit. This does not accelerate denoiser inference or the
+independent noise pipeline.
+
+The selected device and per-stage seconds/image are saved in the combined
+report, JSON/CSV and TensorBoard. CUDA errors fail explicitly, with no silent
+CPU fallback. The CUDA path currently supports `gradient_peak` only; `threshold`
+and `erf` remain available on CPU. Each series owns one CUDA device, stream and
+memory pool, released at its end. No image pixels are cached between frames and
+no other GPUs are used by this refiner. This ownership allows future independent
+image workers without introducing multi-GPU execution now.
+
+For unusually large profile buffers, set `refine.cuda_batch_samples` in the
+optional segmentation YAML; the default is 1048576 samples per batch. Lowering
+it reduces temporary memory, at the cost of more batches. It does not change
+profile spacing or image resolution.
 
 Each site is a flat folder of exactly 128 naturally ordered images, with
 consistent dimensions and uint8 storage. RGB inputs must have exactly equal

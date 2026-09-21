@@ -228,30 +228,39 @@ def sample_profiles(
 
 
 def _nearest_candidates(strength: np.ndarray, offsets: np.ndarray, *,
-                        min_height: np.ndarray, min_prominence: np.ndarray) -> np.ndarray:
+                        min_height: np.ndarray, min_prominence: np.ndarray,
+                        xp=np, find_peaks=None) -> np.ndarray:
     """Nearest edge to the mask boundary in each profile; -1 = none.
 
     A window can contain the feature's edge and a brighter neighbour. Strength
     only rejects noise; proximity to the mask boundary (t = 0) selects the edge.
     Apply the same SciPy peak rule to all profiles in one call.
     """
-    from scipy.signal import find_peaks
+    if find_peaks is None:
+        from scipy.signal import find_peaks
 
     count, width = strength.shape
-    candidates = np.full(count, width, dtype=int)
+    candidates = xp.full(count, width, dtype=int)
     if not count:
         return candidates
     # Higher-than-every-peak separators bound prominence searches to each row.
     # They also keep profile endpoints from becoming new peaks. Reject the
     # separators by height BEFORE computing prominence (otherwise equal infinite
     # peaks would scan the whole buffer). This preserves plateau/tie handling.
-    separated = np.full((count, width + 1), np.inf)
+    separated = xp.full((count, width + 1), xp.inf)
     separated[:, :width] = strength
-    heights = np.broadcast_to(min_height[:, None], separated.shape).ravel()
-    prominences = np.broadcast_to(min_prominence[:, None], separated.shape).ravel()
+    heights = xp.broadcast_to(min_height[:, None], separated.shape).ravel()
+    prominences = xp.broadcast_to(min_prominence[:, None], separated.shape).ravel()
     peaks, _ = find_peaks(separated.ravel(), height=(heights, np.finfo(float).max), prominence=(prominences, None))
-    rows, columns = np.divmod(peaks, width + 1)
-    distance = np.abs(offsets[columns])
+    rows, columns = xp.divmod(peaks, width + 1)
+    distance = xp.abs(offsets[columns])
+    if xp is not np:
+        # Avoid atomic float64 minimum/scatter requirements on the GPU. Each
+        # peak occupies one unique cell; argmin preserves the leftmost tie.
+        distances = xp.full((count, width), xp.inf)
+        distances[rows, columns] = distance
+        candidates = distances.argmin(axis=1)
+        return xp.where(xp.isfinite(distances[xp.arange(count), candidates]), candidates, -1)
     nearest = np.full(count, np.inf)
     np.minimum.at(nearest, rows, distance)
     keep = distance == nearest[rows]
@@ -406,33 +415,44 @@ def _estimate_gradient_peak(
     least as steep, so a global argmax silently measures the neighbour.
     """
     from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks
 
     step = float(offsets[1] - offsets[0])
-    low, high = np.percentile(profiles, PROFILE_PERCENTILES, axis=1)
+    return _gradient_peak_arrays(profiles, offsets, step, config, xp=np,
+                                 gaussian_filter1d=gaussian_filter1d, find_peaks=find_peaks)
+
+
+def _gradient_peak_arrays(profiles, offsets, step: float, config: RefineConfig, *,
+                          xp, gaussian_filter1d, find_peaks):
+    """Same float64 edge estimator for NumPy/SciPy and optional CuPy arrays."""
+    low, high = xp.percentile(profiles, PROFILE_PERCENTILES, axis=1)
     contrast = high - low
 
     sigma_samples = max(config.deriv_sigma_px / step, 1e-6)
     smoothed = gaussian_filter1d(profiles, sigma=sigma_samples, axis=1, mode="nearest")
-    magnitude = np.abs(np.gradient(smoothed, step, axis=1))
+    magnitude = xp.abs(xp.gradient(smoothed, step, axis=1))
 
     n = profiles.shape[0]
-    positions = np.full(n, np.nan)
-    reasons = np.full(n, REJECT_NO_CROSSING, dtype=np.int16)
+    positions = xp.full(n, xp.nan)
+    reasons = xp.full(n, REJECT_NO_CROSSING, dtype=np.int16)
     reasons[contrast < config.min_contrast] = REJECT_LOW_CONTRAST
     peak_values = magnitude.max(axis=1)
-    active = np.flatnonzero((contrast >= config.min_contrast) & (peak_values > 0))
+    active = xp.flatnonzero((contrast >= config.min_contrast) & (peak_values > 0))
     candidates = _nearest_candidates(
         magnitude[active], offsets,
         min_height=config.peak_height_fraction * peak_values[active],
         min_prominence=config.peak_prominence_fraction * peak_values[active],
+        xp=xp, find_peaks=find_peaks,
     )
     selected = candidates >= 0
     rows, peaks = active[selected], candidates[selected]
     y0, y1, y2 = magnitude[rows, peaks - 1], magnitude[rows, peaks], magnitude[rows, peaks + 1]
     denominator = y0 - 2.0 * y1 + y2
-    correction = np.zeros(len(rows))
-    np.divide(0.5 * (y0 - y2), denominator, out=correction, where=np.abs(denominator) >= 1e-12)
-    positions[rows] = offsets[peaks] + np.clip(correction, -1.0, 1.0) * step
+    # CuPy does not support ufunc(where=...). The safe denominator preserves
+    # the CPU rule and avoids invalid division on rejected flat peaks.
+    curved = xp.abs(denominator) >= 1e-12
+    correction = xp.where(curved, 0.5 * (y0 - y2) / xp.where(curved, denominator, 1.0), 0.0)
+    positions[rows] = offsets[peaks] + xp.clip(correction, -1.0, 1.0) * step
     reasons[rows] = REJECT_OK
     return positions, reasons, contrast
 
@@ -709,6 +729,17 @@ def refine_contour(
     else:  # pragma: no cover - the config Literal prevents this
         raise ValueError(f"unknown estimator {config.estimator!r}")
 
+    return _finish_refinement(contour, config, spacing_px=spacing_px, radius=radius,
+                              positions=positions, reasons=reasons, contrast=contrast,
+                              widths=widths, in_bounds=in_bounds, polarity=polarity,
+                              profiles_shape=profiles.shape)
+
+
+def _finish_refinement(contour: Contour, config: RefineConfig, *, spacing_px: float,
+                       radius: float, positions: np.ndarray, reasons: np.ndarray,
+                       contrast: np.ndarray, widths: np.ndarray, in_bounds: np.ndarray,
+                       polarity: float, profiles_shape: tuple[int, int]) -> RefinedContour:
+    """Shared rejection, coherence and gap rules after CPU or GPU edge fitting."""
     # A vertex whose sampling window left the image was never measurable.
     reasons[~in_bounds] = REJECT_OUT_OF_BOUNDS
     positions[~in_bounds] = np.nan
@@ -734,8 +765,8 @@ def refine_contour(
     )
 
     return RefinedContour(
-        base_points=points,
-        normals=normals,
+        base_points=np.asarray(contour.points, dtype=np.float64),
+        normals=contour.normals,
         displacement=displacement,
         valid=valid,
         reasons=reasons,
@@ -747,7 +778,7 @@ def refine_contour(
             "estimator": config.estimator,
             "search_px": radius,
             "polarity": "rising_outward" if polarity > 0 else "falling_outward",
-            "profiles_shape": tuple(profiles.shape),
+            "profiles_shape": tuple(profiles_shape),
         },
     )
 

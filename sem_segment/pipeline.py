@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -39,6 +40,9 @@ from .image_io import to_model_rgb
 from .masks import label_map, postprocess
 from .metrology import RegionMetrology, measure_region, summarise_image
 from .refine import RefinedContour, refine_all
+
+if TYPE_CHECKING:
+    from .cuda import CudaRefiner
 
 
 @dataclass
@@ -54,6 +58,7 @@ class Diagnostics:
     valid_fraction: float = float("nan")
     #: Per-region change in mean |grad I| along the ring, coarse -> refined.
     edge_strength_change: dict = field(default_factory=dict)
+    refinement: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -208,7 +213,8 @@ def _plan_scaling(shape: tuple[int, int], config: Config) -> tuple[str, dict, li
     return "tile", info, warnings
 
 
-def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter | None = None) -> SegmentationResult:
+def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter | None = None,
+                  refiner: CudaRefiner | None = None) -> SegmentationResult:
     """Segment, contour, refine and measure one image.
 
     ``image01`` is a float array in [0, 1] as produced by
@@ -216,6 +222,7 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
     never modified.
     A caller processing a series may supply a backend built from this config
     to keep its model loaded; all image-specific measurements are recomputed.
+    An optional CUDA refiner similarly reuses its stream and allocation pool.
     """
     total_started = time.perf_counter()
     measure01 = np.asarray(image01, dtype=np.float64)
@@ -224,6 +231,9 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
     shape = (int(measure01.shape[0]), int(measure01.shape[1]))
     timings: dict = {}
     warnings: list[str] = []
+    refinement = {"backend": "scipy", "device": "cpu", "dtype": "float64"}
+    if refiner is not None and refiner.config != config.refine:
+        raise ValueError("supplied CUDA refiner settings differ from config.refine")
 
     model_rgb = to_model_rgb(measure01, contrast_stretch=config.segmentation.contrast_stretch)
     mode, scaling, scale_warnings = _plan_scaling(shape, config)
@@ -263,19 +273,33 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
     timings["contours"] = time.perf_counter() - start
 
     refined: list[RefinedContour] = []
+    gpu_strengths = None
     if config.refine.enabled:
         start = time.perf_counter()
         from .refine import adaptive_search_px
 
         radii = [adaptive_search_px(m.crop, config.refine) for m in instances]
-        refined = refine_all(
-            coarse,
-            measure01,
-            config.refine,
-            spacing_px=config.contours.spacing_px,
-            search_px=radii,
-        )
-        timings["refine"] = time.perf_counter() - start
+        if config.refine.device == "cpu":
+            refined = refine_all(coarse, measure01, config.refine,
+                                 spacing_px=config.contours.spacing_px, search_px=radii)
+            timings["refine"] = time.perf_counter() - start
+        else:
+            from .cuda import CudaRefiner
+
+            setup_time = time.perf_counter() - start
+            if refiner is None:
+                with CudaRefiner(config.refine) as owned:
+                    refined, gpu_strengths, gpu_times = owned.measure(
+                        coarse, measure01, spacing_px=config.contours.spacing_px, search_px=radii)
+                    refinement = owned.describe()
+                # Include construction/cleanup in the total wall-clock stage.
+                gpu_times["refine"] = time.perf_counter() - start - gpu_times["edge_strength"]
+            else:
+                refined, gpu_strengths, gpu_times = refiner.measure(
+                    coarse, measure01, spacing_px=config.contours.spacing_px, search_px=radii)
+                refinement = refiner.describe()
+                gpu_times["refine"] += setup_time
+            timings.update(gpu_times)
 
     start = time.perf_counter()
     regions: list[RegionMetrology] = []
@@ -310,11 +334,14 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
         from scipy.ndimage import gaussian_gradient_magnitude
         from .refine import edge_strength_along
 
-        magnitude = gaussian_gradient_magnitude(measure01, 1.0)
+        magnitude = gaussian_gradient_magnitude(measure01, 1.0) if gpu_strengths is None else None
         changes = []
-        for base, ref in zip(coarse, refined):
-            before = edge_strength_along(base.points, measure01, magnitude=magnitude)
-            after = edge_strength_along(ref.polygon, measure01, magnitude=magnitude)
+        for index, (base, ref) in enumerate(zip(coarse, refined)):
+            if gpu_strengths is None:
+                before = edge_strength_along(base.points, measure01, magnitude=magnitude)
+                after = edge_strength_along(ref.polygon, measure01, magnitude=magnitude)
+            else:
+                before, after = gpu_strengths[index]
             if np.isfinite(before) and np.isfinite(after) and before > 0:
                 changes.append((after - before) / before)
         if changes:
@@ -326,7 +353,7 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
                 "median_change": float(np.median(values)),
                 "worst_change": float(values.min()),
             }
-    timings["edge_strength"] = time.perf_counter() - start
+    timings["edge_strength"] = timings.get("edge_strength", 0.0) + time.perf_counter() - start
 
     refine_rejections: dict = {}
     for contour in refined:
@@ -365,6 +392,7 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
     timings["total"] = time.perf_counter() - total_started
     diagnostics = Diagnostics(
         backend=segmenter.describe(),
+        refinement=refinement,
         rejections={**tally.as_dict(), **extra},
         warnings=warnings,
         timings_s={k: round(v, 4) for k, v in timings.items()},
@@ -386,5 +414,6 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
             "schema_version": 1,
             "config": config.model_dump(mode="json"),
             "backend": segmenter.describe(),
+            "refinement": refinement,
         },
     )

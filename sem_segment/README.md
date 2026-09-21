@@ -87,6 +87,41 @@ empirical question — but it is not something to assume.
 air-gapped machine, and the control arm that shows whether SAM 3 actually bought
 anything on a given image.
 
+## Optional CUDA contour refinement
+
+Mask backend and numerical refinement have independent devices. The default
+refinement runs on CPU. For a CUDA 12.x server, install
+`python -m pip install 'cupy-cuda12x>=13.4,<15'` and add to the segmentation YAML:
+
+```yaml
+refine:
+  device: cuda:0
+  estimator: gradient_peak
+  cuda_batch_samples: 1048576
+```
+
+Use the matching CuPy wheel for other CUDA versions; see the
+[installation guide](https://docs.cupy.dev/en/stable/install.html).
+This uses one visible GPU for float64 spline/profile calculations and edge
+strength diagnostics. Classical masks, contour tracing and polygon geometry
+remain on CPU. `threshold` and `erf` require `refine.device: cpu`.
+CUDA is opt-in and fails explicitly if unavailable. Measurements still use
+the original native pixels. No neural model or weights are required.
+
+Run `python tools/benchmark_sem_metrology.py --device cuda:0` on the server
+to check CPU/GPU parity and complete per-image speed. Add `--image frame.png`
+for saved uint8 pixels and `--config your-segmentation.yml` for the same
+classical settings/crop used in the comparison. The benchmark returns a nonzero
+exit on parity failure and writes warm-up and stage timing details to JSON.
+See [the comparison guide](../edge_denoise/docs/real_sem_comparison.md#single-gpu-contour-acceleration)
+for single-GPU allocation and remote commands.
+
+A series caller may reuse `sem_segment.cuda.CudaRefiner(config.refine)` as a
+context manager and pass it as `refiner=` to `segment_image`. It owns one device,
+stream and allocation pool; pixels and measurements are recomputed each call.
+Closing it frees only its own cached GPU allocations. Without a supplied refiner,
+`segment_image` manages the refiner lifetime for one image.
+
 ## Getting the weights
 
 `facebook/sam3` is a gated repository (0.9 B parameters, licence "other").

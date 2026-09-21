@@ -56,6 +56,7 @@ class ComparisonSettings(BaseModel):
     output_dir: Path
     analysis_config: Path | None = None
     segmentation_config: Path | None = None
+    metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
     tile_batch: int = Field(default=4, ge=1)
     ema: bool = True
@@ -260,6 +261,16 @@ def output_registration_diagnostics(root: Path, reference: np.ndarray, series: d
 
 def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                    gate: float, segment_config: SegmentConfig) -> tuple[list[dict], list[dict]]:
+    if segment_config.refine.device != "cpu":
+        from sem_segment.cuda import CudaRefiner
+
+        with CudaRefiner(segment_config.refine) as refiner:
+            return _measure_series(root, name, series, template, gate, segment_config, refiner=refiner)
+    return _measure_series(root, name, series, template, gate, segment_config)
+
+
+def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
+                    gate: float, segment_config: SegmentConfig, *, refiner=None) -> tuple[list[dict], list[dict]]:
     from sem_segment.backends import build_segmenter
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import match_centroids
@@ -267,7 +278,7 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
     started = last_progress = time.perf_counter()
     count = len(series["frames"])
     label = "/".join(Path(series["frames"][0]["path"]).parts[:-1]) if count else name
-    print(f"{label}: contours/CD starting ({count} saved uint8 images)", flush=True)
+    print(f"{label}: contours/CD starting ({count} saved uint8 images; refinement {segment_config.refine.device})", flush=True)
     segmenter = build_segmenter(segment_config)
     rows, contours = [], []
     stage_totals = {}
@@ -279,7 +290,9 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         if crop:
             y0, y1, x0, x1 = crop
             pixels = pixels[y0:y1, x0:x1]
-        result = segment_image(pixels.astype(np.float64) / 255.0, segment_config, segmenter=segmenter)
+        extra = {"refiner": refiner} if refiner is not None else {}
+        result = segment_image(pixels.astype(np.float64) / 255.0, segment_config, segmenter=segmenter, **extra)
+        series["refinement_backend"] = result.diagnostics.refinement
         frame["segmentation_timings_s"] = result.diagnostics.timings_s
         for stage, seconds in result.diagnostics.timings_s.items():
             stage_totals[stage] = stage_totals.get(stage, 0.0) + seconds
@@ -356,6 +369,37 @@ def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisCo
           f"({result['status']})", flush=True)
 
 
+def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
+    """Resolve native-pixel metrology and keep the comparison on one GPU."""
+    from sem_segment.config import Config as SegmentConfig, load_config as load_segment
+
+    segment = load_segment(config.segmentation_config) if config.segmentation_config else SegmentConfig(
+        segmentation={"backend": "classical", "polarity": "dark"})
+    if config.metrology_device is not None:
+        segment.refine = type(segment.refine).model_validate(
+            {**segment.refine.model_dump(), "device": config.metrology_device})
+    if segment.refine.device != "cpu":
+        index = int(segment.refine.device.split(":")[1]) if ":" in segment.refine.device else 0
+        device = f"cuda:{index}"
+
+        def single_device(value: str, label: str) -> str:
+            if value in ("auto", "cuda"):
+                return device
+            if value.startswith("cuda:") and int(value.split(":")[1]) != index:
+                raise ValueError(f"Single-GPU comparison requires {label} and refinement on {device}; got {value}")
+            return value
+
+        # Resolve automatic devices together; reject explicit conflicting GPU
+        # choices rather than silently using a second GPU or overriding them.
+        config.device = single_device(config.device, "denoiser")
+        if segment.needs_model_weights:
+            segment.segmentation.device = single_device(segment.segmentation.device, "mask model")
+    segment.input.black_level, segment.input.white_level = 0.0, 255.0
+    if config.pixel_size_nm is not None:
+        segment.input.pixel_size_nm = config.pixel_size_nm
+    return segment
+
+
 def run(config: ComparisonSettings) -> dict:
     from burst_diffusion.data import content_key
     from edge_denoise.infer import Denoiser
@@ -363,7 +407,6 @@ def run(config: ComparisonSettings) -> dict:
     from sem_noise.io import file_hash, pixel_hash
     from sem_noise.pipeline import write_csv, write_json
     from sem_noise.comparison_report import render_comparison, write_tensorboard
-    from sem_segment.config import Config as SegmentConfig, load_config as load_segment
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import correspondence_gate, summarize_observations
 
@@ -371,12 +414,14 @@ def run(config: ComparisonSettings) -> dict:
     noise = load_noise(config.analysis_config) if config.analysis_config else AnalysisConfig()
     if noise.min_frames > 16:
         raise ValueError("Noise min_frames must be <= 16 for the eight-frame averages")
-    segment = load_segment(config.segmentation_config) if config.segmentation_config else SegmentConfig(
-        segmentation={"backend": "classical", "polarity": "dark"})
-    # Segment's measurement loader settings cannot stretch DN in this workflow.
-    segment.input.black_level, segment.input.white_level = 0.0, 255.0
+    segment = resolve_segmentation_settings(config)
+    if segment.refine.device != "cpu":
+        from sem_segment.cuda import CudaRefiner
+
+        print(f"Checking CUDA contour refinement on {segment.refine.device}", flush=True)
+        with CudaRefiner(segment.refine) as refiner:
+            print(f"CUDA refinement ready: {refiner.describe()}", flush=True)
     if config.pixel_size_nm is not None:
-        segment.input.pixel_size_nm = config.pixel_size_nm
         noise = replace(noise, pixel_size_nm=config.pixel_size_nm)
     if config.frame_interval_s is not None:
         noise = replace(noise, frame_interval_s=config.frame_interval_s)
@@ -549,9 +594,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--site", help="Pilot only this named site from the YAML")
+    parser.add_argument("--metrology-device", help="Override contour refinement device: cpu, cuda, or cuda:N")
     args = parser.parse_args()
     try:
         config = load_settings(args.config)
+        if args.metrology_device is not None:
+            config = ComparisonSettings.model_validate({**config.model_dump(), "metrology_device": args.metrology_device})
         if args.site:
             if args.site not in config.sites:
                 raise ValueError(f"Unknown site: {args.site}")

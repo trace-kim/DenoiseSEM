@@ -205,6 +205,9 @@ class RefineConfig(_StrictModel):
 
     enabled: bool = True
     estimator: Literal["gradient_peak", "threshold", "erf"] = "gradient_peak"
+    # Independent of the mask model's device. One visible CUDA device only.
+    device: str = Field(default="cpu", pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
+    cuda_batch_samples: int = Field(default=1_048_576, ge=1024)
     search_px: float = Field(default=6.0, gt=1.0)
     step_px: float = Field(default=0.25, gt=0.0)
     interp_order: Literal[1, 3] = 3
@@ -234,6 +237,8 @@ class RefineConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _check_refine(self) -> "RefineConfig":
+        if self.device != "cpu" and (not self.enabled or self.estimator != "gradient_peak"):
+            raise ValueError("CUDA refinement requires enabled: true and estimator: gradient_peak")
         if self.max_shift_px is not None and self.max_shift_px > self.search_px:
             raise ValueError(
                 f"max_shift_px={self.max_shift_px} cannot exceed search_px={self.search_px}"
