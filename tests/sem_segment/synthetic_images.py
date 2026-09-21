@@ -8,11 +8,40 @@ truth (edge position, radius, blur width) available to the assertions.
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Iterator
 
 import numpy as np
 from PIL import Image
 
 from sem_segment.config import Config
+
+
+def visual_qa_frames(count: int = 128) -> Iterator[tuple[int, dict[str, np.ndarray]]]:
+    """Reproduce the September 21 viewer fixture, including frames 9 and 29.
+
+    Keep the seed, draw order (including both simulated outputs), geometry and
+    noise unchanged: raw frame 9 has 55-DN noise; raw frame 29 exposes a false
+    split in the committed classical detector. These are generated uint8
+    images, not real acquisitions or predictions from a trained model.
+    """
+    from scipy.ndimage import gaussian_filter
+    from scipy.special import erf
+
+    yy, xx = np.mgrid[:224, :320]
+    rng = np.random.default_rng(31)
+    for i in range(count):
+        image = np.full(yy.shape, 210., dtype=float)
+        dy, dx = .8 * np.sin(i / 17), 1.2 * np.sin(i / 23)
+        for y, x in [(60, 55), (60, 160), (60, 265), (166, 55), (166, 160), (166, 265), (112, 0)]:
+            radius = 28 + .2 * np.sin(i / 9)
+            image -= 155 * .5 * (1 + erf((radius - np.hypot(yy - y - dy, xx - x - dx)) / 1.4))
+        image += 4 * np.sin(i / 21)
+        values = [image + rng.normal(0, 55 if i == 8 else 22, yy.shape),
+                  image + rng.normal(0, 4, yy.shape),
+                  gaussian_filter(image, 1.8) + 6 + rng.normal(0, 4, yy.shape)]
+        names = ("raw", "synthetic_low_noise", "synthetic_blurred_plus6")
+        yield i + 1, {name: np.rint(np.clip(value, 0, 255)).astype(np.uint8)
+                      for name, value in zip(names, values)}
 
 
 def gaussian_blurred_step(

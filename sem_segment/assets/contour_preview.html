@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SEM contour baseline preview</title>
+  <link rel="stylesheet" href="preview.css">
+  <script src="data.js" defer></script>
+  <script src="preview.js" defer></script>
+</head>
+<body>
+<header>
+  <p class="eyebrow" id="kind">SEGMENTATION PREVIEW</p>
+  <h1>SEM contour baseline</h1>
+  <p id="study"></p>
+  <p>Saved uint8 images with stored current outlines and a Gaussian + Otsu baseline.
+     These mask outlines show segmentation behavior; they are not subpixel edge measurements.
+     No new ECD values are calculated.</p>
+</header>
+<main>
+  <div class="controls">
+    <label>Site <select id="site"></select></label>
+    <label>Source <select id="source"></select></label>
+    <label class="acquisition">Acquisition
+      <input id="acquisition" type="range" min="0" max="0" step="1" value="0">
+    </label>
+    <output id="frame-label" for="acquisition"></output>
+  </div>
+  <p id="frame-note" class="note"></p>
+  <div class="panels">
+    <figure>
+      <h2>Original</h2>
+      <img id="original-image" alt="Original saved uint8 image">
+      <figcaption>Unchanged saved pixels · <a id="original-link" target="_blank" rel="noopener">Native-resolution image</a></figcaption>
+    </figure>
+    <figure>
+      <h2>Current outlines</h2>
+      <img id="current-image" alt="Saved image with stored current outlines">
+      <figcaption><span class="swatch coarse"></span>Cyan: stored mask ·
+        <span class="swatch refined"></span>Orange: stored refinement (dashed: fallback)
+        <br><a id="current-link" target="_blank" rel="noopener">Native-resolution overlay</a>
+        <p id="current-status" role="status"></p>
+      </figcaption>
+    </figure>
+    <figure>
+      <h2>Otsu baseline</h2>
+      <img id="baseline-image" alt="Saved image with Otsu mask outlines">
+      <figcaption><span class="swatch baseline"></span>Green: Otsu mask, including interior loops
+        <br><a id="baseline-link" target="_blank" rel="noopener">Native-resolution overlay</a>
+        <p id="baseline-caption"></p>
+      </figcaption>
+    </figure>
+  </div>
+  <p id="crop-caption" class="note"></p>
+  <p id="image-status" role="status"></p>
+  <p class="note">All panels show the full image on the same 0–255 DN scale. Smoothing changes only the
+    baseline detector's working copy. Thresholds are calculated independently for each image.</p>
+  <noscript>Enable JavaScript to select saved images in this local preview.</noscript>
+</main>
+<footer><a href="metadata.json">Settings, image references, thresholds and timings</a></footer>
+</body>
+</html>

@@ -1,0 +1,5 @@
+# Identical settings for every saved raw, averaged, and model-output image.
+# Segmentation preview only: no edge refinement or new metrology.
+polarity: dark
+sigma_px: 1.0
+min_area_px: 25

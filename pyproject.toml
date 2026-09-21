@@ -69,7 +69,7 @@ ddim = ["configs/*.yml"]
 burst_diffusion = ["configs/*.yml"]
 edge_denoise = ["configs/*.yml"]
 sem_noise = ["configs/*.yml", "assets/*.js", "assets/*.css", "assets/*.html"]
-sem_segment = ["configs/*.yml"]
+sem_segment = ["configs/*.yml", "assets/*.js", "assets/*.css", "assets/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

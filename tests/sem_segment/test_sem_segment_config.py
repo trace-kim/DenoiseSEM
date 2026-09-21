@@ -126,6 +126,12 @@ def test_load_config_rejects_a_non_mapping_root(tmp_path):
 
 @pytest.mark.parametrize("name", sorted(p.name for p in CONFIG_DIR.glob("*.yml")))
 def test_shipped_configs_load(name):
+    if name == "contour_preview.yml":
+        from sem_segment.otsu_baseline import OtsuSettings
+
+        config = OtsuSettings.model_validate(yaml.safe_load((CONFIG_DIR / name).read_text(encoding="utf-8")))
+        assert config == OtsuSettings()
+        return
     config = load_config(CONFIG_DIR / name)
     assert isinstance(config, Config)
 

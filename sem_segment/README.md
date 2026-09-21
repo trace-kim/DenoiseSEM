@@ -225,6 +225,10 @@ cleanly.
 
 ## Docs
 
+[Saved-image contour preview](docs/contour_preview.md) compares existing report
+outlines with a Gaussian + Otsu baseline, without inference or new metrology.
+It includes the remote command and a reproducible, labeled synthetic example.
+
 `docs/sem_segment_method.md` — the maths: normal estimation under staircase
 quantisation, the three edge estimators and where each is biased, the roughness
 definition, the 1008 px resampling argument, and why tile seams are handled by

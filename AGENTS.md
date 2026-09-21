@@ -62,6 +62,16 @@ Never overengineer. Always start with a simple solution and build up on it.
 Preserve working baselines and add complexity only to address a demonstrated
 problem in the project's real data.
 
+Do not make ad hoc ("monkey patch") fixes unless the issue is small and obvious.
+Before editing, decide whether the problem needs deeper analysis; a small code
+change can still have broad behavioral consequences. For nontrivial issues,
+trace the failure to its cause, check the intended behavior and assumptions,
+consider alternative fixes and effects on other supported inputs, and explain
+the diagnosis and proposed approach before implementation. Making one failing
+example look correct does not establish a sound fix. Prefer the simplest
+justified solution after that reasoning. This does not prohibit mocks or
+pytest's monkeypatch fixture in tests.
+
 Respect the flow boundary. `runctl` must not import model code; a pipeline plugs
 in by declaring a `Flow` (spec model, config parser, trainer) and registering a
 `runctl.flows` entry point — `ddim/flow.py` is the worked example and the only
