@@ -90,6 +90,10 @@ def _overlay(image: Image.Image, contours: list[dict]) -> Image.Image:
             points = [(p[1], p[0]) for p in ring]
             if points:
                 draw.line([*points, points[0]], fill="#43dbe2", width=1)
+        for path in contour.get("open_paths", []):
+            points = [(p[1], p[0]) for p in path]
+            if len(points) >= 2:
+                draw.line(points, fill="#d7ad56", width=1)
     return image
 
 
@@ -106,11 +110,13 @@ def render_comparison(root: Path, record: dict) -> Path:
     (root / "viewer").mkdir(exist_ok=True)
     for filename in ("comparison.js", "comparison.css"):
         shutil.copyfile(Path(__file__).parent / "assets" / filename, root / "viewer" / filename)
-    view = {"unit": record["unit"], "arms": record["arms"], "sites": []}
+    view = {"unit": record["unit"], "arms": record["arms"], "sites": [],
+            "contour_method": record.get("contour_method", "current"),
+            "otsu_settings": record.get("otsu_settings")}
     frame_keys = ("index", "order", "timestamp_s", "first_acquisition", "last_acquisition", "path", "mean_dn",
                   "brightness_delta_dn", "difference_path", "output_minus_raw_dy_px", "output_minus_raw_dx_px",
                   "dy_px", "dx_px", "output_dy_px", "output_dx_px", "contour_counts", "contour_status",
-                  "correspondence_status", "clipped")
+                  "correspondence_status", "clipped", "otsu_threshold_dn", "gaussian_backend")
     for site in record["sites"]:
         contours = site.get("contours")
         if contours is None:

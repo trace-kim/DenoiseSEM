@@ -37,15 +37,22 @@ sites:
   260904_0947-13: /data/260904_raw_data/test/260904_0947-13
 output_dir: output/260921_real_n2n_comparison
 device: cuda:0
-# Use one H100 for inference and contour refinement. Requires CuPy for CUDA.
+# Use one H100 for inference and Otsu Gaussian smoothing. Requires CuPy for CUDA.
 # --metrology-device cpu is available for CPU-only installations.
 metrology_device: cuda:0
 tile_batch: 4
 ema: true
 # Only registration_sigma / frame_interval_s from a legacy analysis config
 # affect the comparison. Acquisition correction diagnostics are never run.
-# Segmentation: classical dark holes by default; saved uint8 measurement pixels,
-# fixed 0/255 segmentation input scale, no contrast stretching.
+# Gaussian + ordinary Otsu on each saved uint8 image; no watershed, hole filling,
+# contour refinement, or contrast stretching. Closed masks use existing area/ECD
+# measurements. Border paths remain open and are excluded from measurements.
+contour_method: otsu
+otsu:
+  polarity: dark
+  sigma_px: 1.0
+  min_area_px: 25
+# --contour-method current restores the existing segmentation/refinement path.
 analysis_config: null
 segmentation_config: null
 difference_limit_dn: 32.0

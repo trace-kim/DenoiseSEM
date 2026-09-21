@@ -74,6 +74,9 @@ class SegmentationResult:
     image_stats: dict
     diagnostics: Diagnostics
     provenance: dict = field(default_factory=dict)
+    #: Per-region open mask paths, in the same coordinates as coarse/holes.
+    #: These are display geometry only and must never be closed for metrology.
+    open_paths: list[list[np.ndarray]] = field(default_factory=list)
 
     @property
     def region_count(self) -> int:

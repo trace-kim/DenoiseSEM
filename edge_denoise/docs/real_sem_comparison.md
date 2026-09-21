@@ -24,10 +24,24 @@ pass because they saved outlines for only four matched holes.
 
 ```bash
 python tools/real_sem_compare.py \
-  --from-comparison output/sem-real-comparison-pilot/comparison.json \
-  --output-dir output/260921_real_n2n_visual_audit \
+  --from-comparison output/260921_real_n2n_comparison/comparison.json \
+  --output-dir output/260921_real_n2n_otsu_comparison \
+  --contour-method otsu \
   --metrology-device cuda:0
 ```
+
+This runs Gaussian + Otsu inside the main comparison pipeline: reference feature
+IDs, raw images, average8, average128, and every saved model output all use it.
+The result is the normal `index.html`, CSV/JSON measurements, and TensorBoard
+report. It does not launch a separate preview or require inference. Use
+`--metrology-device cpu` for a CPU installation.
+
+New runs using the shipped `sem_real_compare.yml` select Otsu by default.
+Rebuilds without a method override preserve the method saved in the input;
+older reports without method metadata retain the existing method. Use
+`--contour-method current` to select the previous segmentation/refinement
+pipeline explicitly. Use `--otsu-config sem_segment/configs/contour_preview.yml`
+to load the same three detector settings used by the standalone preview.
 
 Replace the original report directory with the one already on your server.
 The new output directory must not exist. Saved uint8 images are copied unchanged
@@ -39,13 +53,40 @@ After this first rebuild, changes to presentation can reuse the new measurements
 
 ```bash
 python tools/real_sem_compare.py \
-  --from-comparison output/260921_real_n2n_visual_audit/comparison.json \
-  --output-dir output/260921_real_n2n_visual_audit \
+  --from-comparison output/260921_real_n2n_otsu_comparison/comparison.json \
+  --output-dir output/260921_real_n2n_otsu_comparison \
   --render-only
 ```
 
 `--render-only` accepts a new output directory too. It does not estimate drift,
 segment images, or load a model. It requires the revised report format.
+Detector/device overrides require remeasurement and cannot accompany
+`--render-only`.
+
+## Otsu detector and measurements
+
+The default is dark foreground, Gaussian sigma 1 px, and minimum component area
+25 px. These settings are identical for every source. Smoothing uses a float64
+working copy of the decoded saved uint8 crop. Ordinary Otsu is recalculated for
+each image. Four-connected foreground components are filtered only by minimum
+area, with no candidate limit, maximum area, watershed, or hole filling.
+Interior loops remain visible. The original saved/displayed image is unchanged.
+
+The main report uses the existing polygon-area/ECD calculation on complete Otsu
+masks, subtracting interior holes. No contour refinement runs in this mode.
+Border-crossing paths remain open in both the HTML viewer and TensorBoard and
+have no area/ECD. They are not closed for convenience. The viewer identifies
+the active detector, settings and per-image threshold; refinement controls are
+disabled for Otsu reports. These are mask measurements, not subpixel edge
+measurements or demonstrated real-SEM accuracy. Synthetic checks show that
+smoothing can erase thin geometry and shift a thresholded boundary.
+
+The saved record adds `contour_method`, `otsu_settings`, per-frame
+`otsu_threshold_dn` and `gaussian_backend`, and optional per-region `open_paths`.
+Existing coarse/holes/refined fields keep their meanings, and old reports remain
+readable. `segmentation_settings` retains crop, physical scale, metrology and
+current-method settings; `contour_method` selects the active detector. The
+standalone preview remains available as an additional visual comparison.
 
 ## Produce a new comparison from checkpoints
 
@@ -90,10 +131,12 @@ GPU settings come from the base config. Other useful flags:
 | `--model affine_percentile` | Compare only this configured arm; repeat for several. |
 | `--prepared-manifest NAME=PATH` | Supply the original manifest when a checkpoint's dataset moved. |
 | `--site NAME` | Select one named site from a multi-site config; with `--site-dir`, name the overridden site. |
-| `--segmentation-config PATH` | Existing segmentation settings, for example polarity, mask area or native contour ROI. |
+| `--segmentation-config PATH` | Crop, physical scale and metrology settings; also detector/refinement settings for `current`. |
+| `--contour-method otsu` | Use Gaussian + Otsu in the main report; `current` selects the previous method. |
+| `--otsu-config PATH` | Detector YAML with `polarity`, `sigma_px`, and `min_area_px`. |
 | `--tile-batch N` | Inference tile batch size. |
 | `--difference-limit-dn 32` | One symmetric display limit for output-minus-raw images, in DN. |
-| `--metrology-device cpu` | Explicit CPU contour refinement when needed. |
+| `--metrology-device cpu` | CPU Otsu smoothing or current-method refinement. |
 
 The current six-arm study checks the same real N2N objective, architecture,
 normalization, native source content and train/validation/test splits. It rejects
@@ -103,19 +146,20 @@ examining test sites.
 
 ## GPU execution
 
-The base config uses logical `cuda:0` for inference and contour refinement.
+The base config uses logical `cuda:0` for inference and Otsu Gaussian smoothing.
 It uses one GPU at a time and keeps one model resident. This is appropriate on
 the four-H100 server without introducing distributed report execution. CUDA
-refinement uses the existing CuPy implementation; install the CuPy wheel matching
+smoothing/refinement uses the existing optional CuPy dependency; install the wheel matching
 the server's toolkit as described in [sem_segment](../../sem_segment/README.md).
 CUDA errors are explicit, with no silent CPU fallback. Under Slurm, preserve
 the scheduler's GPU visibility and use its logical device numbering.
 
-Classical mask detection, ECC translation estimation, polygon geometry and
-rendering remain on CPU. Contour sampling/refinement uses the selected GPU.
+Otsu thresholding, component labeling, ECC translation estimation, polygon
+geometry and rendering remain on CPU. Only Gaussian filtering runs on CUDA
+for Otsu; sigma zero disables it. The current method uses CUDA for refinement.
 Native brightness and temporal statistics stream through the saved images and
 do not run the expensive acquisition-correction reports. Per-series timings and
-the actual refinement device remain in `comparison.json`.
+the active detector and actual Gaussian backend remain in `comparison.json`.
 
 ## Inspect the report on the server
 
@@ -124,7 +168,7 @@ browser/access arrangement:
 
 ```bash
 python -m http.server 8765 --bind 127.0.0.1 \
-  --directory output/260921_real_n2n_visual_audit
+  --directory output/260921_real_n2n_otsu_comparison
 ```
 
 No transfer of acquisitions or copy/paste of server results to the development
@@ -141,7 +185,8 @@ permits local scripts; preserve its assets and image subfolders.
   the exact range. Average128 is static.
 - The overlapping wipe has a separate divider slider. Each image and its own
   contour overlay are clipped together. Contours can be hidden, mask-only,
-  refined-only, or both.
+  refined-only, or both for the current method. Otsu has mask-only or hidden
+  contours because no refinement is performed.
 - Clicking a region highlights the measured area and fits the complete hole
   with padding. The small full-field view shows its location. ECD, area, status,
   refined coverage and an acquisition-linked diameter trace explain each number.
@@ -159,7 +204,7 @@ area-equivalent diameter, not a horizontal width or a fitted-circle diameter.
 Multiply by `pixel_size_nm` for nm. The comparison always labels this definition
 as ECD, regardless of other CD definitions available in standalone metrology.
 
-Refined polygons retain coarse vertices where refinement fails. Those spans are
+For the current method, refined polygons retain coarse vertices where refinement fails. Those spans are
 drawn dashed; successful refined segments are solid. Insufficient refinement has
 no accepted refined ECD. A decrease in sampled gradient strength marks a region
 for inspection, not as proof of worse physical accuracy. Border regions are

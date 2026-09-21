@@ -62,6 +62,8 @@ def _current_lines(contours: list[dict]) -> str:
         # Existing stored rings have implicit closure and full-image offsets.
         for ring in [contour.get("coarse", []), *contour.get("holes", [])]:
             lines.append(_polyline(ring, COLORS["coarse"], closed=True))
+        for path in contour.get("open_paths", []):
+            lines.append(_polyline(path, COLORS["coarse"]))
         refined = contour.get("refined", [])
         if not refined:
             continue
@@ -184,7 +186,7 @@ def build_preview(record_path: Path, output_dir: Path,
                     mime = "image/png" if display != original else Image.MIME[image.format]
                 image_url = f"data:{mime};base64," + base64.b64encode(display.read_bytes()).decode("ascii")
                 current = stored.get((name, frame["index"]), [])
-                has_points = any(c.get("coarse") or c.get("refined") or c.get("holes") for c in current)
+                has_points = any(c.get("coarse") or c.get("refined") or c.get("holes") or c.get("open_paths") for c in current)
                 if has_points:
                     status = "Stored outlines reused."
                 elif have_storage and frame.get("contour_counts", {}).get("detected") == 0:

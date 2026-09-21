@@ -9,6 +9,19 @@ with `python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_co
 Replace that example prefix with your experiment date/model; the base config
 uses `/data/260904_raw_data/test/260904_0947-13`.
 
+The base recipe now uses Gaussian + Otsu contours in the main report. To test it
+on an existing report without inference, run on the server:
+
+```bash
+python tools/real_sem_compare.py \
+  --from-comparison output/260921_real_n2n_comparison/comparison.json \
+  --output-dir output/260921_real_n2n_otsu_comparison \
+  --contour-method otsu --metrology-device cuda:0
+```
+
+Replace the input directory with your saved report. `--contour-method current`
+selects the previous method; `--metrology-device cpu` selects CPU execution.
+
 This repository holds seven independent pieces of work, separated by ownership.
 The original packages used to share one folder. **Every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).

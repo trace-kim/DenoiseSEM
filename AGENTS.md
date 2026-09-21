@@ -99,6 +99,9 @@ stop handling. Any new dataset path must hash content before splitting.
   data, screenshots, logs, or copy/paste results from that server to this PC.
   Validate locally with synthetic fixtures and provide usable remote commands;
   do not make progress depend on bringing remote artifacts here.
+- Deliver requested real-SEM algorithm changes through the actual workflow
+  entry points, with ready-to-run remote commands. Standalone previews are
+  supplements unless the user explicitly requests a preview-only change.
 - The remote server has **4 H100 GPUs with 96 GB VRAM each** and relatively
   limited CPU capacity. Prefer existing GPU acceleration where meaningful.
   A single GPU is a reasonable default; do not add distributed machinery without

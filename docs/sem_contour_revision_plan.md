@@ -1,5 +1,13 @@
 # Establish a simple contour baseline before replacing the algorithm
 
+> Follow-up scope, 2026-09-22: the user requested integration into the actual
+> remote analysis workflow. Gaussian + Otsu now runs through
+> `tools/real_sem_compare.py` for both new runs and saved-report rebuilds, and
+> is the default in the real comparison recipe. Closed masks feed the existing
+> area/ECD calculation; open border paths remain unmeasured. The original
+> preview-only scope below is retained as history. See the
+> [main comparison guide](../edge_denoise/docs/real_sem_comparison.md).
+
 ## 1. Goal and scope
 
 Implement and evaluate this standard pipeline:

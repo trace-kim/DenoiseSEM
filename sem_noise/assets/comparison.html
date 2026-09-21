@@ -15,6 +15,7 @@
 <button id="fit">Full image</button><button id="native">1:1 pixels</button><button id="fit-hole" disabled>Fit selected hole</button>
 </div>
 <div id="site-status" class="site-status" role="status"></div>
+<p id="detector-note" class="muted"></p>
 <div class="sources">
 <div class="source"><label><b>A</b><select id="source-a" aria-label="Source A"></select></label><span id="meta-a"></span>
 <div class="scrubber"><button id="prev-a" aria-label="Previous frame A">‹</button><input id="frame-a" aria-label="Frame A" type="range" min="1" max="128" value="1"><button id="next-a" aria-label="Next frame A">›</button><button id="play-a" aria-label="Play sequence A">Play</button></div>
@@ -25,11 +26,11 @@
 </div>
 <div id="images" class="images"><div class="image-pane"><svg id="image-a" role="img" aria-label="Image A with measured contours"></svg></div><div class="image-pane" id="pane-b"><svg id="image-b" role="img" aria-label="Image B with measured contours"></svg></div></div>
 <div id="wipe-control" class="wipe-control" hidden><span>A</span><label>Reveal B<input id="wipe" aria-label="Wipe divider" type="range" min="0" max="100" value="50"></label><span>B</span></div>
-<div class="viewer-footer"><span><i class="cyan"></i>Mask <i class="orange"></i>Refined <i class="dashed"></i>Mask fallback <i class="partial"></i>Partial / excluded</span><span>Scroll to zoom · Drag to pan · Click a hole to inspect</span></div>
+<div class="viewer-footer"><span><i class="cyan"></i>Mask <span id="refinement-legend"><i class="orange"></i>Refined <i class="dashed"></i>Mask fallback </span><i class="partial"></i>Partial / excluded</span><span>Scroll to zoom · Drag to pan · Click a hole to inspect</span></div>
 <p id="scale-note" class="muted">Shared display scale: 0–255 DN. Native coordinates; no brightness matching or image registration applied.</p>
 <div class="statuses"><p id="status-a" role="status"></p><p id="status-b" role="status"></p></div>
 <section class="measurement"><div><h2>Measured area → equivalent diameter</h2><p id="selection">Select a contour in either image to see exactly what was measured.</p>
-<p class="formula">ECD = 2 × √(area / π)</p><p class="muted">Diameter of a circle with the same area, including subtraction of interior rings. Refined outlines retain the mask boundary where refinement was unavailable.</p>
+<p class="formula">ECD = 2 × √(area / π)</p><p id="measurement-note" class="muted">Diameter of a circle with the same area, including subtraction of interior rings. Refined outlines retain the mask boundary where refinement was unavailable.</p>
 <label>Measurement<select id="measure"><option value="coarse">Mask ECD</option><option value="refined">Refined ECD</option></select></label>
 <div id="measurement-values"></div><p id="ecd-coverage" class="muted"></p></div>
 <div><svg id="overview" class="overview" role="img" aria-label="Full-field location of selected region"></svg><p class="muted">Full-field location</p></div></section>

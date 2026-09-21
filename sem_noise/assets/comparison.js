@@ -2,6 +2,7 @@
 (() => {
   "use strict";
   const report = window.SEM_REPORT;
+  const maskOnly = report.contour_method === "otsu";
   window.SEM_CONTOURS = Object.create(null);
   const $ = id => document.getElementById(id);
   const ns = "http://www.w3.org/2000/svg";
@@ -23,6 +24,7 @@
   };
   const option = (value, text) => new Option(text, value);
   const ringPath = points => points.length ? "M" + points.map(p => `${p[1]},${p[0]}`).join("L") + "Z" : "";
+  const openPath = points => points.length ? "M" + points.map(p => `${p[1]},${p[0]}`).join("L") : "";
   const time = f => f.timestamp_s ?? f.order;
   const timeTitle = () => site().series.raw.frames[0].timestamp_s == null ? "Acquisition / block center" : "Acquisition time (s)";
   function frameLabel(p) {
@@ -90,9 +92,9 @@
       const isSelected = selected(c, p);
       const selectedRing = measure === "refined" && c.refined.length ? c.refined : c.coarse;
       const ring = mode === "refined" && c.refined.length ? c.refined : c.coarse;
-      if (isSelected) group.append(svg("path", {d: [ringPath(selectedRing), ...c.holes.map(ringPath)].join(" "),
+      if (isSelected && selectedRing.length) group.append(svg("path", {d: [ringPath(selectedRing), ...c.holes.map(ringPath)].join(" "),
         "fill-rule": "evenodd", fill: "#f9dc6d", "fill-opacity": .2, "pointer-events": "none"}));
-      const outline = svg("path", {d: [ringPath(ring), ...c.holes.map(ringPath)].join(" "), "fill-rule": "evenodd",
+      const outline = svg("path", {d: [ringPath(ring), ...c.holes.map(ringPath), ...(c.open_paths || []).map(openPath)].join(" "), "fill-rule": "evenodd",
         stroke: mode === "refined" ? "none" : c.status.coarse === "border" ? "#d7ad56" : "#43dbe2",
         class: `boundary${isSelected ? " selected" : ""}${c.status.coarse !== "valid" ? " partial" : ""}`,
         "data-pane": p, "data-region": c.region_id, "aria-label": c.hole ? `Hole ${c.hole}` : `Unmatched region ${c.region_id}`});
@@ -157,7 +159,7 @@
     if (p == null) return;
     const c = state.contours[p].find(c => selected(c, p));
     if (!c) return;
-    const all = [...c.coarse, ...c.refined];
+    const all = [...c.coarse, ...c.refined, ...c.holes.flat(), ...(c.open_paths || []).flat()];
     if (!all.length) return;
     const xs = all.map(q => q[1]), ys = all.map(q => q[0]);
     const minX = Math.min(...xs), minY = Math.min(...ys), w = Math.max(...xs) - minX, h = Math.max(...ys) - minY;
@@ -265,7 +267,7 @@
     const names = [...new Set(state.names)];
     const models = names.filter(n => report.arms.some(a => a.arm === n));
     const rows = [];
-    for (const method of ["coarse", "refined"]) {
+    for (const method of (maskOnly ? ["coarse"] : ["coarse", "refined"])) {
       const holes = Object.fromEntries(names.map(n => [n, Object.fromEntries(Object.entries(site().traces[n] || {}).map(([id, t]) =>
         [id, t[method].map(p => p[1]).filter(Number.isFinite)]).filter(([, v]) => v.length >= 2))]));
       const common = models.length ? Object.keys(holes[models[0]]).filter(id => models.every(n => id in holes[n])) : [];
@@ -301,6 +303,8 @@
       $("status-" + l).textContent = !c.detected ? `${l.toUpperCase()}: No contours detected; ECD unavailable.` :
         !c.complete ? `${l.toUpperCase()}: No complete holes. ${c.detected} detected; ${c.border || 0} partial at the border.` :
         `${l.toUpperCase()}: ${c.complete} complete holes; ${c.refined || 0} with usable refinement. ${c.border || 0} partial; ${c.review || 0} need edge inspection.`;
+      if (maskOnly) $("status-" + l).textContent =
+        `${l.toUpperCase()}: ${c.complete || 0} complete Otsu regions; ${c.border || 0} partial at the border. Otsu threshold ${fmt(f.otsu_threshold_dn)} DN. No edge refinement.`;
       if (c.detected && f.correspondence_status !== "available") $("status-" + l).textContent += " Cross-frame matching unavailable; local contours remain visible.";
       $("variation-" + l).hidden = !s.temporal_image;
       if (s.temporal_image) $("variation-" + l).src = s.temporal_image;
@@ -381,5 +385,17 @@
   $("fit-hole").onclick = fitHole;
   document.addEventListener("keydown", e => {if (["INPUT", "SELECT", "BUTTON"].includes(e.target.tagName)) return;
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {e.preventDefault(); stop(); setFrame(state.active, state.indices[state.active] + (e.key === "ArrowLeft" ? -1 : 1));}});
+  if (maskOnly) {
+    $("contours").value = "coarse";
+    for (const entry of $("contours").options) entry.disabled = ["both", "refined"].includes(entry.value);
+    $("measure").value = "coarse";
+    for (const entry of $("measure").options) entry.disabled = entry.value === "refined";
+    $("refinement-legend").hidden = true;
+    const settings = report.otsu_settings;
+    $("detector-note").textContent = `Contours: Gaussian + Otsu · ${settings.polarity} foreground · σ ${settings.sigma_px} px · minimum area ${settings.min_area_px} px. Same settings for every source; each image has its own threshold.`;
+    $("measurement-note").textContent = "ECD uses the area enclosed by the Otsu mask, subtracting interior rings. These are segmentation boundaries, not subpixel edge measurements. Open border paths are displayed but excluded from area/ECD.";
+  } else {
+    $("detector-note").textContent = "Contours: current segmentation and edge-refinement pipeline.";
+  }
   changeSite();
 })();
