@@ -70,6 +70,38 @@ file where the two halves meet. Put new settings on the flow's spec, not on
 in `runctl/control.py` rather than reimplementing seeding, device selection, or
 stop handling. Any new dataset path must hash content before splitting.
 
+## Persistent User Preferences: Real SEM Workflows
+
+- **All image analysis uses the final uint8 images.** Raw inputs are uint8
+  RGB with identical channels. Convert model outputs and averages to uint8
+  before any noise, brightness, registration, contour, or metrology analysis;
+  decode the saved images as the measurement source. Never use intermediate
+  floating-point predictions to improve or obtain metrology. Floating-point
+  arithmetic/subpixel contour coordinates derived from those uint8 pixels are
+  fine. The denoiser produces images; the measurement pipeline measures those
+  delivered images. Pre-export range validation may flag clipping/nonfinite
+  predictions, but must not supply image-analysis or metrology values.
+- Do not apply gain/offset, percentile matching, autocontrast, or geometric
+  correction to denoiser outputs during comparison. Compare each output's
+  brightness directly with its corresponding raw input. Fixed model input/output
+  normalization and final uint8 conversion are part of image production.
+- Real training and analysis run on a remote server. The user cannot transfer
+  data, screenshots, logs, or copy/paste results from that server to this PC.
+  Validate locally with synthetic fixtures and provide usable remote commands;
+  do not make progress depend on bringing remote artifacts here.
+- The remote server has **4 H100 GPUs with 96 GB VRAM each** and relatively
+  limited CPU capacity. Prefer existing GPU acceleration where meaningful.
+  A single GPU is a reasonable default; do not add distributed machinery without
+  a demonstrated need. Respect scheduler-provided GPU visibility.
+- Default remote test site: `/data/260904_raw_data/test/260904_0947-13`.
+  Use this when filling a test-site configuration unless instructed otherwise.
+- Experiment folders normally live under `runs/edge_denoise` and use
+  `{date}_real_{model_type}_{alignment}_{brightness}`, for example
+  `260921_real_n2n_affine_percentile` or `260921_real_ft_consist_translation_none`.
+- Supply terminal commands for training/reporting tasks. Prefer a reusable base
+  config with command-line flags for dataset, experiment/checkpoint, and output
+  directories instead of requiring users to edit YAML for every run.
+
 ## Testing Guidelines
 
 Tests use pytest, named `tests/<package>/test_<area>.py` with functions beginning

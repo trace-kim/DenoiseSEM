@@ -336,6 +336,7 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
 
         magnitude = gaussian_gradient_magnitude(measure01, 1.0) if gpu_strengths is None else None
         changes = []
+        region_strengths = []
         for index, (base, ref) in enumerate(zip(coarse, refined)):
             if gpu_strengths is None:
                 before = edge_strength_along(base.points, measure01, magnitude=magnitude)
@@ -344,6 +345,8 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
                 before, after = gpu_strengths[index]
             if np.isfinite(before) and np.isfinite(after) and before > 0:
                 changes.append((after - before) / before)
+                region_strengths.append({"region_id": index + 1, "before": float(before),
+                                         "after": float(after), "change": float((after - before) / before)})
         if changes:
             values = np.asarray(changes)
             strength = {
@@ -352,6 +355,7 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
                 "regions_degraded": int((values < -0.02).sum()),
                 "median_change": float(np.median(values)),
                 "worst_change": float(values.min()),
+                "regions": region_strengths,
             }
     timings["edge_strength"] = timings.get("edge_strength", 0.0) + time.perf_counter() - start
 
@@ -371,10 +375,9 @@ def segment_image(image01: np.ndarray, config: Config, *, segmenter: Segmenter |
         )
     if strength.get("regions_degraded"):
         warnings.append(
-            f"Refinement moved {strength['regions_degraded']} region(s) onto a WEAKER edge than "
-            f"the segmentation boundary they started from (worst {strength['worst_change']:.1%}). "
-            "Those contours are worse than the mask they came from and should not be trusted; "
-            "inspect them before using their numbers."
+            f"Sampled edge strength decreased for {strength['regions_degraded']} region(s) "
+            f"after refinement (largest change {strength['worst_change']:.1%}). "
+            "Inspect the affected boundaries; gradient strength alone does not establish boundary accuracy."
         )
     if not regions:
         warnings.append(

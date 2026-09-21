@@ -145,7 +145,7 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     from sem_segment import pipeline as segmentation
 
     source, checkpoint = _inputs(tmp_path)
-    calls, measured = [], []
+    measured = []
     fixtures = [_arm_fixture(tmp_path, reg, bright, legacy=i >= 4) for i, (reg, bright) in enumerate(TREATMENTS)]
     arms = {f"{arm.registration}_{arm.brightness}": arm for arm, _, _ in fixtures}
     by_path = {arm.checkpoint: (config, digest) for arm, config, digest in fixtures}
@@ -158,22 +158,14 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
 
         def denoise_full(self, frame, **kwargs):
             assert kwargs["clip_output"] is False
-            result = frame.copy()
+            result = frame.copy() + .49 / 255  # Fractional information must disappear before analysis.
             result[0, 0], result[0, 1] = -1 / 255, 256 / 255
             return result
 
     monkeypatch.setattr(Denoiser, "from_checkpoint", lambda path, **k: MockDenoiser(path))
 
-    def noise(folder, out, *, config, manifest, **kwargs):
-        paths = sorted(folder.glob("*.png"))
-        assert not config.exclude_duplicates
-        assert config.registration == "affine"  # Same standard analysis for every training treatment.
-        calls.append((folder.name, paths))
-        assert len(paths) == (16 if folder.name == "average8" else 128)
-        out.mkdir()
-        (out / "index.html").write_text("mock noise report")
-        return {"status": "complete", "sites": [{"status": "complete", "accepted_frames": len(paths),
-                                                 "unregistered_temporal_sigma_dn": 2.5}]}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Acquisition correction must never run on comparison outputs")
 
     from sem_segment.config import Config as SegmentConfig
     yy, xx = np.mgrid[:16, :16]
@@ -186,11 +178,15 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
 
     def segment(image, config, *, segmenter=None):
         np.testing.assert_allclose(image * 255, np.rint(image * 255), atol=1e-12)
+        assert config.segmentation.contrast_stretch is None
         measured.append(image.copy())
         used_backends.append(segmenter)
         return fixed_segmentation
 
-    monkeypatch.setattr(pipeline, "analyze_dataset", noise)
+    monkeypatch.setattr(pipeline, "analyze_dataset", forbidden)
+    from sem_noise import pair_diagnostics
+    monkeypatch.setattr(pair_diagnostics, "diagnose_pairs", forbidden)
+    monkeypatch.setattr(pair_diagnostics, "acquisition_brightness", forbidden)
     monkeypatch.setattr(segmentation, "segment_image", segment)
     monkeypatch.setattr(compare, "registration_tracks", lambda reference, paths, sigma: [
         {"dy_px": .25 if p.parent.name in arms else 0., "dx_px": 0.,
@@ -204,16 +200,16 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
                                         output_dir=tmp_path / "output", frame_interval_s=.5)
     result = compare.run(config)
     assert result["status"] == "complete"
-    assert len(calls) == 8 and sum(name == "raw" for name, _ in calls) == 1
-    assert len(measured) == 1 + 128 + 16 + 6 * 128  # Template + quantitative series; no full average.
+    assert not list(config.output_dir.glob("site/noise_*"))
+    assert len(measured) == 1 + 128 + 16 + 1 + 6 * 128  # Template plus each saved uint8 image.
     assert used_backends[0] is None  # Template; each measurement series shares one backend.
     start = 1
-    for count in (128, 16, *([128] * 6)):
+    for count in (128, 16, 1, *([128] * 6)):
         group = used_backends[start:start + count]
         assert group[0] is not None and all(backend is group[0] for backend in group)
         start += count
     progress = capsys.readouterr().out
-    assert progress.index("site/raw: noise analysis and report finished") < progress.index("site/raw: contours/CD starting")
+    assert progress.index("raw: measuring native uint8") < progress.index("site/raw: contours/CD starting")
     assert "site/raw: contours/CD 1/128" in progress
     assert "site/raw: contours/CD 128/128" in progress
     assert "site/average8: contours/CD 16/16" in progress
@@ -221,7 +217,7 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert "TensorBoard comparison finished" in progress
     for series in result["sites"][0]["series"].values():
         assert series["timings_s"]["contours_cd"] >= 0
-        assert series["timings_s"]["noise_analysis_and_report"] >= 0
+        assert series["timings_s"]["native_analysis"] >= 0
         assert "edge_strength" in series["segmentation_stage_totals_s"]
         assert "segmentation_timings_s" in series["frames"][0]
     averages = result["sites"][0]["series"]["average8"]["frames"]
@@ -235,10 +231,13 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert all(r["minimum_dn"] == pytest.approx(-1) and r["maximum_dn"] == pytest.approx(256) for r in result["prediction_ranges"])
     assert any(a[0, 0] == 0 and a[0, 1] == 1 for a in measured)
     html = (config.output_dir / "index.html").read_text(encoding="utf-8")
-    assert html.count(RANGE_WARNING) == 7  # Combined + each affected model/site.
-    assert "visual reference only" in html and "none_none/frame_128.png" in html
+    assert html.count(RANGE_WARNING) == 1  # One expandable range audit, not repeated warning walls.
+    assert "not ground truth" in html
+    viewer_data = json.loads((config.output_dir / "viewer/data.js").read_text().split(" = ", 1)[1].rstrip(";\n"))
+    assert len(viewer_data["sites"][0]["series"]["none_none"]["frames"]) == 128
+    assert viewer_data["sites"][0]["series"]["none_none"]["frames"][-1]["path"].endswith("frame_128.png")
     assert "legacy prepared dataset" in html
-    assert "registration/brightness variants" in html
+    assert "Link acquisitions" in html and "Overlapping wipe" in html
     assert "below_zero" in (config.output_dir / "prediction_ranges.csv").read_text()
     saved = json.loads((config.output_dir / "comparison.json").read_text())
     assert saved["prediction_ranges"][0]["clipped"]
@@ -247,7 +246,14 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     for name in arms:
         model_frames = saved["sites"][0]["series"][name]["frames"]
         assert all(f["dy_px"] == 0 and f["output_dy_px"] == .25 for f in model_frames)
-        assert writer.scalars[f"site/{name}/output_vs_raw_translation_rms_px", 1234] == .25
+        assert writer.scalars[f"summary/site/{name}/output_vs_raw_translation_rms_px", 1234] == .25
+        for frame in model_frames:
+            raw_mean = frame["index"] - 1
+            expected_mean = (254 * raw_mean + 255) / 256
+            assert frame["mean_dn"] == expected_mean
+            assert frame["brightness_delta_dn"] == expected_mean - raw_mean
+        assert (f"acquisitions/site/{name}/pixels", 128) in writer.images
+        assert (f"acquisitions/site/{name}/contours", 128) in writer.images
         assert (f"comparison/{name}/training_treatment", 1234) in writer.texts
     observations = saved["sites"][0]["observations"]
     assert sum(r["clipped"] and r["status"] == "valid" and r["method"] == "coarse" for r in observations) == 768
@@ -255,9 +261,11 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     for row in saved["metrics"]:
         for key, value in row["values"].items():
             if value is not None:
-                assert writer.scalars[f"{row['site']}/{row['series']}/{key}", row["step"]] == value
+                assert writer.scalars[f"summary/{row['site']}/{row['series']}/{key}", row["step"]] == value
     assert any(RANGE_WARNING in value for value in writer.texts.values())
-    assert len([a for a in result["artifacts"] if Path(a["path"]).name.startswith("block_")]) == 16
+    assert not any(Path(a["path"]).name.startswith("block_") for a in result["artifacts"])
+    assert result["sites"][0]["correspondence_reference"] == "average128"
+    assert result["sites"][0]["series"]["average128"]["native"]["temporal_rms_dn"] is None
 
 
 def test_incomplete_site_rejected_before_outputs(tmp_path):
@@ -341,8 +349,9 @@ def test_different_recipes_and_training_content_are_rejected(tmp_path):
 def test_shipped_comparison_is_the_six_preprocessing_treatments():
     config = compare.load_settings(compare.ROOT / "edge_denoise/configs/sem_real_compare.yml")
     assert [(a.registration, a.brightness) for a in config.checkpoints.values()] == TREATMENTS
-    assert all("sem_real_n2n_" in str(a.checkpoint) for a in config.checkpoints.values())
-    assert config.checkpoints["translation_none"].prepared_manifest is not None
+    assert all("260921_real_n2n_" in str(a.checkpoint) for a in config.checkpoints.values())
+    assert config.metrology_device == "cuda:0"
+    assert str(next(iter(config.sites.values())).source_dir).replace("\\", "/").endswith("/data/260904_raw_data/test/260904_0947-13")
 
 
 def test_output_registration_failure_never_changes_raw_correspondence(tmp_path, monkeypatch):

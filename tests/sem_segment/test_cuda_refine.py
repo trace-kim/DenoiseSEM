@@ -248,7 +248,7 @@ def test_comparison_series_reuses_gpu_on_saved_uint8_files(fake_cuda, tmp_path, 
 
     monkeypatch.setattr(pipeline, "segment_image", measured)
     series = {"frames": frames}
-    observations, _ = compare.measure_series(tmp_path, "raw", series, template, 5., config)
+    observations, contours = compare.measure_series(tmp_path, "raw", series, template, 5., config)
     assert used[0] is used[1] and used[0].closed
     assert len(observations) == 4
     assert {r["status"] for r in observations} == {"valid"}
@@ -258,19 +258,20 @@ def test_comparison_series_reuses_gpu_on_saved_uint8_files(fake_cuda, tmp_path, 
     assert fake_cuda.devices == [0] and fake_cuda.freed == 1
 
     from sem_noise.comparison_report import comparison_metrics, write_tensorboard
-    series.update(step=0, noise={})
-    record = {"models": {}, "arms": [], "artifacts": [], "prediction_ranges": [],
+    series.update(step=0)
+    record = {"models": {}, "arms": [], "artifacts": [], "prediction_ranges": [], "range_warning": "Clipped",
               "sites": [{"name": "site", "series": {"raw": series}, "repeatability": [],
-                         "full_average": frames[0]["path"]}]}
+                         "contours": contours, "full_average": frames[0]["path"]}]}
     record["metrics"] = comparison_metrics(record)
     scalars, texts = {}, {}
     writer = SimpleNamespace(add_scalar=lambda name, value, step: scalars.update({name: value}),
-                             add_text=lambda name, value, step: texts.update({name: value}), close=lambda: None)
+                             add_text=lambda name, value, step: texts.update({name: value}),
+                             add_image=lambda *args, **kwargs: None, close=lambda: None)
     write_tensorboard(tmp_path, record, writer_factory=lambda **kwargs: writer)
     metric = record["metrics"][0]
-    assert metric["refinement_device"] == texts["site/raw/refinement_device"] == "cuda:0"
-    assert metric["values"]["time/refine_s_per_image"] == scalars["site/raw/time/refine_s_per_image"]
-    assert metric["values"]["time/total_s_per_image"] >= 0
+    assert metric["refinement_device"] == "cuda:0"
+    assert series["segmentation_stage_totals_s"]["refine"] >= 0
+    assert scalars["summary/site/raw/frames_with_complete_contours"] == 2
 
 
 def test_comparison_resolves_one_gpu_and_respects_segmentation_config(tmp_path):

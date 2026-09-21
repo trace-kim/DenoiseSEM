@@ -1,9 +1,13 @@
 # Running every workflow from this repository root
 
-For server-side comparisons of the six real-N2N registration/brightness treatments against sixteen raw
-eight-frame averages, see [the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md).
+For a visual audit of the six real-N2N registration/brightness treatments, see
+[the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md): full-image
+frame sliders, overlapping wipe, inspectable contours, and direct output/raw
+brightness comparisons. Existing saved reports can be rebuilt without inference.
 Start with `edge_denoise/configs/sem_real_compare.yml` and pilot one test site
-with `python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --site site_01`.
+with `python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --experiment-prefix 260921_real_n2n`.
+Replace that example prefix with your experiment date/model; the base config
+uses `/data/260904_raw_data/test/260904_0947-13`.
 
 This repository holds seven independent pieces of work, separated by ownership.
 The original packages used to share one folder. **Every command below is run

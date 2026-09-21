@@ -102,21 +102,23 @@ Code references: `edge_denoise/train.py` (`run`, `_validate`, `_loss_terms`),
    checkpoints on each individual acquisition. Preserve uint8 range audits,
    clipping warnings, and the same saved-pixel analysis for every arm.
 4. **Include the actual registration comparison.** Analyze raw, block-mean
-   and model-output series using identical noise-analysis settings. Independently
-   estimate each output's drift against the same eight-frame template and plot
+   and model-output series from decoded saved uint8 pixels without correction.
+   Independently estimate each output's drift against the same full-average reference and plot
    output-minus-raw drift. Retain raw-frame translations for hole correspondence
    so output-induced movement is not corrected away. Use native saved pixels
-   for mask/refined contours and ECD; report both methods, missing matches,
-   per-hole counts, sample SD and 3 sigma. Keep brightness/charging trends.
-5. **Publish one combined noise report and matching TensorBoard figures.**
-   Include the six-treatment identity table, sixteen image panels, native links,
-   separate full-average reference, registration/brightness tracks, contour
-   overlays, CD traces, noise results, counts, warnings, and CSV/JSON exports.
-   Offline TensorBoard writes to a separate comparison directory at checkpoint
-   steps. Opt-in live panels use fixed train/validation examples only, with raw
-   eight-frame and full-average crops; no test images enter training.
+   for mask/refined contours and ECD. Keep brightness/charging trends visible
+   by comparing each output directly with its corresponding raw input. No
+   acquisition gain/offset diagnostics run on model outputs.
+5. **Publish one visual report and matching TensorBoard sequences.**
+   Use full-field A/B images with acquisition sliders, a wipe divider and each
+   image's own contours. Clicking a hole shows the measured area, ECD and its
+   trace across acquisitions. Keep coverage, repeatability and detailed exports
+   folded away until needed. Raw segmentation failure must not suppress usable
+   model results. Offline TensorBoard image steps mean acquisition numbers;
+   checkpoint summaries use separate tags. Opt-in live panels use fixed
+   train/validation examples only; no test images enter training.
 6. **Review the pilot before expanding across test sites.** Neither the full
-   mean nor the eight-frame template is ground truth. No PSNR/SSIM or accuracy
+   mean nor the eight-frame means are ground truth. No PSNR/SSIM or accuracy
    claim is warranted. Avoid selecting checkpoints using the test comparison.
 
 Steps 1 and 3–5 are implemented in the revised comparison command and the

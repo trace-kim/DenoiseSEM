@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 from typing import TYPE_CHECKING, Literal
@@ -59,6 +60,7 @@ class ComparisonSettings(BaseModel):
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
     tile_batch: int = Field(default=4, ge=1)
+    difference_limit_dn: float = Field(default=32.0, gt=0, allow_inf_nan=False)
     ema: bool = True
     frame_interval_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     pixel_size_nm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -110,8 +112,8 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
         for name in names:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
                 raise ValueError(f"Use letters, digits, underscores or hyphens for names: {name}")
-    if {name.casefold() for name in config.checkpoints} & {"raw", "average8"}:
-        raise ValueError("raw and average8 are reserved series names")
+    if {name.casefold() for name in config.checkpoints} & {"raw", "average8", "average128"}:
+        raise ValueError("raw, average8 and average128 are reserved series names")
     if config.output_dir.exists():
         raise ValueError(f"Output already exists: {config.output_dir}")
     for arm in config.checkpoints.values():
@@ -231,8 +233,7 @@ def registration_tracks(reference: np.ndarray, paths: list[Path], sigma: float) 
     print(f"{label}: translation diagnostics starting ({len(paths)} frames)", flush=True)
     for path in paths:
         pixels = read_uint8(path)
-        row = {"mean_dn": float(pixels.mean()), "p10_dn": float(np.percentile(pixels, 10)),
-               "p90_dn": float(np.percentile(pixels, 90))}
+        row = {"mean_dn": float(pixels.mean())}
         try:
             matrix, score = estimate_geometry(reference, pixels, motion="translation", sigma=sigma)
             row.update(dy_px=float(matrix[1, 2]), dx_px=float(matrix[0, 2]),
@@ -267,6 +268,19 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         with CudaRefiner(segment_config.refine) as refiner:
             return _measure_series(root, name, series, template, gate, segment_config, refiner=refiner)
     return _measure_series(root, name, series, template, gate, segment_config)
+
+
+def _measurement_status(region, method: str, config: SegmentConfig) -> str:
+    shape = getattr(region, method)
+    if region.touches_border:
+        return "border"
+    if shape is None:
+        return "measurement_failed"
+    if method == "refined" and region.valid_fraction < config.refine.min_valid_fraction:
+        return "insufficient_refined_vertices"
+    if not np.isfinite([shape.equivalent_diameter_px, shape.major_axis_px, shape.minor_axis_px]).all():
+        return "nonfinite_measurement"
+    return "valid"
 
 
 def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
@@ -310,15 +324,7 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                 shape = getattr(region, method) if region is not None else None
                 status = match["match_status"]
                 if status == "matched":
-                    status = "valid"
-                    if region.touches_border and not segment_config.masks.include_border_regions:
-                        status = "border"
-                    elif shape is None:
-                        status = "measurement_failed"
-                    elif method == "refined" and region.valid_fraction < segment_config.refine.min_valid_fraction:
-                        status = "insufficient_refined_vertices"
-                    elif not np.isfinite([shape.equivalent_diameter_px, shape.major_axis_px, shape.minor_axis_px]).all():
-                        status = "nonfinite_measurement"
+                    status = _measurement_status(region, method, segment_config)
                 rows.append({"series": name, "frame": frame["index"], "order": frame["order"],
                              "timestamp_s": frame["timestamp_s"], "filename": frame["path"],
                              "hole": match["hole"], "method": method, "status": status,
@@ -327,12 +333,38 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                              "major_axis": shape.major_axis_px * factor if shape else None,
                              "minor_axis": shape.minor_axis_px * factor if shape else None,
                              "valid_fraction": region.valid_fraction if region else None})
-            # Coordinates for four fixed overlay crops; dimensions retain all holes.
-            if index is not None and match["hole"] <= 4:
-                contours.append({"series": name, "frame": frame["index"], "hole": match["hole"],
-                                 "shift_yx": shift.tolist(),
-                                 "coarse": result.coarse[index].points.tolist(),
-                                 "refined": result.refined[index].polygon.tolist() if result.refined else []})
+        # Every local detection remains inspectable even without correspondence.
+        matched = {m["region_index"]: m["hole"] for m in matches if m["region_index"] is not None}
+        offset = np.array([crop[0], crop[2]]) if crop else np.zeros(2)
+        strengths = {r["region_id"]: r for r in result.diagnostics.edge_strength_change.get("regions", [])}
+        counts = {"detected": len(result.regions), "complete": 0, "refined": 0, "border": 0, "review": 0}
+        for index, region in enumerate(result.regions):
+            statuses = {method: _measurement_status(region, method, segment_config)
+                        for method in ("coarse", "refined")}
+            counts["complete"] += statuses["coarse"] == "valid"
+            counts["refined"] += statuses["refined"] == "valid"
+            counts["border"] += region.touches_border
+            strength = strengths.get(index + 1)
+            review = bool(strength and strength["change"] < -.02)
+            counts["review"] += review
+            measures = {}
+            for method in ("coarse", "refined"):
+                shape = getattr(region, method)
+                measures[method] = {"ecd": shape.equivalent_diameter_px * factor,
+                                    "area_px2": shape.area_px2} if shape else None
+            refined = result.refined[index] if index < len(result.refined) else None
+            contours.append({"series": name, "frame": frame["index"], "region_id": index + 1,
+                             "hole": matched.get(index), "status": statuses, "measures": measures,
+                             "review": review, "edge_strength": strength,
+                             "refined_fraction": region.valid_fraction,
+                             "coarse": (result.coarse[index].points + offset).tolist(),
+                             "holes": [(h.points + offset).tolist() for h in result.holes[index]],
+                             "refined": (refined.polygon + offset).tolist() if refined is not None else [],
+                             "refined_valid": refined.valid.tolist() if refined is not None else []})
+        frame["contour_counts"] = counts
+        frame["contour_status"] = "available" if counts["complete"] else "unavailable"
+        frame["correspondence_status"] = ("unavailable" if not len(template) else
+                                           "available" if matched else "no_matches")
         now = time.perf_counter()
         if number == 1 or number % 16 == 0 or number == count or now - last_progress >= 30:
             print(f"{label}: contours/CD {number}/{count}; {len(result.regions)} regions; "
@@ -345,28 +377,38 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
     return rows, contours
 
 
-def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisConfig) -> None:
-    from sem_noise.pipeline import analyze_dataset, write_csv
+def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisConfig,
+                   *, raw_frames: list[dict] | None = None, difference_limit: float = 32.0) -> None:
+    """Measure delivered pixels only; never call the acquisition-correction pipeline."""
+    from sem_noise.comparison_metrics import difference_rgb, native_series_statistics
 
-    folder = root / Path(series["frames"][0]["path"]).parent
-    manifest = folder.parent / f"{name}_manifest.csv"
-    write_csv(manifest, [{"site": name, "path": Path(f["path"]).name, "frame_index": i,
-                          "timestamp_s": f["timestamp_s"]} for i, f in enumerate(series["frames"])])
-    noise = replace(noise_config, expected_frames=len(series["frames"]), exclude_duplicates=False,
-                    frame_interval_s=None if series["frames"][0]["timestamp_s"] is not None else noise_config.frame_interval_s)
-    report = folder.parent / f"noise_{name}"
     started = time.perf_counter()
-    print(f"{folder.parent.name}/{name}: noise analysis and report starting", flush=True)
-    result = analyze_dataset(folder, report, config=noise, manifest=manifest,
-                             progress=lambda message: print(message, flush=True))
-    series["noise_report"] = (report / "index.html").relative_to(root).as_posix()
-    series["noise_settings"] = asdict(noise)
-    series["noise"] = result["sites"][0]
-    series["noise_status"] = result["status"]
-    elapsed = time.perf_counter() - started
-    series.setdefault("timings_s", {})["noise_analysis_and_report"] = elapsed
-    print(f"{folder.parent.name}/{name}: noise analysis and report finished in {elapsed:.1f}s "
-          f"({result['status']})", flush=True)
+    print(f"{name}: measuring native uint8 brightness and temporal variation", flush=True)
+    rows, std = native_series_statistics(read_uint8(root / f["path"]) for f in series["frames"])
+    for frame, row in zip(series["frames"], rows):
+        frame.update(row)
+    series["native"] = {"frames": len(rows), "temporal_rms_dn": float(np.sqrt(np.mean(std**2))) if std is not None else None}
+    folder = Path(series["frames"][0]["path"]).parent
+    if std is not None:
+        relative = folder / "temporal_std.npy"
+        np.save(root / relative, std.astype(np.float32), allow_pickle=False)
+        series["temporal_std"] = relative.as_posix()
+    if raw_frames is not None:
+        if len(raw_frames) != len(series["frames"]):
+            raise ValueError("model and raw acquisition counts differ")
+        for frame, raw in zip(series["frames"], raw_frames):
+            if frame["index"] != raw["index"]:
+                raise ValueError("model and raw acquisition indices differ")
+            output, source = read_uint8(root / frame["path"]), read_uint8(root / raw["path"])
+            frame["brightness_delta_dn"] = float(output.mean() - source.mean())
+            relative = folder / "differences" / Path(frame["path"]).name
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(difference_rgb(output, source, difference_limit)).save(root / relative)
+            frame["difference_path"] = relative.as_posix()
+        series["difference_limit_dn"] = difference_limit
+    for key in ("noise_report", "noise_settings", "noise", "noise_status"):
+        series.pop(key, None)
+    series.setdefault("timings_s", {})["native_analysis"] = time.perf_counter() - started
 
 
 def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
@@ -395,9 +437,79 @@ def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
         if segment.needs_model_weights:
             segment.segmentation.device = single_device(segment.segmentation.device, "mask model")
     segment.input.black_level, segment.input.white_level = 0.0, 255.0
+    segment.segmentation.contrast_stretch = None
+    segment.masks.include_border_regions = False
     if config.pixel_size_nm is not None:
         segment.input.pixel_size_nm = config.pixel_size_nm
     return segment
+
+
+def prepare_reference(root: Path, site: dict, segment: SegmentConfig) -> tuple[np.ndarray, np.ndarray]:
+    from sem_segment.pipeline import segment_image
+    from sem_segment.repeatability import correspondence_gate
+
+    reference = read_uint8(root / site["full_average"])
+    site["image_shape"] = list(reference.shape)
+    crop = segment.input.crop
+    if crop and (crop[1] > reference.shape[0] or crop[3] > reference.shape[1]):
+        raise ValueError("Segmentation crop extends outside the saved image")
+    template_image = reference[crop[0]:crop[1], crop[2]:crop[3]] if crop else reference
+    print(f"{site['name']}: locating holes on the saved uint8 full average", flush=True)
+    result = segment_image(template_image.astype(float) / 255, segment)
+    template = np.array([(r.coarse.centroid_y, r.coarse.centroid_x) for r in result.regions
+                         if r.coarse and not r.touches_border]).reshape(-1, 2)
+    site["template_centroids"] = template.tolist()
+    site["correspondence_reference"] = "average128"
+    site["match_gate_px"] = correspondence_gate(template, site.get("requested_match_gate_px"))
+    site["warnings"] = ([] if len(template) else
+                        ["Hole correspondence unavailable: no complete holes detected in the full average. Local contours remain inspectable."])
+    raw = site["series"]["raw"]["frames"]
+    stamps = [f["timestamp_s"] for f in raw]
+    site["series"]["average128"] = {"step": 0, "frames": [{
+        "index": 1, "order": 64.5, "first_acquisition": 1, "last_acquisition": 128,
+        "timestamp_s": float(np.mean(stamps)) if all(t is not None for t in stamps) else None,
+        "path": site["full_average"], "clipped": False}]}
+    return reference, template
+
+
+def save_record(root: Path, record: dict) -> None:
+    from sem_noise.pipeline import write_csv, write_json
+
+    # Contours are stored once, separately from the compact comparison record.
+    sites = [{k: v for k, v in site.items() if k != "contours" or "contours_path" not in site}
+             for site in record["sites"]]
+    write_json(root / "comparison.json", {**record, "sites": sites})
+    write_csv(root / "prediction_ranges.csv", record["prediction_ranges"])
+
+
+def finish_comparison(root: Path, record: dict) -> None:
+    from sem_noise.pipeline import write_csv, write_json
+    from sem_noise.comparison_report import render_comparison, write_tensorboard
+    from sem_segment.repeatability import summarize_observations
+
+    for site in record["sites"]:
+        names = [name for name in site["series"] if name != "average128"]
+        models = [name for name in record["models"] if name in names]
+        holes, summaries = summarize_observations(site["observations"], names, comparison_series=models)
+        site.update(per_hole=holes, repeatability=summaries)
+        for filename, rows in (("observations", site["observations"]), ("per_hole", holes), ("repeatability", summaries)):
+            write_csv(root / site["name"] / f"{filename}.csv", rows)
+        site["contours_path"] = f"{site['name']}/contours.json"
+        write_json(root / site["contours_path"], site["contours"])
+        write_csv(root / site["name"] / "frames.csv", [dict(series=name, **frame)
+                  for name, series in site["series"].items() for frame in series["frames"]])
+        frames = [f for name in names for f in site["series"][name]["frames"]]
+        available = sum(f.get("contour_status") == "available" for f in frames)
+        site["contour_status"] = "available" if available == len(frames) else "partial" if available else "unavailable"
+    record.update(schema_version=3, status="complete", measurement_source="saved uint8 RGB, identical channels")
+    print("Rendering interactive comparison report", flush=True)
+    started = time.perf_counter()
+    render_comparison(root, record)
+    record.setdefault("timings_s", {})["comparison_report"] = time.perf_counter() - started
+    print("Combined comparison report finished; writing TensorBoard images", flush=True)
+    write_tensorboard(root, record)
+    print("TensorBoard comparison finished", flush=True)
+    save_record(root, record)
 
 
 def run(config: ComparisonSettings) -> dict:
@@ -405,15 +517,10 @@ def run(config: ComparisonSettings) -> dict:
     from edge_denoise.infer import Denoiser
     from sem_noise.config import AnalysisConfig, load_config as load_noise
     from sem_noise.io import file_hash, pixel_hash
-    from sem_noise.pipeline import write_csv, write_json
-    from sem_noise.comparison_report import render_comparison, write_tensorboard
-    from sem_segment.pipeline import segment_image
-    from sem_segment.repeatability import correspondence_gate, summarize_observations
 
     files_by_site = validate_inputs(config)
     noise = load_noise(config.analysis_config) if config.analysis_config else AnalysisConfig()
-    if noise.min_frames > 16:
-        raise ValueError("Noise min_frames must be <= 16 for the eight-frame averages")
+    noise = replace(noise, registration="none", compare_direct_registration="none")
     segment = resolve_segmentation_settings(config)
     if segment.refine.device != "cpu":
         from sem_segment.cuda import CudaRefiner
@@ -427,14 +534,13 @@ def run(config: ComparisonSettings) -> dict:
         noise = replace(noise, frame_interval_s=config.frame_interval_s)
     root = config.output_dir
     root.mkdir(parents=True)
-    record = {"schema_version": 2, "study": "real N2N registration/brightness comparison", "status": "running", "settings": config.model_dump(mode="json"),
+    record = {"schema_version": 3, "study": "real N2N registration/brightness comparison", "status": "running", "settings": config.model_dump(mode="json"),
               "segmentation_settings": segment.model_dump(mode="json"), "noise_settings": asdict(noise),
               "unit": "nm" if segment.input.pixel_size_nm else "px", "range_warning": RANGE_WARNING,
               "models": {}, "sites": [], "prediction_ranges": [], "artifacts": [], "warnings": []}
 
     def save() -> None:
-        write_json(root / "comparison.json", record)
-        write_csv(root / "prediction_ranges.csv", record["prediction_ranges"])
+        save_record(root, record)
 
     save()
     try:
@@ -469,32 +575,16 @@ def run(config: ComparisonSettings) -> dict:
                     blocks.clear()
             full = Path(name) / "visual_reference_only" / "full_average.png"
             save_rgb(root / full, np.rint(total / 128).astype(np.uint8))
-            site["full_average"] = full.as_posix()  # Deliberately outside every quantitative series.
+            site["full_average"] = full.as_posix()
             site["series"] = {"raw": {"frames": raw_frames, "step": 0}, **site["series"]}
-            reference = read_uint8(root / site["series"]["average8"]["frames"][0]["path"])
-            if segment.input.crop:
-                y0, y1, x0, x1 = segment.input.crop
-                if y1 > reference.shape[0] or x1 > reference.shape[1]:
-                    raise ValueError("Segmentation crop extends outside the saved image")
-                template_image = reference[y0:y1, x0:x1]
-            else:
-                template_image = reference
-            print(f"{name}: segmenting correspondence template", flush=True)
-            template_result = segment_image(template_image.astype(float) / 255, segment)
-            template = np.array([(r.coarse.centroid_y, r.coarse.centroid_x) for r in template_result.regions
-                                 if r.coarse and (not r.touches_border or segment.masks.include_border_regions)]).reshape(-1, 2)
-            gate = correspondence_gate(template, config.match_gate_px)
-            site.update(template_centroids=template.tolist(), match_gate_px=gate)
-            if not len(template):
-                site["warnings"].append("No template holes detected; repeatability is unavailable.")
-            elif len(template) == 1:
-                site["warnings"].append("One template hole: no neighbour spacing exists; inspect the recorded matching gate.")
+            site["requested_match_gate_px"] = config.match_gate_px
+            reference, template = prepare_reference(root, site, segment)
             for series_name, series in site["series"].items():
                 tracks = registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)
                 for frame, track in zip(series["frames"], tracks):
                     frame.update(track)
                 analyze_series(root, series_name, series, noise)
-                observations, contours = measure_series(root, series_name, series, template, gate, segment)
+                observations, contours = measure_series(root, series_name, series, template, site["match_gate_px"], segment)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
             save()
@@ -547,41 +637,21 @@ def run(config: ComparisonSettings) -> dict:
                     # Reuse RAW translations even if the prediction changes feature positions.
                     frame = {k: raw[k] for k in ("index", "order", "timestamp_s", "dy_px", "dx_px", "registration_status",
                                                  "registration_score", "registration_error")}
-                    frame.update(path=path.as_posix(), **stats, mean_dn=float(quantized.mean()),
-                                 p10_dn=float(np.percentile(quantized, 10)), p90_dn=float(np.percentile(quantized, 90)))
+                    frame.update(path=path.as_posix(), **stats)
                     series["frames"].append(frame)
                     if raw["index"] % 16 == 0:
                         print(f"{site['name']}/{model_name}: {raw['index']}/128", flush=True)
-                reference = read_uint8(root / site["series"]["average8"]["frames"][0]["path"])
+                reference = read_uint8(root / site["full_average"])
                 output_registration_diagnostics(root, reference, series, noise.registration_sigma)
-                analyze_series(root, model_name, series, noise)
+                analyze_series(root, model_name, series, noise, raw_frames=site["series"]["raw"]["frames"],
+                               difference_limit=config.difference_limit_dn)
                 observations, contours = measure_series(root, model_name, series, np.array(site["template_centroids"]),
                                                         site["match_gate_px"], segment)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
                 save()
             del denoiser
-        for site in record["sites"]:
-            holes, summaries = summarize_observations(site["observations"], list(site["series"]))
-            site.update(per_hole=holes, repeatability=summaries)
-            for filename, rows in (("observations", site["observations"]), ("per_hole", holes), ("repeatability", summaries)):
-                write_csv(root / site["name"] / f"{filename}.csv", rows)
-            write_json(root / site["name"] / "contours.json", site["contours"])
-            write_csv(root / site["name"] / "frames.csv", [dict(series=name, **frame)
-                      for name, series in site["series"].items() for frame in series["frames"]])
-        record["status"] = "complete" if all(s["noise_status"] == "complete" for site in record["sites"]
-                                             for s in site["series"].values()) else "partial_failure"
-        started = time.perf_counter()
-        print("Rendering combined comparison report", flush=True)
-        render_comparison(root, record)
-        record.setdefault("timings_s", {})["comparison_report"] = time.perf_counter() - started
-        print(f"Combined comparison report finished in {record['timings_s']['comparison_report']:.1f}s", flush=True)
-        if record["status"] == "complete":
-            started = time.perf_counter()
-            print("Writing TensorBoard comparison", flush=True)
-            write_tensorboard(root, record)
-            record["timings_s"]["tensorboard"] = time.perf_counter() - started
-            print(f"TensorBoard comparison finished in {record['timings_s']['tensorboard']:.1f}s", flush=True)
+        finish_comparison(root, record)
     except Exception as error:
         record.update(status="failed", error=str(error))
         raise
@@ -590,22 +660,190 @@ def run(config: ComparisonSettings) -> dict:
     return record
 
 
-def main() -> int:
+def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None = None,
+            segmentation_config: Path | None = None, render_only: bool = False) -> dict:
+    """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
+    from sem_noise.config import AnalysisConfig
+    from sem_segment.config import Config as SegmentConfig, load_config as load_segment
+
+    record_path = record_path.resolve()
+    source_root, root = record_path.parent, output_dir.resolve()
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    if render_only and record.get("schema_version", 0) < 3:
+        raise ValueError("This older report needs contour remeasurement; omit --render-only")
+    if render_only and (metrology_device is not None or segmentation_config is not None):
+        raise ValueError("--render-only reuses measurements; omit segmentation/device overrides")
+    if root == source_root and not render_only:
+        raise ValueError("Use a new --output-dir for remeasurement; saved images are preserved")
+    if root != source_root:
+        if root.exists() or source_root in root.parents or root in source_root.parents:
+            raise ValueError("Rebuild output must be a new directory outside the original report")
+    paths = set()
+
+    def source(relative: str) -> Path:
+        path = (source_root / relative).resolve()
+        if path == source_root or source_root not in path.parents:
+            raise ValueError(f"Report asset must be inside its directory: {relative}")
+        return path
+
+    for site in record["sites"]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", site["name"]):
+            raise ValueError("Invalid saved site name")
+        paths.add(site["full_average"])
+        if "contours" not in site:
+            site["contours"] = json.loads(source(site["contours_path"]).read_text(encoding="utf-8")) if render_only else []
+        for name, series in site["series"].items():
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+                raise ValueError("Invalid saved series name")
+            for frame in series["frames"]:
+                paths.add(frame["path"])
+                if render_only and frame.get("difference_path"):
+                    paths.add(frame["difference_path"])
+            if render_only and series.get("temporal_std"):
+                paths.add(series["temporal_std"])
+    for relative in paths:
+        if not source(relative).is_file():
+            raise ValueError(f"Missing saved image/measurement: {relative}")
+    if root != source_root:
+        root.mkdir(parents=True)
+        for relative in sorted(paths):
+            destination = root / source(relative).relative_to(source_root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source(relative), destination)
+    record["rebuilt_from"] = str(record_path)
+    record["settings"]["output_dir"] = str(root)
+    if not render_only:
+        segment = load_segment(segmentation_config) if segmentation_config else SegmentConfig.model_validate(record["segmentation_settings"])
+        if metrology_device is not None:
+            segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(), "device": metrology_device})
+        segment.input.black_level, segment.input.white_level = 0., 255.
+        segment.segmentation.contrast_stretch = None
+        segment.masks.include_border_regions = False
+        if segment.refine.device != "cpu" and segment.segmentation.device == "auto":
+            segment.segmentation.device = segment.refine.device
+        record["segmentation_settings"] = segment.model_dump(mode="json")
+        record["unit"] = "nm" if segment.input.pixel_size_nm else "px"
+        noise = AnalysisConfig(registration="none", registration_sigma=record.get("noise_settings", {}).get("registration_sigma", 1.0))
+        record["noise_settings"] = asdict(noise)
+        for site in record["sites"]:
+            site.update(observations=[], contours=[])
+            site.setdefault("requested_match_gate_px", record["settings"].get("match_gate_px"))
+            reference, template = prepare_reference(root, site, segment)
+            # Model correspondence reuses freshly measured raw drift, regardless
+            # of the key order in the saved JSON.
+            names = ["raw", *(name for name in site["series"] if name != "raw")]
+            for name in names:
+                series = site["series"][name]
+                series["timings_s"] = {}
+                raw = site["series"]["raw"]["frames"] if name in record["models"] else None
+                if raw is not None:
+                    for frame, original in zip(series["frames"], raw):
+                        for key in ("dy_px", "dx_px", "registration_status", "registration_score", "registration_error"):
+                            frame[key] = original[key]
+                    output_registration_diagnostics(root, reference, series, noise.registration_sigma)
+                else:
+                    for frame, track in zip(series["frames"], registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)):
+                        frame.update(track)
+                analyze_series(root, name, series, noise, raw_frames=raw,
+                               difference_limit=record["settings"].get("difference_limit_dn", 32.0))
+                observations, contours = measure_series(root, name, series, template, site["match_gate_px"], segment)
+                site["observations"].extend(observations)
+                site["contours"].extend(contours)
+    finish_comparison(root, record)
+    return record
+
+
+def _assignments(values: list[str] | None) -> dict[str, Path]:
+    result = {}
+    for value in values or []:
+        name, separator, path = value.partition("=")
+        if not separator or not name or not path or name in result:
+            raise ValueError("Use a unique NAME=PATH for each override")
+        result[name] = (ROOT / Path(path).expanduser()).resolve()
+    return result
+
+
+def configure_run(args: argparse.Namespace) -> ComparisonSettings:
+    config = load_settings(args.config or ROOT / "edge_denoise/configs/sem_real_compare.yml")
+    if args.site_dir:
+        name = args.site or args.site_dir.name
+        config.sites = {name: SiteSettings(source_dir=(ROOT / args.site_dir.expanduser()).resolve())}
+    elif args.site:
+        if args.site not in config.sites:
+            raise ValueError(f"Unknown site: {args.site}")
+        config.sites = {args.site: config.sites[args.site]}
+    if args.model:
+        unknown = set(args.model) - config.checkpoints.keys()
+        if unknown:
+            raise ValueError(f"Unknown models: {sorted(unknown)}")
+        config.checkpoints = {name: arm for name, arm in config.checkpoints.items() if name in args.model}
+    if args.experiment_prefix:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.experiment_prefix):
+            raise ValueError("Experiment prefix must be a folder name")
+        if Path(args.checkpoint_name).name != args.checkpoint_name:
+            raise ValueError("Checkpoint name must be a filename")
+        for arm in config.checkpoints.values():
+            arm.checkpoint = (ROOT / args.runs_dir / f"{args.experiment_prefix}_{arm.registration}_{arm.brightness}" / args.checkpoint_name).resolve()
+            arm.prepared_manifest = None  # Resolve from the selected checkpoint, not an old example path.
+    for option, field in ((args.checkpoint, "checkpoint"), (args.prepared_manifest, "prepared_manifest")):
+        for name, path in _assignments(option).items():
+            if name not in config.checkpoints:
+                raise ValueError(f"Unknown model override: {name}")
+            setattr(config.checkpoints[name], field, path)
+    for field in ("output_dir", "segmentation_config"):
+        value = getattr(args, field)
+        if value is not None:
+            setattr(config, field, (ROOT / value.expanduser()).resolve())
+    for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn"):
+        value = getattr(args, field)
+        if value is not None:
+            setattr(config, field, value)
+    return ComparisonSettings.model_validate(config.model_dump())
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--config", type=Path, help="Base YAML; defaults to edge_denoise/configs/sem_real_compare.yml")
+    source.add_argument("--from-comparison", type=Path, help="Rebuild from comparison.json and saved uint8 images; no inference")
+    parser.add_argument("--render-only", action="store_true", help="Reuse v3 measurements instead of remeasuring contours")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--site-dir", type=Path, help="Override with one remote acquisition folder")
     parser.add_argument("--site", help="Pilot only this named site from the YAML")
+    parser.add_argument("--model", action="append", help="Include this arm only; repeat for multiple arms")
+    parser.add_argument("--experiment-prefix", help="For example 260921_real_n2n; appends _REGISTRATION_BRIGHTNESS")
+    parser.add_argument("--runs-dir", type=Path, default=Path("runs/edge_denoise"))
+    parser.add_argument("--checkpoint-name", default="ckpt_latest.pt")
+    parser.add_argument("--checkpoint", action="append", metavar="NAME=PATH", help="Override one checkpoint, including older baselines")
+    parser.add_argument("--prepared-manifest", action="append", metavar="NAME=PATH")
+    parser.add_argument("--segmentation-config", type=Path)
     parser.add_argument("--metrology-device", help="Override contour refinement device: cpu, cuda, or cuda:N")
+    parser.add_argument("--device", help="Denoiser device")
+    parser.add_argument("--tile-batch", type=int)
+    parser.add_argument("--difference-limit-dn", type=float)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
     try:
-        config = load_settings(args.config)
-        if args.metrology_device is not None:
-            config = ComparisonSettings.model_validate({**config.model_dump(), "metrology_device": args.metrology_device})
-        if args.site:
-            if args.site not in config.sites:
-                raise ValueError(f"Unknown site: {args.site}")
-            config.sites = {args.site: config.sites[args.site]}
-        record = run(config)
-        print(f"Comparison: {config.output_dir / 'index.html'} ({record['status']})")
+        if args.from_comparison:
+            if not args.output_dir:
+                raise ValueError("--from-comparison requires --output-dir (may be the original directory with --render-only)")
+            if any((args.site_dir, args.site, args.model, args.experiment_prefix, args.checkpoint,
+                    args.prepared_manifest, args.device, args.tile_batch, args.difference_limit_dn)):
+                raise ValueError("Rebuild uses saved images and settings; omit inference/site overrides")
+            record = rebuild(args.from_comparison, args.output_dir, metrology_device=args.metrology_device,
+                             segmentation_config=args.segmentation_config, render_only=args.render_only)
+            output = args.output_dir
+        else:
+            if args.render_only:
+                raise ValueError("--render-only requires --from-comparison")
+            config = configure_run(args)
+            record = run(config)
+            output = config.output_dir
+        print(f"Comparison: {output / 'index.html'} ({record['status']})")
         return 0 if record["status"] == "complete" else 1
     except (ValueError, OSError, RuntimeError, ImportError) as error:
         print(f"Error: {error}", file=sys.stderr)

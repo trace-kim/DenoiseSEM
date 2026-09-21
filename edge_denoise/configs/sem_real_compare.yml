@@ -1,52 +1,54 @@
 # Run on the server from the repository root:
-# python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --site site_01
+# python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --experiment-prefix 260921_real_n2n
 # Six treatments of the SAME real N2N recipe (sem_real_n2n.yml), in experiment order.
-# Replace checkpoint/site paths with the actual remote paths. No retraining.
+# Override directories with --experiment-prefix, --checkpoint NAME=PATH,
+# --site-dir and --output-dir. No retraining.
 # registration/brightness describe TRAINING, not preprocessing for inference.
 # Inline arms are verified against checkpoint data.real_matching. The two older
 # baselines are verified against their original prepared real_dataset.json.
 checkpoints:
   affine_percentile:
-    checkpoint: runs/edge_denoise/sem_real_n2n_affine_percentile/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt
     registration: affine
     brightness: percentile
   translation_percentile:
-    checkpoint: runs/edge_denoise/sem_real_n2n_translation_percentile/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_translation_percentile/ckpt_latest.pt
     registration: translation
     brightness: percentile
   none_percentile:
-    checkpoint: runs/edge_denoise/sem_real_n2n_none_percentile/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_none_percentile/ckpt_latest.pt
     registration: none
     brightness: percentile
   affine_none:
-    checkpoint: runs/edge_denoise/sem_real_n2n_affine_none/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_affine_none/ckpt_latest.pt
     registration: affine
     brightness: none
   translation_none:
-    checkpoint: runs/edge_denoise/sem_real_n2n_translation_none/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_translation_none/ckpt_latest.pt
     registration: translation
     brightness: none
-    # Original translation-prepared baseline; set its real path on the server.
-    prepared_manifest: data/SEM-real-translation/real_dataset.json
+    # The original prepared manifest is resolved from the checkpoint's dataset.
+    # Use --prepared-manifest translation_none=PATH if the data have moved.
   none_none:
-    checkpoint: runs/edge_denoise/sem_real_n2n_none_none/ckpt_latest.pt
+    checkpoint: runs/edge_denoise/260921_real_n2n_none_none/ckpt_latest.pt
     registration: none
     brightness: none
-    prepared_manifest: data/SEM-real-none/real_dataset.json
 sites:
-  site_01: data/SEM-test/site_01
-output_dir: output/sem-real-comparison-pilot
-device: cuda
-# Optional single-GPU contour refinement (separate from denoiser device above).
-# null respects segmentation_config; its default is CPU. Requires CuPy for CUDA.
-metrology_device: null  # Set cuda:0, or pass --metrology-device cuda:0.
+  260904_0947-13: /data/260904_raw_data/test/260904_0947-13
+output_dir: output/260921_real_n2n_comparison
+device: cuda:0
+# Use one H100 for inference and contour refinement. Requires CuPy for CUDA.
+# --metrology-device cpu is available for CPU-only installations.
+metrology_device: cuda:0
 tile_batch: 4
 ema: true
-# Optional existing configs. Default: standard sem_noise analysis including
-# affine diagnostics, applied identically to every series; classical dark-hole
-# segmentation with gradient refinement. Metrology uses native saved pixels.
+# Only registration_sigma / frame_interval_s from a legacy analysis config
+# affect the comparison. Acquisition correction diagnostics are never run.
+# Segmentation: classical dark holes by default; saved uint8 measurement pixels,
+# fixed 0/255 segmentation input scale, no contrast stretching.
 analysis_config: null
 segmentation_config: null
+difference_limit_dn: 32.0
 frame_interval_s: null
 pixel_size_nm: null
 match_gate_px: null

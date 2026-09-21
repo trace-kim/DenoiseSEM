@@ -56,11 +56,14 @@ def match_centroids(template: np.ndarray, observed: np.ndarray, shift_yx: np.nda
     return result
 
 
-def summarize_observations(rows: list[dict], series_names: list[str]) -> tuple[list[dict], list[dict]]:
-    """Sample SD per hole, then median SD over holes usable in every series.
+def summarize_observations(rows: list[dict], series_names: list[str], *,
+                           comparison_series: list[str] | None = None) -> tuple[list[dict], list[dict]]:
+    """Sample SD per hole, then median SD over common comparison holes.
 
     Never pool dimensions across different holes. A hole needs two finite valid
     observations to contribute. Missing observations still count as attempts.
+    By default every series contributes to the common-hole intersection. With
+    comparison_series, other series retain their own independent coverage.
     """
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for row in rows:
@@ -82,16 +85,22 @@ def summarize_observations(rows: list[dict], series_names: list[str]) -> tuple[l
         per_hole.append(result)
     summaries = []
     for method in ("coarse", "refined"):
+        compared = series_names if comparison_series is None else comparison_series
         usable = [{r["hole"] for r in per_hole if r["series"] == name and r["method"] == method
-                   and r["cd_std"] is not None} for name in series_names]
+                   and r["cd_std"] is not None} for name in compared]
         common = set.intersection(*usable) if usable else set()
         for name in series_names:
             all_holes = [r for r in per_hole if r["series"] == name and r["method"] == method]
-            selected = [r for r in all_holes if r["hole"] in common]
+            # Baselines have their own coverage; a failed raw segmentation must
+            # not remove valid holes from a comparison between model outputs.
+            selected = [r for r in all_holes if r["cd_std"] is not None and
+                        (name not in compared or r["hole"] in common)]
             sd = float(np.median([r["cd_std"] for r in selected])) if selected else None
-            summaries.append({"series": name, "method": method, "common_holes": sorted(common),
+            selected_holes = sorted(r["hole"] for r in selected)
+            summaries.append({"series": name, "method": method, "common_holes": selected_holes,
+                              "comparison_series": list(compared) if name in compared else [name],
                               "unit": all_holes[0]["unit"] if all_holes else None,
-                              "common_hole_count": len(common), "median_cd_std": sd,
+                              "common_hole_count": len(selected_holes), "median_cd_std": sd,
                               "median_cd_3sigma": 3 * sd if sd is not None else None,
                               "contributing_observations": sum(r["valid_count"] for r in selected),
                               "valid_count": sum(r["valid_count"] for r in all_holes),

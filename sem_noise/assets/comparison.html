@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SEM · Model comparison</title><link rel="stylesheet" href="viewer/comparison.css"></head>
+<body>
+<header><div><span class="eyebrow">SEM / VISUAL AUDIT</span><h1>What did the denoiser change?</h1>
+<p>Compare the same acquisition. Inspect the image, then its measured boundary.</p></div>
+<label class="site-label">Test site<select id="site" aria-label="Test site"></select></label></header>
+<main>
+<div class="toolbar">
+<label>View<select id="layout"><option value="side">Side by side</option><option value="wipe">Overlapping wipe</option></select></label>
+<label>Images<select id="display"><option value="pixels">Saved uint8 pixels</option><option value="difference">Output − raw difference</option></select></label>
+<label>Contours<select id="contours"><option value="both">Mask + refined</option><option value="coarse">Mask boundary</option><option value="refined">Refined boundary</option><option value="off">Hidden</option></select></label>
+<label class="check"><input type="checkbox" id="linked" checked>Link acquisitions</label>
+<button id="fit">Full image</button><button id="native">1:1 pixels</button><button id="fit-hole" disabled>Fit selected hole</button>
+</div>
+<div id="site-status" class="site-status" role="status"></div>
+<div class="sources">
+<div class="source"><label><b>A</b><select id="source-a" aria-label="Source A"></select></label><span id="meta-a"></span>
+<div class="scrubber"><button id="prev-a" aria-label="Previous frame A">‹</button><input id="frame-a" aria-label="Frame A" type="range" min="1" max="128" value="1"><button id="next-a" aria-label="Next frame A">›</button><button id="play-a" aria-label="Play sequence A">Play</button></div>
+<div class="frame-info"><strong id="label-a"></strong><a id="file-a" target="_blank" rel="noopener">Open native PNG</a></div></div>
+<div class="source"><label><b>B</b><select id="source-b" aria-label="Source B"></select></label><span id="meta-b"></span>
+<div class="scrubber"><button id="prev-b" aria-label="Previous frame B">‹</button><input id="frame-b" aria-label="Frame B" type="range" min="1" max="128" value="1"><button id="next-b" aria-label="Next frame B">›</button><button id="play-b" aria-label="Play sequence B">Play</button></div>
+<div class="frame-info"><strong id="label-b"></strong><a id="file-b" target="_blank" rel="noopener">Open native PNG</a></div></div>
+</div>
+<div id="images" class="images"><div class="image-pane"><svg id="image-a" role="img" aria-label="Image A with measured contours"></svg></div><div class="image-pane" id="pane-b"><svg id="image-b" role="img" aria-label="Image B with measured contours"></svg></div></div>
+<div id="wipe-control" class="wipe-control" hidden><span>A</span><label>Reveal B<input id="wipe" aria-label="Wipe divider" type="range" min="0" max="100" value="50"></label><span>B</span></div>
+<div class="viewer-footer"><span><i class="cyan"></i>Mask <i class="orange"></i>Refined <i class="dashed"></i>Mask fallback <i class="partial"></i>Partial / excluded</span><span>Scroll to zoom · Drag to pan · Click a hole to inspect</span></div>
+<p id="scale-note" class="muted">Shared display scale: 0–255 DN. Native coordinates; no brightness matching or image registration applied.</p>
+<div class="statuses"><p id="status-a" role="status"></p><p id="status-b" role="status"></p></div>
+<section class="measurement"><div><h2>Measured area → equivalent diameter</h2><p id="selection">Select a contour in either image to see exactly what was measured.</p>
+<p class="formula">ECD = 2 × √(area / π)</p><p class="muted">Diameter of a circle with the same area, including subtraction of interior rings. Refined outlines retain the mask boundary where refinement was unavailable.</p>
+<label>Measurement<select id="measure"><option value="coarse">Mask ECD</option><option value="refined">Refined ECD</option></select></label>
+<div id="measurement-values"></div><p id="ecd-coverage" class="muted"></p></div>
+<div><svg id="overview" class="overview" role="img" aria-label="Full-field location of selected region"></svg><p class="muted">Full-field location</p></div></section>
+<div class="chart"><h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="Selected hole ECD across acquisitions"></svg><p class="muted">Click a point to inspect that acquisition. Missing measurements leave gaps. A single full average has no repeatability estimate.</p></div>
+<section><h2>Does the output preserve input brightness?</h2><p id="brightness-legend" class="muted"></p>
+<div class="chart"><h3>Mean intensity · DN</h3><svg id="brightness-chart" role="img" aria-label="Raw and selected image mean brightness"></svg></div>
+<div class="chart"><h3>Output minus its raw input · DN</h3><svg id="delta-chart" role="img" aria-label="Paired brightness difference"></svg></div>
+<p class="muted">Same pixels in each paired uint8 image. Charging trends remain. No gain fitting, offset removal, percentile correction, or detrending.</p></section>
+<details><summary>Geometry and temporal variation</summary>
+<p class="muted">Drift is measured against the same full average. Estimates never warp output pixels. Temporal variation also contains motion, charging and specimen change; lower variation alone does not establish better denoising.</p>
+<div class="chart"><h3>Output minus raw translation · px</h3><p id="drift-legend" class="muted"></p><svg id="drift-chart" role="img" aria-label="Output minus raw drift"></svg></div>
+<div class="variation"><figure><img id="variation-a" alt="Temporal variation of source A"><figcaption id="variation-label-a"></figcaption></figure><figure><img id="variation-b" alt="Temporal variation of source B"><figcaption id="variation-label-b"></figcaption></figure></div></details>
+<details><summary>Measurement coverage and repeatability</summary><p class="muted">For the selected A/B images: median within-hole sample SD on common holes among the selected models. Raw and average8 have separate coverage. Counts refer to contributing holes. This measures repeatability, not accuracy. Failed raw segmentation does not remove model-only results. Exports retain the comparison across all models.</p><div id="coverage"></div></details>
+<details><summary>Run details and exports</summary><p>Every measurement starts from decoded uint8 images. Pre-export range flags describe image production only. Average128 provides correspondence and a visual reference; it is not ground truth.</p>
+<!-- AUDIT_DETAILS -->
+<p><a href="comparison.json">Comparison JSON</a> · <a href="metrics.csv">Summary CSV</a> · <a href="arms.csv">Checkpoint identities</a> · <a href="prediction_ranges.csv">Output range audit</a></p><p id="site-exports"></p></details>
+</main><footer>All measurements use saved uint8 images · Inspect boundaries before interpreting dimensions</footer>
+<noscript>This interactive report requires JavaScript. Native images and measurement exports remain available in this folder.</noscript>
+<script src="viewer/data.js"></script><script src="viewer/comparison.js"></script>
+</body></html>
