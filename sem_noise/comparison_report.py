@@ -97,6 +97,76 @@ def _overlay(image: Image.Image, contours: list[dict]) -> Image.Image:
     return image
 
 
+def _contour_band(path: Path, shape: list[int], name: str, frames: list[dict],
+                  grouped: dict, method: str) -> None:
+    """Export every saved outline in native coordinates, without remeasurement.
+
+    SVG keeps subpixel vertices visible when enlarged. Write one acquisition at
+    a time rather than assembling another copy of the complete contour set.
+    """
+    height, width = shape
+    scale = max(width, height) / 800
+    margin, footer = 18 * scale, 90 * scale
+    orders = [f["order"] for f in frames]
+    first, last = min(orders), max(orders)
+    stops = [(0, (35, 86, 180)), (.5, (20, 145, 150)), (1, (230, 75, 25))]
+
+    def outline(points: list, close: bool = True) -> str:
+        return ("M" + "L".join(f"{x},{y}" for y, x in points) + ("Z" if close else "")) if points else ""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width + 2 * margin}" '
+                     f'height="{height + footer}" viewBox="{-margin} {-margin} {width + 2 * margin} {height + footer}">'
+                     f'<title>{escape(name)}: all {len(frames)} images, {method} contours</title>'
+                     '<desc>Saved outlines in native pixel coordinates. No registration or alignment. '
+                     'Interior rings and unmatched regions included; partial paths stay open. '
+                     'Dashed lines mark partial boundaries or mask fallback.</desc>'
+                     '<rect x="-100%" y="-100%" width="300%" height="300%" fill="white"/>'
+                     '<g fill="none" stroke-width="0.8" stroke-opacity="0.45">')
+        for frame in frames:
+            t = (frame["order"] - first) / (last - first) if last != first else .5
+            (a, start), (b, end) = stops[:2] if t <= .5 else stops[1:]
+            color = "#" + "".join(f"{round(x + (y - x) * (t - a) / (b - a)):02x}" for x, y in zip(start, end))
+            solid, partial = [], []
+            for contour in grouped[name, frame["index"]]:
+                partial.extend(outline(p, False) for p in contour.get("open_paths", []))
+                rings = [outline(p) for p in contour["holes"]]
+                if method == "coarse":
+                    target = solid if contour["status"]["coarse"] == "valid" else partial
+                    target.extend([outline(contour["coarse"]), *rings])
+                elif contour["refined"]:
+                    partial.append(outline(contour["refined"]))
+                    partial.extend(rings)
+                    points, valid = contour["refined"], contour["refined_valid"]
+                    for i, point in enumerate(points):
+                        j = (i + 1) % len(points)
+                        if valid[i] and valid[j]:
+                            solid.append(outline([point, points[j]], False))
+                else:
+                    partial.extend([outline(contour["coarse"]), *rings])
+            stream.write(f'<g data-frame="{frame["index"]}" stroke="{color}">'
+                         f'<title>Image {frame["index"]}; acquisition / block center {frame["order"]}</title>')
+            for paths, dash in ((solid, ""), (partial, ' stroke-dasharray="3 3"')):
+                data = " ".join(p for p in paths if p)
+                if data:
+                    stream.write(f'<path d="{data}"{dash}/>')
+            stream.write('</g>')
+        bar_y, bar_width = height + 12 * scale, width * .6
+        stream.write('</g><defs><linearGradient id="acquisitions">')
+        for offset, rgb in stops:
+            color = "#" + "".join(f"{v:02x}" for v in rgb)
+            stream.write(f'<stop offset="{offset}" stop-color="{color}"/>')
+        stream.write('</linearGradient></defs>'
+                     f'<rect x="0" y="{bar_y}" width="{bar_width}" height="{10 * scale}" '
+                     'fill="url(#acquisitions)" fill-opacity="0.45"/>'
+                     f'<g font-family="sans-serif" font-size="{12 * scale}" fill="#213044">'
+                     f'<text x="0" y="{bar_y + 25 * scale}">{first:g}</text>'
+                     f'<text x="{bar_width}" y="{bar_y + 25 * scale}" text-anchor="end">{last:g}</text>'
+                     f'<text x="0" y="{bar_y + 42 * scale}">Acquisition / block center · {len(frames)} images · native pixels</text>'
+                     f'<text x="0" y="{bar_y + 58 * scale}">Dashed: partial boundary / mask fallback. Overlapping lines accumulate.</text></g></svg>')
+
+
 def render_comparison(root: Path, record: dict) -> Path:
     """Write a static, offline-capable viewer with lazy per-frame contour assets."""
     from .pipeline import write_csv, write_json
@@ -145,6 +215,11 @@ def render_comparison(root: Path, record: dict) -> Path:
             item = {"frames": frames, "step": series["step"],
                     "difference_limit_dn": series.get("difference_limit_dn"),
                     "temporal_rms_dn": series.get("native", {}).get("temporal_rms_dn")}
+            item["contour_bands"] = {}
+            for method in (["coarse"] if view["contour_method"] == "otsu" else ["coarse", "refined"]):
+                relative = f"{site['name']}/viewer/{name}/{method}_band.svg"
+                _contour_band(root / relative, site["image_shape"], name, series["frames"], grouped, method)
+                item["contour_bands"][method] = relative
             if name in maps:
                 relative = f"{site['name']}/viewer/{name}/temporal_std.png"
                 values = np.rint(np.clip(maps[name] / limit, 0, 1) * 255).astype(np.uint8)

@@ -16,6 +16,7 @@
 </div>
 <div id="site-status" class="site-status" role="status"></div>
 <p id="detector-note" class="muted"></p>
+<p id="load-status" class="muted" role="status" aria-live="polite"></p>
 <div class="sources">
 <div class="source"><label><b>A</b><select id="source-a" aria-label="Source A"></select></label><span id="meta-a"></span>
 <div class="scrubber"><button id="prev-a" aria-label="Previous frame A">‹</button><input id="frame-a" aria-label="Frame A" type="range" min="1" max="128" value="1"><button id="next-a" aria-label="Next frame A">›</button><button id="play-a" aria-label="Play sequence A">Play</button></div>
@@ -25,6 +26,7 @@
 <div class="frame-info"><strong id="label-b"></strong><a id="file-b" target="_blank" rel="noopener">Open native PNG</a></div></div>
 </div>
 <div id="images" class="images"><div class="image-pane"><svg id="image-a" role="img" aria-label="Image A with measured contours"></svg></div><div class="image-pane" id="pane-b"><svg id="image-b" role="img" aria-label="Image B with measured contours"></svg></div></div>
+<div class="image-scales"><div id="scale-a"></div><div id="scale-b"></div></div>
 <div id="wipe-control" class="wipe-control" hidden><span>A</span><label>Reveal B<input id="wipe" aria-label="Wipe divider" type="range" min="0" max="100" value="50"></label><span>B</span></div>
 <div class="viewer-footer"><span><i class="cyan"></i>Mask <span id="refinement-legend"><i class="orange"></i>Refined <i class="dashed"></i>Mask fallback </span><i class="partial"></i>Partial / excluded</span><span>Scroll to zoom · Drag to pan · Click a hole to inspect</span></div>
 <p id="scale-note" class="muted">Shared display scale: 0–255 DN. Native coordinates; no brightness matching or image registration applied.</p>
@@ -33,8 +35,12 @@
 <p class="formula">ECD = 2 × √(area / π)</p><p id="measurement-note" class="muted">Diameter of a circle with the same area, including subtraction of interior rings. Refined outlines retain the mask boundary where refinement was unavailable.</p>
 <label>Measurement<select id="measure"><option value="coarse">Mask ECD</option><option value="refined">Refined ECD</option></select></label>
 <div id="measurement-values"></div><p id="ecd-coverage" class="muted"></p></div>
-<div><svg id="overview" class="overview" role="img" aria-label="Full-field location of selected region"></svg><p class="muted">Full-field location</p></div></section>
-<div class="chart"><h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="Selected hole ECD across acquisitions"></svg><p class="muted">Click a point to inspect that acquisition. Missing measurements leave gaps. A single full average has no repeatability estimate.</p></div>
+<div><svg id="overview" class="overview" role="img" aria-label="Full-field location of selected region"></svg><p class="muted">Full-field location</p><div id="scale-overview"></div></div></section>
+<div class="chart"><h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="Selected hole ECD across acquisitions"></svg><div id="ecd-statistics"></div><p class="muted">Solid horizontal lines: mean. Dashed lines and shaded bands: mean ±3σ, where σ is the sample SD of usable measurements for this hole (n−1 denominator). This describes observed variation, not a confidence interval or accuracy. Missing measurements leave gaps; fewer than two have no SD. Click a point to inspect that acquisition.</p></div>
+<details id="band-section"><summary>All-acquisition contour band</summary>
+<div class="band-controls"><label>Source<select id="band-source" aria-label="Contour band source"></select></label><a id="band-file" target="_blank" rel="noopener">Open vector plot</a></div>
+<p id="band-label" class="muted"></p><img id="contour-band" class="contour-band" alt="All detected contours across acquisitions, colored by acquisition" loading="lazy">
+<p class="muted">Every detected outline is included, including unmatched regions and interior rings. Native coordinates preserve acquisition motion; no alignment is applied. Partial paths stay open. The Measurement selector chooses mask or refined boundaries. Open the vector plot to enlarge fine detail.</p></details>
 <section><h2>Does the output preserve input brightness?</h2><p id="brightness-legend" class="muted"></p>
 <div class="chart"><h3>Mean intensity · DN</h3><svg id="brightness-chart" role="img" aria-label="Raw and selected image mean brightness"></svg></div>
 <div class="chart"><h3>Output minus its raw input · DN</h3><svg id="delta-chart" role="img" aria-label="Paired brightness difference"></svg></div>
@@ -42,7 +48,7 @@
 <details><summary>Geometry and temporal variation</summary>
 <p class="muted">Drift is measured against the same full average. Estimates never warp output pixels. Temporal variation also contains motion, charging and specimen change; lower variation alone does not establish better denoising.</p>
 <div class="chart"><h3>Output minus raw translation · px</h3><p id="drift-legend" class="muted"></p><svg id="drift-chart" role="img" aria-label="Output minus raw drift"></svg></div>
-<div class="variation"><figure><img id="variation-a" alt="Temporal variation of source A"><figcaption id="variation-label-a"></figcaption></figure><figure><img id="variation-b" alt="Temporal variation of source B"><figcaption id="variation-label-b"></figcaption></figure></div></details>
+<div class="variation"><figure><img id="variation-a" alt="Temporal variation of source A"><div id="scale-variation-a"></div><figcaption id="variation-label-a"></figcaption></figure><figure><img id="variation-b" alt="Temporal variation of source B"><div id="scale-variation-b"></div><figcaption id="variation-label-b"></figcaption></figure></div></details>
 <details><summary>Measurement coverage and repeatability</summary><p class="muted">For the selected A/B images: median within-hole sample SD on common holes among the selected models. Raw and average8 have separate coverage. Counts refer to contributing holes. This measures repeatability, not accuracy. Failed raw segmentation does not remove model-only results. Exports retain the comparison across all models.</p><div id="coverage"></div></details>
 <details><summary>Run details and exports</summary><p>Every measurement starts from decoded uint8 images. Pre-export range flags describe image production only. Average128 provides correspondence and a visual reference; it is not ground truth.</p>
 <!-- AUDIT_DETAILS -->

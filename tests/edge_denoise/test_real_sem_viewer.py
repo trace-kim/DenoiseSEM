@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
@@ -67,10 +70,14 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
     assert record["segmentation_settings"]["segmentation"]["contrast_stretch"] is None
     viewer = json.loads((tmp_path / "new/viewer/data.js").read_text().split(" = ", 1)[1].rstrip(";\n"))
     assert viewer["sites"][0]["series"]["model"]["frames"][7]["brightness_delta_dn"] == 5
+    band = viewer["sites"][0]["series"]["model"]["contour_bands"]["coarse"]
+    groups = ET.parse(tmp_path / "new" / band).findall(".//{*}g[@data-frame]")
+    assert [int(g.attrib["data-frame"]) for g in groups] == list(range(1, 9))
     original_pngs = {p.relative_to(source.parent): p.read_bytes() for p in source.parent.rglob("*.png")}
     monkeypatch.setattr(compare, "measure_series", forbidden)
     monkeypatch.setattr(compare, "registration_tracks", forbidden)
     compare.rebuild(tmp_path / "new/comparison.json", tmp_path / "rendered", render_only=True)
+    assert (tmp_path / "new" / band).read_bytes() == (tmp_path / "rendered" / band).read_bytes()
     for relative, pixels in original_pngs.items():
         assert (source.parent / relative).read_bytes() == pixels
         assert (tmp_path / "rendered" / relative).read_bytes() == pixels
@@ -78,6 +85,46 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
         compare.rebuild(source, tmp_path / "invalid", render_only=True)
     with pytest.raises(ValueError, match="new --output-dir"):
         compare.rebuild(source, source.parent)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed for asynchronous viewer regression checks")
+def test_comparison_viewer_keeps_decoded_images_contours_and_statistics_in_sync(tmp_path):
+    source = saved_record(tmp_path / "source")
+    report = tmp_path / "report"
+    compare.rebuild(source, report, metrology_device="cpu", tensorboard=False)
+    result = subprocess.run([shutil.which("node"), str(Path(__file__).with_name("comparison_controls.cjs")), str(report)],
+                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("method", ["coarse", "refined"])
+def test_contour_band_keeps_all_frames_holes_unmatched_regions_and_open_paths(tmp_path, method):
+    from sem_noise.comparison_report import _contour_band
+
+    region = {"hole": None, "coarse": [[1.25, 2.5], [3, 4], [5, 6]],
+              "holes": [[[2, 3], [2, 4], [3, 4]]], "open_paths": [[[6, 7], [7, 8]]],
+              "refined": [[1.5, 2.75], [3, 4.25], [5, 6.25]], "refined_valid": [True, True, False],
+              "status": {"coarse": "valid", "refined": "insufficient_refinement"}}
+    frames = [{"index": 9, "order": 9}, {"index": 29, "order": 29}]
+    groups = {("model", 9): [region], ("model", 29): [region, region]}
+    destination = tmp_path / "band.svg"
+    _contour_band(destination, [64, 64], "model", frames, groups, method)
+    svg = ET.parse(destination)
+    acquisitions = svg.findall(".//{*}g[@data-frame]")
+    assert [g.attrib["data-frame"] for g in acquisitions] == ["9", "29"]
+    for group, count in zip(acquisitions, [1, 2]):
+        paths = group.findall("{*}path")
+        data = " ".join(p.attrib["d"] for p in paths)
+        assert data.count("M3,2L4,2L4,3Z") == count  # Interior rings, with no ID requirement.
+        assert data.count("M7,6L8,7") == count
+        assert "M7,6L8,7Z" not in data  # Never close a border path.
+        if method == "coarse":
+            assert data.count("M2.5,1.25L4,3L6,5Z") == count
+        else:
+            solid = next(p.attrib["d"] for p in paths if "stroke-dasharray" not in p.attrib)
+            assert solid.count("M2.75,1.5L4.25,3") == count
+            assert "6.25,5" not in solid  # Failed refinement remains dashed.
+    assert "Acquisition / block center" in destination.read_text(encoding="utf-8")
 
 
 def test_all_contours_survive_without_template_and_crop_offset_is_applied_once(tmp_path):

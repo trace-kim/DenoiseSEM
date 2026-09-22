@@ -8,7 +8,12 @@
   const ns = "http://www.w3.org/2000/svg";
   const letters = ["a", "b"], colors = ["#14778d", "#d47732"];
   const state = {site: 0, names: ["raw", ""], indices: [0, 0], acquisition: 1,
-    active: 1, view: [], contours: [[], []], selected: null, revision: 0, playing: null};
+    active: 1, view: [], contours: [[], []], selected: null, revision: 0, playing: null, ready: false};
+  // Requested controls are separate from the fully decoded pair on screen.
+  const wanted = {site: 0, names: ["raw", ""], indices: [0, 0], acquisition: 1, display: "pixels"};
+  let rendering = false;
+  const imageCache = new Map();
+  const imageBudget = 64 * 1024 * 1024;
   const pending = new Map(), cacheOrder = [];
   const site = () => report.sites[state.site];
   const series = p => site().series[state.names[p]];
@@ -35,15 +40,17 @@
   }
   function atAcquisition(name, acquisition) {
     if (name === "average128") return 0;
-    return Math.max(0, Math.min(site().series[name].frames.length - 1,
+    return Math.max(0, Math.min(report.sites[wanted.site].series[name].frames.length - 1,
       name === "average8" ? Math.floor((acquisition - 1) / 8) : acquisition - 1));
   }
   function setFrame(p, index) {
     state.active = p;
-    state.indices[p] = Math.max(0, Math.min(series(p).frames.length - 1, index));
-    if (state.names[p] !== "average128") {
-      state.acquisition = frame(p).first_acquisition ?? frame(p).index;
-      if ($("linked").checked) state.indices[1 - p] = atAcquisition(state.names[1 - p], state.acquisition);
+    const frames = report.sites[wanted.site].series[wanted.names[p]].frames;
+    wanted.indices[p] = Math.max(0, Math.min(frames.length - 1, index));
+    if (wanted.names[p] !== "average128") {
+      const f = frames[wanted.indices[p]];
+      wanted.acquisition = f.first_acquisition ?? f.index;
+      if ($("linked").checked) wanted.indices[1 - p] = atAcquisition(wanted.names[1 - p], wanted.acquisition);
     }
     render();
   }
@@ -62,8 +69,9 @@
         script.remove(); pending.delete(f.overlay_key);
         cacheOrder.push(f.overlay_key);
         while (cacheOrder.length > 24) {
-          const old = cacheOrder.shift();
-          if (!letters.some((_, p) => frame(p).overlay_key === old)) delete window.SEM_CONTOURS[old];
+          // Displayed arrays have their own references; evict cache entries
+          // even when their frame is visible, keeping the cache bounded.
+          delete window.SEM_CONTOURS[cacheOrder.shift()];
         }
         resolve(window.SEM_CONTOURS[f.overlay_key] || []);
       };
@@ -73,6 +81,56 @@
     pending.set(f.overlay_key, promise);
     return promise;
   }
+  function loadImage(path) {
+    if (imageCache.has(path)) {
+      const entry = imageCache.get(path);
+      imageCache.delete(path); imageCache.set(path, entry);
+      return entry.promise;
+    }
+    const image = new Image();
+    const entry = {bytes: 0, promise: null};
+    entry.promise = new Promise((resolve, reject) => {
+      image.onload = async () => {
+        try {
+          await image.decode();
+          entry.bytes = image.naturalWidth * image.naturalHeight * 4;
+          let bytes = [...imageCache.values()].reduce((n, e) => n + e.bytes, 0);
+          for (const [key, old] of imageCache) {
+            if (bytes <= imageBudget) break;
+            bytes -= old.bytes; imageCache.delete(key);
+          }
+          resolve(image);
+        } catch (error) {imageCache.delete(path); reject(error);}
+      };
+      image.onerror = () => {imageCache.delete(path); reject(new Error(`Image unavailable: ${path}. Check the report assets.`));};
+      image.src = path;
+    });
+    imageCache.set(path, entry);
+    return entry.promise;
+  }
+  function surface(root) {
+    const group = svg("g"), raster = svg("foreignObject", {x: -.5, y: -.5});
+    const canvas = document.createElement("canvas"), overlay = svg("g");
+    raster.append(canvas); group.append(raster, overlay); root.append(group);
+    return {group, raster, canvas, overlay, path: null};
+  }
+  const surfaces = letters.map(l => surface($("image-" + l)));
+  const overview = surface($("overview"));
+  const overviewBox = svg("rect", {fill: "none", stroke: "#f9dc6d", "stroke-width": 2, "vector-effect": "non-scaling-stroke"});
+  overview.overlay.append(overviewBox);
+  const wipeDefs = svg("defs"), wipeClip = svg("clipPath", {id: "wipe-clip", clipPathUnits: "userSpaceOnUse"});
+  const wipeRect = svg("rect"), wipeLine = svg("line", {stroke: "white", "stroke-width": 2, "vector-effect": "non-scaling-stroke", "pointer-events": "none"});
+  wipeClip.append(wipeRect); wipeDefs.append(wipeClip); $("image-a").append(wipeDefs, wipeLine);
+  function paint(target, image, path) {
+    if (target.path === path) return;
+    const [height, width] = site().shape;
+    if (target.canvas.width !== width) target.canvas.width = width;
+    if (target.canvas.height !== height) target.canvas.height = height;
+    target.raster.setAttribute("width", width); target.raster.setAttribute("height", height);
+    // Synchronous replacement of opaque, decoded pixels; never clear a frame.
+    target.canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+    target.path = path;
+  }
   function selected(c, p) {
     const s = state.selected;
     return s && (s.hole != null ? c.hole === s.hole :
@@ -80,12 +138,6 @@
   }
   function layer(p) {
     const group = svg("g", {"data-source": state.names[p], "data-frame": frame(p).index});
-    const [height, width] = site().shape;
-    const f = frame(p);
-    const path = $("display").value === "difference" && f.difference_path ? f.difference_path : f.path;
-    const image = svg("image", {href: path, x: -.5, y: -.5, width, height});
-    image.addEventListener("error", () => {$("status-" + letters[p]).textContent = "Image unavailable. Check the report assets.";});
-    group.append(image);
     const mode = $("contours").value, measure = $("measure").value;
     if (mode === "off") return group;
     for (const c of state.contours[p]) {
@@ -118,33 +170,36 @@
     }
     return group;
   }
-  function drawImages() {
+  function drawImages(overlays = true) {
+    if (!state.ready) return;
     const wipe = $("layout").value === "wipe";
     $("images").classList.toggle("wipe", wipe);
     $("pane-b").hidden = wipe;
     $("wipe-control").hidden = !wipe;
     letters.forEach((l, p) => {
       const root = $("image-" + l);
-      root.replaceChildren(); root.setAttribute("viewBox", state.view.join(" "));
-      root.append(layer(p));
+      root.setAttribute("viewBox", state.view.join(" "));
+      if (overlays) surfaces[p].overlay.replaceChildren(layer(p));
     });
+    const second = surfaces[1].group, parent = $(wipe ? "image-a" : "image-b");
+    if (second.parentNode !== parent) parent.append(second);
+    wipeLine.style.display = wipe ? "" : "none";
     if (wipe) {
       const root = $("image-a"), [x, y, width, height] = state.view;
       const divider = x + width * Number($("wipe").value) / 100;
-      const defs = svg("defs"), clip = svg("clipPath", {id: "wipe-clip", clipPathUnits: "userSpaceOnUse"});
-      clip.append(svg("rect", {x: divider, y, width: x + width - divider, height})); defs.append(clip); root.append(defs);
-      const second = layer(1); second.setAttribute("clip-path", "url(#wipe-clip)"); root.append(second);
-      root.append(svg("line", {x1: divider, x2: divider, y1: y, y2: y + height, stroke: "white", "stroke-width": 2, "vector-effect": "non-scaling-stroke", "pointer-events": "none"}));
-    }
+      for (const [key, value] of Object.entries({x: divider, y, width: x + width - divider, height})) wipeRect.setAttribute(key, value);
+      second.setAttribute("clip-path", "url(#wipe-clip)");
+      for (const [key, value] of Object.entries({x1: divider, x2: divider, y1: y, y2: y + height})) wipeLine.setAttribute(key, value);
+      root.append(wipeLine);
+    } else second.removeAttribute("clip-path");
     drawOverview();
   }
   function drawOverview() {
     const root = $("overview"), [height, width] = site().shape;
     const p = state.selected?.pane ?? state.active;
-    root.replaceChildren(); root.setAttribute("viewBox", `0 0 ${width} ${height}`);
-    root.append(svg("image", {href: frame(p).path, x: -.5, y: -.5, width, height}));
-    root.append(svg("rect", {x: state.view[0], y: state.view[1], width: state.view[2], height: state.view[3],
-      fill: "none", stroke: "#f9dc6d", "stroke-width": 2, "vector-effect": "non-scaling-stroke"}));
+    root.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    paint(overview, state.nativeImages[p], frame(p).path);
+    for (const [key, value] of Object.entries({x: state.view[0], y: state.view[1], width: state.view[2], height: state.view[3]})) overviewBox.setAttribute(key, value);
   }
   function clampView() {
     const [h, w] = site().shape;
@@ -174,6 +229,7 @@
     fitHole(); drawMeasurements(); drawCharts();
   }
   function drawMeasurements() {
+    if (!state.ready) return;
     const target = $("measurement-values"); target.replaceChildren();
     if (!state.selected) {$("selection").textContent = "Select a contour in either image to see exactly what was measured."; return;}
     const s = state.selected, method = $("measure").value;
@@ -199,6 +255,7 @@
     if (!all.length) {root.append(svg("text", {x: 20, y: 75}, message)); return;}
     const raw = site().series.raw.frames, x0 = time(raw[0]), x1 = time(raw.at(-1));
     const values = all.map(p => p.y);
+    for (const t of tracks) if (t.stats?.sd != null) values.push(t.stats.mean - 3 * t.stats.sd, t.stats.mean + 3 * t.stats.sd);
     let lo = Math.min(...values), hi = Math.max(...values);
     if (zero) {const a = Math.max(Math.abs(lo), Math.abs(hi), .1); lo = -a; hi = a;}
     const pad = Math.max((hi - lo) * .1, .05); lo -= pad; hi += pad;
@@ -214,6 +271,18 @@
       root.append(svg("text", {x: x(value), y: 166, "text-anchor": "middle"}, fmt(value, x1 - x0 < 10 ? 2 : 0)));
     }
     root.append(svg("text", {x: 570, y: 183, "text-anchor": "middle"}, timeTitle()));
+    for (const track of tracks) {
+      if (track.stats?.mean == null) continue;
+      const {mean, sd} = track.stats;
+      if (sd != null) {
+        const low = mean - 3 * sd, high = mean + 3 * sd;
+        root.append(svg("rect", {x: 65, y: y(high), width: 1015, height: y(low) - y(high), fill: track.color, "fill-opacity": .07, class: "sigma-band"}));
+        for (const v of [low, high]) root.append(svg("line", {x1: 65, x2: 1080, y1: y(v), y2: y(v), stroke: track.color, "stroke-dasharray": "6 4", class: "sigma-limit"}));
+      }
+      const line = svg("line", {x1: 65, x2: 1080, y1: y(mean), y2: y(mean), stroke: track.color, class: "mean-line"});
+      line.append(svg("title", {}, `${track.label}: mean ${fmt(mean)}; 3σ ${fmt(sd == null ? null : 3 * sd)} ${report.unit}`));
+      root.append(line);
+    }
     if (zero) root.append(svg("line", {x1: 65, x2: 1080, y1: y(0), y2: y(0), stroke: "#929da7", "stroke-dasharray": "3 3"}));
     if (selectedX != null) root.append(svg("line", {x1: x(selectedX), x2: x(selectedX), y1: 15, y2: 147, class: "cursor"}));
     for (const track of tracks) {
@@ -229,7 +298,7 @@
         dot.append(svg("title", {}, `${track.label} · ${q.description} · ${fmt(q.y)}`));
         dot.addEventListener("click", () => {
           if (track.pane != null) setFrame(track.pane, q.index);
-          else {state.names[0] = "raw"; $("source-a").value = "raw"; setFrame(0, q.index);}
+          else {wanted.names[0] = "raw"; $("source-a").value = "raw"; setFrame(0, q.index);}
         }); root.append(dot);
       }
     }
@@ -238,7 +307,32 @@
     return site().series[name].frames.map((f, index) => ({x: time(f), y: f[key], index,
       description: name === "average8" ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.index}`}));
   }
+  function statistics(points) {
+    const values = points.map(p => p.y).filter(Number.isFinite), n = values.length;
+    const mean = n ? values.reduce((sum, v) => sum + v, 0) / n : null;
+    const sd = n > 1 ? Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (n - 1)) : null;
+    return {n, mean, sd};
+  }
+  function drawStatistics(tracks) {
+    const root = $("ecd-statistics"); root.replaceChildren();
+    if (state.selected?.hole == null) return;
+    const table = document.createElement("table"), head = document.createElement("tr");
+    ["Source", "Usable / total", `Mean (${report.unit})`, `σ, sample SD (${report.unit})`, `3σ (${report.unit})`, `Mean ±3σ (${report.unit})`].forEach(value => {
+      const th = document.createElement("th"); th.textContent = value; head.append(th);
+    }); table.append(head);
+    for (const t of tracks) {
+      const {n, mean, sd} = t.stats, tr = document.createElement("tr");
+      const range = sd == null ? "Unavailable (n < 2)" : `${fmt(mean - 3 * sd)} … ${fmt(mean + 3 * sd)}`;
+      [t.label, `${n} / ${t.points.length}`, fmt(mean), fmt(sd), fmt(sd == null ? null : 3 * sd), range].forEach((value, i) => {
+        const td = document.createElement("td"); td.textContent = value;
+        if (!i) td.style.color = t.color;
+        tr.append(td);
+      }); table.append(tr);
+    }
+    root.append(table);
+  }
   function drawCharts() {
+    if (!state.ready) return;
     const tracks = [{label: "Raw", color: "#8995a1", points: points("raw", "mean_dn")}];
     letters.forEach((_, p) => {if (state.names[p] !== "raw") tracks.push({label: label(state.names[p]), color: colors[p], pane: p, points: points(state.names[p], "mean_dn")});});
     $("brightness-legend").textContent = "Gray: raw input · Teal: A · Orange: B. Eight-frame means are located at block centers.";
@@ -254,9 +348,11 @@
       return {label: `${letters[p].toUpperCase()} ${label(state.names[p])}`, color: colors[p], pane: p,
         points: series(p).frames.map((f, index) => ({x: time(f), y: values.get(f.index), index, description: `acquisition ${f.order}`}))};
     });
+    for (const track of ecd) track.stats = statistics(track.points);
     $("ecd-title").textContent = hole != null ? `Hole ${hole} · ${method === "coarse" ? "Mask" : "Refined"} ECD (${report.unit})` : "Diameter across acquisitions";
     $("ecd-coverage").textContent = hole != null ? ecd.map((t, p) => `${letters[p].toUpperCase()}: ${t.points.filter(q => Number.isFinite(q.y)).length}/${series(p).frames.length} usable observations`).join(" · ") : "";
     chart("ecd-chart", ecd, {selectedX: time(frame(state.active)), message: "Select a matched hole to inspect its diameter across acquisitions."});
+    drawStatistics(ecd);
   }
   function drawCoverage() {
     const target = $("coverage"); target.replaceChildren();
@@ -289,13 +385,87 @@
     }
     target.append(table);
   }
+  function colorbar(id, title, low, high, difference = false) {
+    const root = $(id); root.replaceChildren(); root.className = "colorbar";
+    const heading = document.createElement("span"), ramp = document.createElement("div"), ticks = document.createElement("div");
+    heading.className = "colorbar-title"; heading.textContent = title;
+    ramp.className = "colorbar-ramp" + (difference ? " difference" : "");
+    ramp.setAttribute("role", "img"); ramp.setAttribute("aria-label", `${title}: ${low} to ${high} DN${difference ? "; blue negative, white zero, red positive" : ""}`);
+    ticks.className = "colorbar-ticks";
+    for (const value of [low, (low + high) / 2, high]) {
+      const tick = document.createElement("span"); tick.textContent = fmt(value, Number.isInteger(value) ? 0 : 2); ticks.append(tick);
+    }
+    root.append(heading, ramp, ticks);
+  }
+  function drawBand() {
+    if (!state.ready || !$("band-section").open) return;
+    const name = $("band-source").value, s = site().series[name], method = $("measure").value;
+    const path = s?.contour_bands?.[method];
+    $("contour-band").hidden = !path; $("band-file").hidden = !path;
+    if (path) {
+      if ($("contour-band").getAttribute("src") !== path) $("contour-band").src = path;
+      $("band-file").href = path;
+    }
+    const count = s?.frames.reduce((n, f) => n + (f.contour_counts?.detected || 0), 0) || 0;
+    $("band-label").textContent = path ? `${label(name)} · ${method === "coarse" ? "Mask" : "Refined"} boundaries · ${count} detected regions across ${s.frames.length} images.` +
+      (s.frames.length === 1 ? " Single reference: no temporal band." : "") + (!count ? " No contours detected." : "") : "Contour band unavailable; regenerate this report with --render-only.";
+  }
   async function render() {
-    const revision = ++state.revision;
+    ++state.revision;
+    wanted.display = $("display").value;
+    letters.forEach((l, p) => {
+      const s = report.sites[wanted.site].series[wanted.names[p]];
+      $("frame-" + l).max = s.frames.length; $("frame-" + l).value = wanted.indices[p] + 1;
+      ["frame-", "prev-", "next-", "play-"].forEach(prefix => $(prefix + l).disabled = s.frames.length < 2);
+    });
+    $("load-status").textContent = "Loading requested images… Displayed labels describe the pair currently on screen.";
+    if (rendering) return;
+    rendering = true;
+    try {
+      let revision;
+      do {
+        revision = state.revision;
+        const next = {...wanted, names: [...wanted.names], indices: [...wanted.indices]};
+        const nextSite = report.sites[next.site];
+        const loaded = await Promise.allSettled(letters.map(async (_, p) => {
+          const f = nextSite.series[next.names[p]].frames[next.indices[p]];
+          const path = next.display === "difference" && f.difference_path ? f.difference_path : f.path;
+          const [native, image, contours] = await Promise.all([loadImage(f.path), loadImage(path),
+            loadContours(f).then(data => ({data}), error => ({data: [], error: error.message}))]);
+          for (const img of [native, image]) if (img.naturalWidth !== nextSite.shape[1] || img.naturalHeight !== nextSite.shape[0]) throw new Error(`Unexpected image dimensions: ${path}`);
+          return {native, image, contours, path};
+        }));
+        if (revision !== state.revision) continue;
+        const failure = loaded.find(r => r.status === "rejected");
+        if (failure) {
+          stop(); $("load-status").textContent = `${failure.reason.message} Previous images and their labels remain displayed.`;
+          continue;
+        }
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        if (revision !== state.revision) continue;
+        const changedSite = !state.ready || next.site !== state.site;
+        Object.assign(state, next);
+        if (changedSite) {
+          state.selected = null; $("fit-hole").disabled = true;
+          state.view = [0, 0, site().shape[1], site().shape[0]];
+          $("band-source").replaceChildren(...Object.keys(site().series).map(n => option(n, label(n))));
+          $("band-source").value = state.names[1];
+        }
+        state.nativeImages = loaded.map(r => r.value.native);
+        state.contours = loaded.map(r => r.value.contours.data);
+        state.ready = true;
+        loaded.forEach((r, p) => paint(surfaces[p], r.value.image, r.value.path));
+        present();
+        loaded.forEach((r, p) => {if (r.value.contours.error) $("status-" + letters[p]).textContent = r.value.contours.error;});
+        $("load-status").textContent = "";
+      } while (revision !== state.revision);
+    } finally {rendering = false;}
+  }
+  function present() {
     letters.forEach((l, p) => {
       const f = frame(p), s = series(p), arm = report.arms.find(a => a.arm === state.names[p]);
-      $("frame-" + l).max = s.frames.length; $("frame-" + l).value = state.indices[p] + 1;
-      ["frame-", "prev-", "next-", "play-"].forEach(prefix => $(prefix + l).disabled = s.frames.length < 2);
-      $("label-" + l).textContent = frameLabel(p) + (f.clipped ? " · CLIPPED" : "");
+      $("label-" + l).textContent = `${frameLabel(p)}${f.clipped ? " · CLIPPED" : ""} · ${label(state.names[p])}`;
+      $("label-" + l).title = $("label-" + l).textContent;
       $("file-" + l).href = f.path;
       $("meta-" + l).textContent = arm ? `Training: ${arm.registration} registration / ${arm.brightness} brightness · checkpoint step ${arm.step}${arm.ema ? " · EMA" : ""}` : "Uncorrected raw acquisitions · uint8 measurement pixels";
       const c = f.contour_counts || {};
@@ -307,55 +477,52 @@
         `${l.toUpperCase()}: ${c.complete || 0} complete Otsu regions; ${c.border || 0} partial at the border. Otsu threshold ${fmt(f.otsu_threshold_dn)} DN. No edge refinement.`;
       if (c.detected && f.correspondence_status !== "available") $("status-" + l).textContent += " Cross-frame matching unavailable; local contours remain visible.";
       $("variation-" + l).hidden = !s.temporal_image;
-      if (s.temporal_image) $("variation-" + l).src = s.temporal_image;
+      if (s.temporal_image && $("variation-" + l).getAttribute("src") !== s.temporal_image) $("variation-" + l).src = s.temporal_image;
       $("variation-label-" + l).textContent = `${l.toUpperCase()} · ${label(state.names[p])}: ` + (s.temporal_image ?
         `native temporal variation; shared display 0–${fmt(s.temporal_limit_dn, 2)} DN. ${s.frames.length} observations.` : "Single reference: no temporal variation estimate.");
-      state.contours[p] = []; // Never show the previous image's contour while loading.
+      const difference = state.display === "difference" && Boolean(f.difference_path);
+      const limit = s.difference_limit_dn;
+      colorbar("scale-" + l, `${l.toUpperCase()} · ${difference ? "Output − raw (DN)" : "Saved intensity (DN)"}`, difference ? -limit : 0, difference ? limit : 255, difference);
+      $("scale-variation-" + l).hidden = !s.temporal_image;
+      if (s.temporal_image) colorbar("scale-variation-" + l, "Temporal sample SD (DN)", 0, s.temporal_limit_dn);
     });
-    $("scale-note").textContent = $("display").value === "pixels" ? "Shared display scale: 0–255 DN. Native coordinates; no brightness matching or image registration applied." :
+    colorbar("scale-overview", "Saved intensity (DN)", 0, 255);
+    $("scale-note").textContent = state.display === "pixels" ? "Shared display scale: 0–255 DN. Native coordinates; no brightness matching or image registration applied." :
       "Model panes show output minus the same raw acquisition (blue: negative; white: zero; red: positive). Baseline panes retain their pixels. Contours still measure the original saved image. " +
       letters.map((_, p) => series(p).difference_limit_dn ? `${letters[p].toUpperCase()}: ±${series(p).difference_limit_dn} DN; larger differences saturate for display.` : "").join(" ");
-    drawImages(); drawMeasurements(); drawCharts(); drawCoverage();
-    const loaded = await Promise.allSettled(letters.map((_, p) => loadContours(frame(p))));
-    if (revision !== state.revision) return;
-    loaded.forEach((result, p) => {
-      if (result.status === "fulfilled") state.contours[p] = result.value;
-      else $("status-" + letters[p]).textContent = result.reason.message;
-    });
-    drawImages(); drawMeasurements();
-  }
-  function changeSite() {
-    stop(); state.selected = null; state.indices = [0, 0]; state.acquisition = 1;
-    const names = Object.keys(site().series);
-    state.names = ["raw", names.find(n => report.arms.some(a => a.arm === n)) || "average8"];
-    letters.forEach((l, p) => {$("source-" + l).replaceChildren(...names.map(n => option(n, label(n)))); $("source-" + l).value = state.names[p];});
-    state.view = [0, 0, site().shape[1], site().shape[0]];
-    $("fit-hole").disabled = true;
     $("site-status").textContent = `Report generated · contour availability: ${site().contour_status} · ${site().hole_count} reference hole IDs. ${site().warnings.join(" ")}`;
     $("site-exports").replaceChildren();
     ["observations.csv", "per_hole.csv", "repeatability.csv", "frames.csv", "contours.json"].forEach(file => {const a = document.createElement("a"); a.href = `${site().name}/${file}`; a.textContent = file; $("site-exports").append(a, " · ");});
-    drawCoverage(); render();
+    drawImages(); drawMeasurements(); drawCharts(); drawCoverage(); drawBand();
+  }
+  function changeSite() {
+    stop(); wanted.indices = [0, 0]; wanted.acquisition = 1;
+    const names = Object.keys(report.sites[wanted.site].series);
+    wanted.names = ["raw", names.find(n => report.arms.some(a => a.arm === n)) || "average8"];
+    letters.forEach((l, p) => {$("source-" + l).replaceChildren(...names.map(n => option(n, label(n)))); $("source-" + l).value = wanted.names[p];});
+    render();
   }
   letters.forEach((l, p) => {
-    $("source-" + l).addEventListener("change", e => {stop(); state.names[p] = e.target.value; state.indices[p] = atAcquisition(state.names[p], state.acquisition); render();});
+    $("source-" + l).addEventListener("change", e => {stop(); wanted.names[p] = e.target.value; wanted.indices[p] = atAcquisition(wanted.names[p], wanted.acquisition); render();});
     $("frame-" + l).addEventListener("input", e => {stop(); setFrame(p, Number(e.target.value) - 1);});
-    $("prev-" + l).onclick = () => {stop(); setFrame(p, state.indices[p] - 1);};
-    $("next-" + l).onclick = () => {stop(); setFrame(p, state.indices[p] + 1);};
+    $("prev-" + l).onclick = () => {stop(); setFrame(p, wanted.indices[p] - 1);};
+    $("next-" + l).onclick = () => {stop(); setFrame(p, wanted.indices[p] + 1);};
     $("play-" + l).onclick = () => {
       const wasPlaying = state.playing && state.active === p; stop();
       if (wasPlaying) return;
       state.active = p; $("play-" + l).textContent = "Pause";
-      state.playing = setInterval(() => setFrame(p, (state.indices[p] + 1) % series(p).frames.length), 350);
+      state.playing = setInterval(() => {if (!rendering) setFrame(p, (wanted.indices[p] + 1) % series(p).frames.length);}, 350);
     };
     const root = $("image-" + l);
     let down = null;
     root.addEventListener("wheel", e => {
+      if (!state.ready) return;
       e.preventDefault(); const point = new DOMPoint(e.clientX, e.clientY).matrixTransform(root.getScreenCTM().inverse());
       const k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
       state.view = [point.x + (state.view[0] - point.x) * k, point.y + (state.view[1] - point.y) * k, state.view[2] * k, state.view[3] * k];
-      clampView(); drawImages();
+      clampView(); drawImages(false);
     }, {passive: false});
-    root.addEventListener("pointerdown", e => {if (e.button === 0) down = {x: e.clientX, y: e.clientY, view: [...state.view], target: e.target, moved: false};});
+    root.addEventListener("pointerdown", e => {if (state.ready && e.button === 0) down = {x: e.clientX, y: e.clientY, view: [...state.view], target: e.target, moved: false};});
     root.addEventListener("pointermove", e => {
       if (!down || !e.buttons) return;
       const dx = e.clientX - down.x, dy = e.clientY - down.y;
@@ -363,7 +530,7 @@
       down.moved = true; root.setPointerCapture(e.pointerId);
       const rect = root.getBoundingClientRect(), scale = Math.min(rect.width / down.view[2], rect.height / down.view[3]);
       state.view = [down.view[0] - dx / scale, down.view[1] - dy / scale, down.view[2], down.view[3]];
-      clampView(); drawImages();
+      clampView(); drawImages(false);
     });
     root.addEventListener("pointerup", e => {
       if (!down) return;
@@ -374,17 +541,21 @@
     root.addEventListener("pointercancel", () => {down = null;});
   });
   $("site").replaceChildren(...report.sites.map((s, i) => option(i, s.name)));
-  $("site").onchange = e => {state.site = Number(e.target.value); changeSite();};
-  ["layout", "display", "contours"].forEach(id => $(id).onchange = () => render());
-  $("linked").onchange = () => {if ($("linked").checked) {state.indices[1 - state.active] = atAcquisition(state.names[1 - state.active], state.acquisition); render();}};
-  $("wipe").oninput = drawImages;
-  $("measure").onchange = () => {drawImages(); drawMeasurements(); drawCharts();};
-  $("fit").onclick = () => {state.view = [0, 0, site().shape[1], site().shape[0]]; drawImages();};
-  $("native").onclick = () => {const r = $("image-a").getBoundingClientRect(); const [x, y, w, h] = state.view;
-    state.view = [x + w / 2 - r.width / 2, y + h / 2 - r.height / 2, r.width, r.height]; clampView(); drawImages();};
+  $("site").onchange = e => {wanted.site = Number(e.target.value); changeSite();};
+  $("display").onchange = () => render();
+  $("layout").onchange = () => drawImages(false);
+  $("contours").onchange = () => drawImages();
+  $("linked").onchange = () => {if ($("linked").checked) {wanted.indices[1 - state.active] = atAcquisition(wanted.names[1 - state.active], wanted.acquisition); render();}};
+  $("wipe").oninput = () => drawImages(false);
+  $("measure").onchange = () => {drawImages(); drawMeasurements(); drawCharts(); drawBand();};
+  $("band-source").onchange = drawBand;
+  $("band-section").ontoggle = drawBand;
+  $("fit").onclick = () => {if (state.ready) {state.view = [0, 0, site().shape[1], site().shape[0]]; drawImages(false);}};
+  $("native").onclick = () => {if (!state.ready) return; const r = $("image-a").getBoundingClientRect(); const [x, y, w, h] = state.view;
+    state.view = [x + w / 2 - r.width / 2, y + h / 2 - r.height / 2, r.width, r.height]; clampView(); drawImages(false);};
   $("fit-hole").onclick = fitHole;
   document.addEventListener("keydown", e => {if (["INPUT", "SELECT", "BUTTON"].includes(e.target.tagName)) return;
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {e.preventDefault(); stop(); setFrame(state.active, state.indices[state.active] + (e.key === "ArrowLeft" ? -1 : 1));}});
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {e.preventDefault(); stop(); setFrame(state.active, wanted.indices[state.active] + (e.key === "ArrowLeft" ? -1 : 1));}});
   if (maskOnly) {
     $("contours").value = "coarse";
     for (const entry of $("contours").options) entry.disabled = ["both", "refined"].includes(entry.value);

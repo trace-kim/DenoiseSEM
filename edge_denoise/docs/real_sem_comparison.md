@@ -55,13 +55,18 @@ After this first rebuild, changes to presentation can reuse the new measurements
 python tools/real_sem_compare.py \
   --from-comparison output/260921_real_n2n_otsu_comparison/comparison.json \
   --output-dir output/260921_real_n2n_otsu_comparison \
-  --render-only
+  --render-only --no-tensorboard
 ```
 
 `--render-only` accepts a new output directory too. It does not estimate drift,
 segment images, or load a model. It requires the revised report format.
 Detector/device overrides require remeasurement and cannot accompany
 `--render-only`.
+
+This also upgrades existing reports with stable image navigation, per-hole mean
+and 3σ ECD statistics, all-acquisition contour bands, and image colorbars. Saved
+PNGs and measurements are reused unchanged. Reload `index.html` after rebuilding
+(hard-refresh a browser tab that still has the older viewer cached).
 
 For repeated contour experiments on a **completed** report, use:
 
@@ -244,6 +249,13 @@ permits local scripts; preserve its assets and image subfolders.
   block. Moving a block slider selects its first raw/model acquisition; each of
   the eight individual acquisitions remains accessible. Labels always identify
   the exact range. Average128 is static.
+  The displayed pair stays visible until both requested images are decoded and
+  their contours are ready; images, outlines, labels and measurements switch
+  together without a blank frame or fade. Rapid requests are coalesced to the
+  latest position. A missing image keeps the previous pair and reports the error.
+  Zoom, pan and wipe reuse the displayed raster. The decoded-image cache is
+  limited to 64 MiB, in addition to the displayed pair and current load; the
+  viewer does not preload an entire sequence.
 - The overlapping wipe has a separate divider slider. Each image and its own
   contour overlay are clipped together. Contours can be hidden, mask-only,
   refined-only, or both for the current method. Otsu has mask-only or hidden
@@ -251,10 +263,26 @@ permits local scripts; preserve its assets and image subfolders.
 - Clicking a region highlights the measured area and fits the complete hole
   with padding. The small full-field view shows its location. ECD, area, status,
   refined coverage and an acquisition-linked diameter trace explain each number.
+  The ECD plot includes separate A/B means and mean ±3 sample-SD bands, with
+  a table of usable/total observations, mean, σ, 3σ and interval endpoints in the
+  report's px or nm units. Statistics use the selected hole's valid observations;
+  missing values are excluded and fewer than two observations have no SD.
+  These bands describe observed variation, not confidence intervals or accuracy.
+- Expand **All-acquisition contour band** and choose a source to overlay every
+  saved outline, colored by acquisition/block center. The Measurement selector
+  chooses mask or refined boundaries. Unmatched regions and interior rings are
+  included; partial paths stay open and failed refinement stays dashed. Native
+  coordinates preserve motion. **Open vector plot** opens a standalone SVG with
+  an acquisition colorbar that preserves subpixel vertices when enlarged. The
+  single average128 reference has no temporal band.
 - Brightness tracks directly compare native output and raw means. The paired
   difference retains any brightness bias. Image differences use a common signed
   DN scale; saturation affects the display only. Differences may include removed
   structure and are not a ground-truth noise estimate.
+  Each main pane and the overview have labeled intensity colorbars (0–255 DN).
+  Difference panes use the saved symmetric DN limit, with blue = negative,
+  white = zero, red = positive; raw/average panes retain their intensity bars.
+  Temporal variation maps have a shared 0-to-maximum sample-SD colorbar in DN.
 - Expand geometry/temporal variation or coverage when needed. Detailed warnings,
   treatment identities, CSVs and JSON stay in the details section.
 
