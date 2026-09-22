@@ -52,7 +52,12 @@ def configure_reproducibility(seed: int, mode: str) -> None:
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
 
-def select_device(requested: str | torch.device | None = None) -> torch.device:
+def select_device(requested: str | torch.device | None = None, *, isolated: bool = True) -> torch.device:
+    """Bind a device; training workers require isolation unless explicitly opted out.
+
+    An allocation-aware single-process client can select a logical CUDA index
+    with isolated=False without rewriting scheduler-provided GPU visibility.
+    """
     if requested is None and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is unavailable; refusing to start an accidentally CPU-bound training run. "
@@ -61,7 +66,7 @@ def select_device(requested: str | torch.device | None = None) -> torch.device:
     device = torch.device(requested) if requested is not None else torch.device("cuda")
     if device.type == "cuda":
         count = torch.cuda.device_count()
-        if count != 1:
+        if isolated and count != 1:
             raise RuntimeError(
                 "The training worker expected one isolated CUDA GPU but found {}. "
                 "Launch through runctl or restrict CUDA_VISIBLE_DEVICES before starting "
@@ -69,6 +74,8 @@ def select_device(requested: str | torch.device | None = None) -> torch.device:
             )
         if device.index is None:
             device = torch.device("cuda", 0)
+        if device.index >= count:
+            raise RuntimeError(f"CUDA device {device.index} is outside the {count} visible devices")
         torch.cuda.set_device(device)
     return device
 

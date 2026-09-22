@@ -66,15 +66,19 @@ def train(
     batch_size: Optional[int] = typer.Option(None, min=1, help="Samples per GPU per microstep."),
     accumulation_steps: Optional[int] = typer.Option(None, min=1, help="Microsteps per optimizer update."),
     precision: Optional[str] = typer.Option(None, help="fp32 | bf16 (CUDA only)."),
-    device: Optional[str] = typer.Option(None, help="auto | cpu | cuda."),
+    device: Optional[str] = typer.Option(None, help="auto | cpu | cuda | cuda:N (logical index within allocation)."),
     seed: Optional[int] = typer.Option(None, min=0, help="Base training seed."),
     init_checkpoint: Optional[Path] = typer.Option(None, help="Weights-only initialization for a fresh run."),
+    init_mode: Optional[str] = typer.Option(None, help="strict | image_to_hybrid; explicit checkpoint channel adaptation."),
     dataset_dir: Optional[Path] = typer.Option(None, help="Override data.dataset_dir."),
     image_size: Optional[int] = typer.Option(None, min=8, help="Override native training crop size."),
     lr: Optional[float] = typer.Option(None, min=0.0, help="Override learning rate."),
     real_registration: Optional[str] = typer.Option(None, help="Inline real target geometry: none | translation | affine."),
     real_brightness: Optional[str] = typer.Option(None, help="Inline real target brightness: none | percentile; full-frame B to A."),
     registration_failure: Optional[str] = typer.Option(None, help="Inline registration failure: error | skip; skip keeps frames and disables geometry for pairs involving a failed frame."),
+    real_matching_cache: Optional[Path] = typer.Option(None, help="Explicit shared matching measurements; create if absent, verify before reuse."),
+    profile: Optional[bool] = typer.Option(None, "--profile/--no-profile", help="Synchronize CUDA stage timings for a short performance pilot."),
+    cpu_threads: Optional[int] = typer.Option(None, min=1, help="Bound PyTorch/OpenCV CPU threads."),
 ) -> None:
     """Train an edge_denoise model as described by a config file."""
     import sys
@@ -87,10 +91,12 @@ def train(
     raw = loaded.model_dump()
     overrides = {"run_dir": run_dir, "max_steps": max_steps, "batch_size": batch_size,
                  "accumulation_steps": accumulation_steps, "precision": precision,
-                 "device": device, "seed": seed, "init_checkpoint": init_checkpoint, "lr": lr}
+                 "device": device, "seed": seed, "init_checkpoint": init_checkpoint, "init_mode": init_mode,
+                 "lr": lr, "profile": profile, "cpu_threads": cpu_threads}
     raw["training"].update({name: value for name, value in overrides.items() if value is not None})
     raw["data"].update({name: value for name, value in
-                        (("dataset_dir", dataset_dir), ("image_size", image_size)) if value is not None})
+                        (("dataset_dir", dataset_dir), ("image_size", image_size),
+                         ("real_matching_cache", real_matching_cache)) if value is not None})
     if registration_failure is not None and real_registration is None and not raw["data"].get("real_matching"):
         raise typer.BadParameter("--registration-failure requires inline matching; specify --real-registration")
     if real_registration is not None or real_brightness is not None or registration_failure is not None:
@@ -269,7 +275,7 @@ def distill_targets(
 @app.command()
 def denoise(
     checkpoint: Path = typer.Option(..., help="Checkpoint (.pt) to denoise with."),
-    out: Path = typer.Option(..., help="Output directory for PNG previews and a float32 TIFF."),
+    out: Path = typer.Option(..., help="Output directory; real uint8 measurements use the saved PNG, TIFF is diagnostic only."),
     input: Optional[Path] = typer.Option(
         None, help="A noisy measurement image of any size >= the training crop."
     ),
@@ -326,9 +332,14 @@ def denoise(
 
     clean_path: Path | None = None
     frame01 = None
+    native_input = None
     if input is not None:
         measurement_path = input
         stem = input.stem
+        if denoiser.config.data.white_level is not None:
+            from .real_data import read_native
+
+            native_input = read_native(input)
     else:
         burst_dir = resolve_burst_dir(dataset)
         if (burst_dir / "real_dataset.json").is_file():
@@ -344,6 +355,7 @@ def denoise(
                     denoiser.config.data.white_level != levels["white"] or denoiser.config.data.black_level != levels["black"]):
                 raise typer.BadParameter("checkpoint and prepared dataset normalization differ")
             frame01 = normalize_native(source.frames[replica], levels["black"], levels["white"])
+            native_input = np.asarray(source.frames[replica])
         else:
             measurement_path = burst_dir / "noisy" / f"{source_index:05d}_{replica:05d}.png"
             if not measurement_path.is_file():
@@ -352,6 +364,7 @@ def denoise(
             clean_path = candidate if candidate.is_file() else None
         stem = f"src{source_index:05d}_rep{replica:05d}"
 
+    real_uint8 = native_input is not None and native_input.dtype == np.uint8
     def to_model(frame01: "np.ndarray") -> torch.Tensor:  # [H, W] in [0, 1] -> [1, H, W] in [-1, 1]
         return torch.from_numpy(frame01 * 2.0 - 1.0).to(torch.float32)[None]
 
@@ -359,7 +372,8 @@ def denoise(
         frame01 = denoiser.load_measurement(measurement_path) if frame01 is None else frame01
         margin = denoiser.default_margin if margin is None else margin
         stride = max(1, min(stride, image_size - 2 * margin))
-        denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch, margin=margin)
+        denoised01 = denoiser.denoise_full(frame01, stride=stride, tile_batch=tile_batch, margin=margin,
+                                        clip_output=not real_uint8)
         measurement_chw, denoised_chw = to_model(frame01), to_model(denoised01)
         typer.echo(
             f"denoised the full {frame01.shape[0]}x{frame01.shape[1]} frame "
@@ -371,12 +385,25 @@ def denoise(
             raise typer.BadParameter(f"input must be at least {image_size}x{image_size}")
         y, x = (frame01.shape[0] - image_size) // 2, (frame01.shape[1] - image_size) // 2
         measurement_chw = to_model(frame01[y:y + image_size, x:x + image_size])
-        denoised_chw = denoiser.denoise(measurement_chw[None])[0]
-    save_model_image(measurement_chw, out / f"{stem}_input.png")
-    save_model_image(denoised_chw, out / f"{stem}_denoised.png")
+        denoised_chw = denoiser.denoise(measurement_chw[None], clip_output=not real_uint8)[0]
+    if real_uint8:
+        from .uint8_output import prediction_uint8
+
+        if not full:
+            native_input = native_input[y:y + image_size, x:x + image_size]
+        exported01 = denoised01 if full else (denoised_chw[0].numpy().astype(np.float64) + 1) / 2
+        pixels, audit = prediction_uint8(exported01,
+                                         denoiser.config.data.black_level, denoiser.config.data.white_level)
+        out.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(np.repeat(native_input[..., None], 3, axis=2).astype(np.uint8)).save(out / f"{stem}_input.png")
+        Image.fromarray(np.repeat(pixels[..., None], 3, axis=2)).save(out / f"{stem}_denoised.png")
+        (out / f"{stem}_prediction_range.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    else:
+        save_model_image(measurement_chw, out / f"{stem}_input.png")
+        save_model_image(denoised_chw, out / f"{stem}_denoised.png")
     quantitative = ((denoised_chw[0].clamp(-1, 1).numpy() + 1) / 2).astype(np.float32)
     Image.fromarray(quantitative).save(out / f"{stem}_denoised.tif")
-    typer.echo(f"wrote 2 preview PNG(s) and normalized float32 TIFF to {out}")
+    typer.echo(f"wrote PNG images and a diagnostic normalized float32 TIFF to {out}; use saved uint8 PNGs for real-SEM measurements")
 
     if clean_path is not None:
         if full:

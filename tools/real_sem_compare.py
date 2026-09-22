@@ -57,6 +57,7 @@ class ComparisonSettings(BaseModel):
     checkpoints: dict[str, ComparisonArm]
     sites: dict[str, Path | SiteSettings]
     output_dir: Path
+    evaluation_split: Literal["val", "test"] = "test"
     analysis_config: Path | None = None
     segmentation_config: Path | None = None
     # Older programmatic callers retain the current method. The shipped real
@@ -207,11 +208,14 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
     content_split_hash = hashlib.sha256(json.dumps(splits, sort_keys=True).encode()).hexdigest()
     excluded = sorted({f["sha256"] for site in manifest["sites"] if site["split"] in ("train", "val")
                        for f in site["frames"]})
+    validation = sorted({f["sha256"] for site in manifest["sites"] if site["split"] == "val"
+                         for f in site["frames"]})
     return {"registration": registration, "brightness": brightness, "settings_source": source,
             "prepared_manifest": str(manifest_path), "prepared_manifest_sha256": digest,
             "checkpoint_dataset_fingerprint": checkpoint_digest, "raw_content_split_sha256": content_split_hash,
             "split_site_counts": {split: len(sites) for split, sites in splits.items()},
-            "train_val_content_hashes": excluded, "prepared_registration": prepared,
+            "train_val_content_hashes": excluded, "validation_content_hashes": validation,
+            "prepared_registration": prepared,
             "inline_matching": matching.model_dump(mode="json") if matching else None,
             "warnings": [] if checkpoint_digest else ["Older checkpoint has no dataset fingerprint; manifest linkage cannot be verified."]}
 
@@ -231,6 +235,15 @@ def validate_comparable_arm(metadata: dict, model_config: dict, previous: dict[s
     for field in ("channels", "black_level", "white_level"):
         if model_config["data"][field] != first["config"]["data"][field]:
             raise ValueError(f"Comparison arms have different data.{field}")
+
+
+def validate_evaluation_content(metadata: dict, content_hashes: set[str], split: str) -> None:
+    """Validation must be recorded held-out content; tests exclude train AND val."""
+    if split == "val":
+        if not content_hashes or not content_hashes.issubset(set(metadata["validation_content_hashes"])):
+            raise ValueError("Validation comparison requires acquisitions from this checkpoint's recorded validation sites")
+    elif content_hashes & set(metadata["train_val_content_hashes"]):
+        raise ValueError("A comparison test acquisition appears in this checkpoint's train/validation sites")
 
 
 def registration_tracks(reference: np.ndarray, paths: list[Path], sigma: float) -> list[dict]:
@@ -728,9 +741,11 @@ def run(config: ComparisonSettings) -> dict:
                 metadata = checkpoint_arm_metadata(arm, denoiser)
                 model_config = denoiser.config.model_dump(mode="json")
                 validate_comparable_arm(metadata, model_config, record["models"])
-                forbidden = set(metadata.pop("train_val_content_hashes"))
-                if any(f["content_sha256"] in forbidden for site in record["sites"] for f in site["series"]["raw"]["frames"]):
-                    raise ValueError("A comparison test acquisition appears in this checkpoint's train/validation sites")
+                content_hashes = {f["content_sha256"] for site in record["sites"] for f in site["series"]["raw"]["frames"]}
+                validate_evaluation_content(metadata, content_hashes, config.evaluation_split)
+                metadata.pop("train_val_content_hashes")
+                metadata.pop("validation_content_hashes", None)
+                metadata["evaluation_split"] = config.evaluation_split
                 record["warnings"].extend(f"{model_name}: {warning}" for warning in metadata["warnings"])
                 black, white = denoiser.config.data.black_level, denoiser.config.data.white_level
                 if black is None and white is None:
@@ -1032,7 +1047,7 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
         if value is not None:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
     for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
-                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard"):
+                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
@@ -1052,6 +1067,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contours-only", action="store_true", help="Remeasure contours; reuse saved brightness/noise/drift analysis")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--site-dir", type=Path, help="Override with one remote acquisition folder")
+    parser.add_argument("--evaluation-split", "--split", choices=("val", "test"),
+                        help="val requires recorded validation acquisitions; test excludes train and validation content")
     parser.add_argument("--site", help="Pilot only this named site from the YAML")
     parser.add_argument("--model", action="append", help="Include this arm only; repeat for multiple arms")
     parser.add_argument("--experiment-prefix", help="For example 260921_real_n2n; appends _REGISTRATION_BRIGHTNESS")
@@ -1086,7 +1103,7 @@ def main() -> int:
             if not args.output_dir:
                 raise ValueError("--from-comparison requires --output-dir (may be the original directory with --render-only)")
             if any((args.site_dir, args.site, args.model, args.experiment_prefix, args.checkpoint, args.only_checkpoints,
-                    args.prepared_manifest, args.device, args.tile_batch, args.difference_limit_dn)):
+                    args.prepared_manifest, args.device, args.tile_batch, args.difference_limit_dn, args.evaluation_split)):
                 raise ValueError("Rebuild uses saved images and settings; omit inference/site overrides")
             record = rebuild(args.from_comparison, args.output_dir, metrology_device=args.metrology_device,
                              segmentation_config=args.segmentation_config, contour_method=args.contour_method,

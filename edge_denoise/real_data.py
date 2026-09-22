@@ -386,10 +386,12 @@ class RealPairFactory(PairFactory):
     def __init__(self, cache: BurstCache, config: Config, *, seed: int):
         assert cache.real_metadata is not None
         objective = config.objective
-        if (objective.representation != "image" or objective.target not in ("noisy", "noisy_mean")
+        if (objective.target not in ("noisy", "noisy_mean")
                 or objective.gradient_target != "target" or objective.fusion is not None
                 or objective.target_debias_peak is not None or config.training.defect_augment is not None):
-            raise ValueError("Real SEM supports image representation, noisy/noisy_mean targets, gradient_target=target, and optional consistency; synthetic oracle/debias/augmentation/fusion settings are unsupported")
+            raise ValueError("Real SEM supports noisy/noisy_mean targets, gradient_target=target, and optional image-output consistency; synthetic oracle/debias/augmentation/fusion settings are unsupported")
+        if objective.representation == "gradient" and objective.lambda_consistency > 0:
+            raise ValueError("Real SEM gradient representation does not support consistency: use an image-output model with consistency_domain=gradient")
         self.cache, self.image_size, self.batch_size = cache, config.data.image_size, config.training.batch_size
         self.target, self.need_second = objective.target, objective.lambda_consistency > 0
         self._rng = np.random.default_rng(seed)

@@ -54,9 +54,13 @@ class DataConfig(_StrictModel):
     black_level: float | None = Field(default=None, allow_inf_nan=False)
     white_level: float | None = Field(default=None, allow_inf_nan=False)
     real_matching: RealMatchingConfig | None = None  # None preserves the prepared-data workflow.
+    # Explicit reuse across runs; dataset content and matching settings are verified.
+    real_matching_cache: Path | None = None
 
     @model_validator(mode="after")
     def _check_holdout_fractions(self) -> "DataConfig":
+        if self.real_matching_cache is not None and self.real_matching is None:
+            raise ValueError("data.real_matching_cache requires data.real_matching")
         if (self.black_level is None) != (self.white_level is None):
             raise ValueError("provide both data.black_level and data.white_level, or neither")
         if self.white_level is not None and self.white_level <= self.black_level:
@@ -174,6 +178,10 @@ class ObjectiveConfig(_StrictModel):
     precision lever; it needs a second independent frame per sample and trades
     bias for variance, so it defaults to off.
 
+    ``consistency_domain: gradient`` keeps an image-output model and compares
+    Sobel fields after mapping the second image prediction to the first view.
+    It needs positive consistency weight and retains fidelity supervision.
+
     ``gradient_target`` lets the GRADIENT term chase a different reference than
     the image term (the target-ladder experiment; the image term always keeps
     ``target``).  ``"target"`` is the historical behavior (same tensor for both
@@ -200,6 +208,8 @@ class ObjectiveConfig(_StrictModel):
     lambda_image: float = Field(default=1.0, ge=0.0)
     lambda_gradient: float = Field(default=4.0, ge=0.0)
     lambda_consistency: float = Field(default=0.0, ge=0.0)
+    # For image outputs: compare images, or Sobel fields AFTER matching images.
+    consistency_domain: Literal["image", "gradient"] = "image"
     loss: Literal["l2", "l1"] = "l2"
     # Burst fusion (registered subset mean in, one raw drifted frame as the
     # target, dose conditioning); None = the single-frame objectives above.
@@ -226,6 +236,9 @@ class ObjectiveConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _check_weights(self) -> "ObjectiveConfig":
+        if self.consistency_domain == "gradient" and (
+                self.representation == "gradient" or self.lambda_consistency <= 0):
+            raise ValueError("gradient consistency requires image/hybrid representation and lambda_consistency > 0")
         if self.representation == "gradient":
             if self.lambda_image != 0.0:
                 raise ValueError(
@@ -332,6 +345,7 @@ class TrainingConfig(_StrictModel):
     # burst_diffusion checkpoints with a matching backbone.  Optimizer, EMA,
     # RNG, and data-stream state all start fresh. Ignored when resuming a run.
     init_checkpoint: Path | None = None
+    init_mode: Literal["strict", "image_to_hybrid"] = "strict"
     batch_size: int = Field(default=8, ge=1)
     accumulation_steps: int = Field(default=1, ge=1)
     precision: Literal["fp32", "bf16"] = "fp32"
@@ -344,7 +358,9 @@ class TrainingConfig(_StrictModel):
     ema: bool = True
     ema_rate: float = Field(default=0.999, ge=0.0, lt=1.0)
     seed: int = Field(default=0, ge=0)
-    device: Literal["auto", "cpu", "cuda"] = "auto"
+    device: str = Field(default="auto", pattern=r"^(auto|cpu|cuda(:[0-9]+)?)$")
+    profile: bool = False  # Synchronize CUDA stage timings during remote pilots.
+    cpu_threads: int | None = Field(default=None, ge=1)
     log_every: int = Field(default=50, ge=1)
     val_every: int = Field(default=1000, ge=1)
     val_images: int = Field(default=8, ge=1)
@@ -390,6 +406,9 @@ class Config(_StrictModel):
 
     @model_validator(mode="after")
     def _check_structure(self) -> "Config":
+        if self.training.init_mode == "image_to_hybrid" and (
+                self.objective.representation != "hybrid" or self.training.init_checkpoint is None):
+            raise ValueError("image_to_hybrid initialization requires hybrid representation and init_checkpoint")
         if self.objective.fusion is not None and self.training.defect_augment is not None:
             raise ValueError("training.defect_augment is not supported with objective.fusion")
         image_size = self.data.image_size

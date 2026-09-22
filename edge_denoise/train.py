@@ -56,13 +56,15 @@ from burst_diffusion.data import BurstCache
 from burst_diffusion.ema import EMAHelper, ema_parameters
 from burst_diffusion.metrics import psnr
 from runctl.control import StopController, configure_reproducibility
+from runctl.run_logging import atomic_write_json
 
 from .config import Config
 from .data import PairFactory
 from .distributed import DistributedRuntime
 from .fusion import FusionBatch, FusionFactory, build_alignment, warp_prediction
 from .gradient import sobel
-from .model import EdgeDenoiser, build_model
+from .model import EdgeDenoiser, build_model, initialize_from_image
+from .timing import TrainingTimings
 
 logger = logging.getLogger("edge_denoise.train")
 
@@ -75,7 +77,8 @@ TENSORBOARD_DIR_NAME = "tb"
 # while TensorBoard merged both histories -- exactly what happened to the
 # 2026-09-02 ft_consist run); ``overwrite=True`` deletes them first.
 RUN_ARTIFACT_GLOBS = ("ckpt_*.pt", "provenance.json", "config.yml", "real_matching.json",
-                      "registration_report.html", "registration_frames.csv", TENSORBOARD_DIR_NAME)
+                      "registration_report.html", "registration_frames.csv", "timings.json",
+                      "training_status.json", TENSORBOARD_DIR_NAME)
 
 
 def _masked_mean(values: torch.Tensor, valid: torch.Tensor | None, margin: int) -> torch.Tensor:
@@ -125,6 +128,7 @@ def save_checkpoint(
     dataset_fingerprint: str | None = None,
 ) -> None:
     """Atomically write a keyed checkpoint (tensors + primitives only)."""
+    model_device = next(model.parameters()).device
     payload = {
         "format": CHECKPOINT_FORMAT,
         "kind": CHECKPOINT_KIND,
@@ -134,8 +138,8 @@ def save_checkpoint(
         "ema": ema.state_dict() if ema is not None else None,
         "optimizer": optimizer.state_dict(),
         "torch_rng": torch.get_rng_state(),
-        "cuda_rng": (None if distributed_state is not None else
-                     torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
+        "cuda_rng": (None if distributed_state is not None or model_device.type != "cuda"
+                     else [torch.cuda.get_rng_state(model_device)]),
         "factory": factory.state_dict(),
     }
     if distributed_state is not None:
@@ -197,11 +201,19 @@ class Trainer:
         self.config = config
         self.runtime = DistributedRuntime(config.training.device)
         self.device = self.runtime.device
+        self.timings = TrainingTimings(self.device, synchronize=config.training.profile)
+        if config.training.cpu_threads is not None:
+            torch.set_num_threads(config.training.cpu_threads)
+            if config.data.real_matching is not None:
+                import cv2
+
+                cv2.setNumThreads(config.training.cpu_threads)
         if config.training.precision == "bf16" and self.device.type != "cuda":
             raise ValueError("training.precision=bf16 requires CUDA; use fp32 for CPU runs")
         if config.training.precision == "bf16" and not torch.cuda.is_bf16_supported():
             raise ValueError("this CUDA device does not support bfloat16")
         self.run_dir = Path(config.training.run_dir)
+        resume_payload = load_checkpoint(resume_from) if resume_from is not None else None
         if resume_from is None:
             self.runtime.on_primary(lambda: self._claim_run_dir(overwrite=overwrite))
         self.runtime.on_primary(lambda: self.run_dir.mkdir(parents=True, exist_ok=True))
@@ -212,6 +224,7 @@ class Trainer:
         configure_reproducibility(config.training.seed, "repeatable")
 
         logger.info("loading dataset %s (prepared real arrays are content-verified)", config.data.dataset_dir)
+        started = time.perf_counter()
         self.cache = BurstCache(
             config.data.dataset_dir,
             channels=config.data.channels,
@@ -221,6 +234,7 @@ class Trainer:
             test_fraction=config.data.test_fraction,
             split_seed=config.data.split_seed,
         )
+        self.timings.add("dataset_verification", started)
         if self.cache.real_metadata is not None:
             levels = self.cache.real_metadata["normalization"]
             if config.data.white_level is not None and (
@@ -234,6 +248,8 @@ class Trainer:
             raise ValueError("explicit intensity levels require a prepared real SEM dataset")
         if config.data.real_matching is not None and self.cache.real_metadata is None:
             raise ValueError("data.real_matching requires a prepared real SEM dataset")
+        if resume_payload is not None:
+            self._check_resume(resume_payload)
         summary = self.cache.summary()
         self.real_comparison_examples = []
         if config.training.real_comparison_images:
@@ -251,6 +267,7 @@ class Trainer:
         objective = config.objective
         self.factory: PairFactory | FusionFactory
         factory_seed = config.training.seed + self.runtime.rank
+        started = time.perf_counter()
         if self.cache.real_metadata is not None:
             from .real_data import RealPairFactory
 
@@ -259,7 +276,9 @@ class Trainer:
             else:
                 from .real_matching import MatchedRealPairFactory
 
-                self.factory = MatchedRealPairFactory(self.cache, config, seed=factory_seed)
+                measurements = None if resume_payload is None else resume_payload["factory"].get("matching_measurements")
+                self.factory = MatchedRealPairFactory(self.cache, config, seed=factory_seed,
+                                                      measurements=measurements)
         elif objective.fusion is not None:
             self.factory = FusionFactory(
                 self.cache,
@@ -288,11 +307,16 @@ class Trainer:
                 defect_augment=config.training.defect_augment,
                 target_debias_peak=objective.target_debias_peak,
             )
+        self.timings.add("pair_factory_and_matching", started)
+        started = time.perf_counter()
         self.model: EdgeDenoiser = build_model(config).to(self.device)
         if config.training.init_checkpoint is not None and resume_from is None:
             state = load_init_weights(config.training.init_checkpoint, map_location=self.device)
             try:
-                self.model.load_state_dict(state)
+                if config.training.init_mode == "image_to_hybrid":
+                    initialize_from_image(self.model, state)
+                else:
+                    self.model.load_state_dict(state)
             except RuntimeError as error:
                 raise ValueError(
                     f"training.init_checkpoint {config.training.init_checkpoint} does not "
@@ -322,7 +346,8 @@ class Trainer:
             # sampling use independent streams on each rank.
             torch.manual_seed(config.training.seed + self.runtime.rank)
         if resume_from is not None:
-            self._restore(Path(resume_from))
+            self._restore(Path(resume_from), payload=resume_payload)
+        self.timings.add("model_optimizer_and_restore", started)
 
         if config.data.real_matching is not None:
             self.runtime.on_primary(lambda: self.factory.write_measurements(self.run_dir / "real_matching.json"))
@@ -360,13 +385,17 @@ class Trainer:
             self.run_dir,
         )
 
-    def _restore(self, checkpoint_path: Path) -> None:
-        payload = load_checkpoint(checkpoint_path, map_location=self.device)
+    def _check_resume(self, payload: dict) -> None:
         if payload.get("dataset_fingerprint") != getattr(self.cache, "real_fingerprint", None):
             raise ValueError("resume dataset differs from the checkpoint; use init_checkpoint for a new dataset")
         stored_config = Config.model_validate(payload["config"])
         if stored_config.data.real_matching != self.config.data.real_matching:
             raise ValueError("resume real pair matching differs from checkpoint; use init_checkpoint for a new arm")
+
+    def _restore(self, checkpoint_path: Path, *, payload: dict | None = None) -> None:
+        payload = load_checkpoint(checkpoint_path, map_location=self.device) if payload is None else payload
+        self._check_resume(payload)
+        stored_config = Config.model_validate(payload["config"])
         if stored_config != self.config:
             warnings.warn(
                 f"checkpoint {checkpoint_path} was written with a different config; "
@@ -397,8 +426,12 @@ class Trainer:
                 torch.cuda.set_rng_state(state["cuda_rng"].cpu(), self.device)
         else:
             torch.set_rng_state(payload["torch_rng"].cpu())
-            if payload.get("cuda_rng") is not None and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all([state.cpu() for state in payload["cuda_rng"]])
+            if payload.get("cuda_rng") is not None and self.device.type == "cuda":
+                states = payload["cuda_rng"]
+                # New single-worker saves contain only this worker's stream.
+                # Legacy saves may contain one entry per visible CUDA device.
+                index = 0 if len(states) == 1 else self.device.index or 0
+                torch.cuda.set_rng_state(states[index].cpu(), self.device)
             self.factory.load_state_dict(payload["factory"])
         logger.info("resumed from %s at step %d", checkpoint_path, self.step)
 
@@ -418,7 +451,8 @@ class Trainer:
                                 factory=self.factory, step=self.step, config=self.config,
                                 distributed_state=state,
                                 dataset_fingerprint=getattr(self.cache, "real_fingerprint", None))
-        self.runtime.on_primary(write)
+        with self.timings.measure("checkpoint"):
+            self.runtime.on_primary(write)
         return self.latest_checkpoint_path
 
     @property
@@ -431,8 +465,12 @@ class Trainer:
                               enabled=self.config.training.precision == "bf16")
 
     def _pair_step(self, batch) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        inputs, targets = batch.inputs.to(self.device), batch.targets.to(self.device)
-        second = batch.second.to(self.device) if batch.second is not None else None
+        with self.timings.measure("transfer"):
+            inputs, targets = batch.inputs.to(self.device), batch.targets.to(self.device)
+            second = batch.second.to(self.device) if batch.second is not None else None
+            gradients = batch.gradient_targets.to(self.device) if batch.gradient_targets is not None else None
+            shifts = None if batch.second_shifts is None else batch.second_shifts.to(self.device)
+            matching = self._matching_arguments(batch)
         with self._autocast():
             if second is not None:
                 # One DDP forward per backward, also for the two-view loss.
@@ -441,11 +479,11 @@ class Trainer:
                 prediction, prediction_second = self.train_model(inputs), None
         terms = self._loss_terms(
             prediction.float(), targets, second,
-            batch.gradient_targets.to(self.device) if batch.gradient_targets is not None else None,
+            gradients,
             prediction_second=None if prediction_second is None else prediction_second.float(),
-            second_shifts=None if batch.second_shifts is None else batch.second_shifts.to(self.device),
+            second_shifts=shifts,
             margin=batch.loss_margin,
-            **self._matching_arguments(batch),
+            **matching,
         )
         return prediction, terms
 
@@ -499,7 +537,12 @@ class Trainer:
                 prediction_second = match_prediction(prediction_second, second_matrices, second_brightness)
             elif second_shifts is not None:
                 prediction_second = warp_prediction(prediction_second, second_shifts)
-            difference = prediction - prediction_second
+            if objective.consistency_domain == "gradient":
+                difference = sobel(prediction) - sobel(prediction_second)
+                if second_valid is not None:
+                    second_valid = torch.nn.functional.max_pool2d((~second_valid).float(), 3, stride=1, padding=1) == 0
+            else:
+                difference = prediction - prediction_second
             terms["consistency"] = _masked_mean(difference ** 2, second_valid, margin)
         return terms
 
@@ -669,9 +712,10 @@ class Trainer:
                 **self._matching_arguments(batch),
             )
             writer.add_scalar("val/loss", float(self._combine(terms).item()), self.step)
+            for name, term in terms.items():
+                writer.add_scalar(f"val/loss_{name}", float(term.item()), self.step)
 
-            denoised = self.model.predict_image(inputs).clamp(-1.0, 1.0)
-            denoised_second = self.model.predict_image(second).clamp(-1.0, 1.0)
+            denoised = self.model.image_from_prediction(prediction, inputs).clamp(-1.0, 1.0)
             reference01 = (((batch.clean if batch.clean is not None else batch.targets) + 1.0) / 2.0).numpy()
             pred01 = ((denoised + 1.0) / 2.0).cpu().numpy()
             if batch.clean is not None:
@@ -683,20 +727,14 @@ class Trainer:
 
             # Live repeatability readout: RMS disagreement of two independent
             # frames' denoised images, in [0, 1] units (model range is 2x).
-            if batch.second_matrices is not None:
-                from .real_matching import match_prediction
-
-                denoised_second = match_prediction(denoised_second, batch.second_matrices.to(self.device),
-                                                    batch.second_brightness.to(self.device))
-            elif batch.second_shifts is not None:
-                denoised_second = warp_prediction(denoised_second, batch.second_shifts.to(self.device))
-            difference = denoised - denoised_second
-            consistency = _masked_mean(difference ** 2, batch.second_valid, batch.loss_margin)
-            writer.add_scalar(
-                "val/consistency_sigma",
-                float(torch.sqrt(consistency / 2.0).item()) / 2.0,
-                self.step,
-            )
+            # Real-data validation reports optimization losses only. Noise and
+            # metrology require the saved-uint8 multi-model report, without
+            # correction of predictions. Retain the synthetic diagnostic.
+            if batch.clean is not None:
+                denoised_second = self.model.predict_image(second).clamp(-1.0, 1.0)
+                difference = denoised - denoised_second
+                consistency = _masked_mean(difference ** 2, batch.second_valid, batch.loss_margin)
+                writer.add_scalar("val/consistency_sigma", float(torch.sqrt(consistency / 2.0).item()) / 2.0, self.step)
 
             shown = min(4, pred01.shape[0])
             input01 = ((batch.inputs.clamp(-1.0, 1.0) + 1.0) / 2.0).numpy()
@@ -716,6 +754,8 @@ class Trainer:
         window_steps = 0
         stop_reason: str | None = None
         failed = False
+        failure = None
+        start_step = self.step
         handlers = {}
         for signum in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -739,16 +779,21 @@ class Trainer:
                     sync = (self.train_model.no_sync() if self.runtime.enabled and
                             microstep + 1 < training.accumulation_steps else nullcontext())
                     with sync:
-                        batch = self.factory.sample_batch()
-                        _, terms = self._fusion_step(batch) if isinstance(batch, FusionBatch) else self._pair_step(batch)
-                        loss = self._combine(terms)
-                        (loss / training.accumulation_steps).backward()
+                        with self.timings.measure("sample_batch"):
+                            batch = self.factory.sample_batch()
+                        with self.timings.measure("forward_loss_backward"):
+                            _, terms = self._fusion_step(batch) if isinstance(batch, FusionBatch) else self._pair_step(batch)
+                            loss = self._combine(terms)
+                            if not torch.isfinite(loss):
+                                raise FloatingPointError(f"nonfinite training loss at step {self.step}")
+                            (loss / training.accumulation_steps).backward()
                     for name, value in {"total": loss, **terms}.items():
                         values[name] = values.get(name, 0.0) + float(value.detach().item()) / training.accumulation_steps
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), training.grad_clip)
-                self.optimizer.step()
-                if self.ema is not None:
-                    self.ema.update(self.model)
+                with self.timings.measure("optimizer_ema"):
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), training.grad_clip, error_if_nonfinite=True)
+                    self.optimizer.step()
+                    if self.ema is not None:
+                        self.ema.update(self.model)
                 self.step += 1
                 window_steps += 1
 
@@ -770,7 +815,8 @@ class Trainer:
                     window_started = time.time()
 
                 if self.step % training.val_every == 0 or self.step == training.max_steps:
-                    self.runtime.on_primary(lambda: self._validate(writer))
+                    with self.timings.measure("validation"):
+                        self.runtime.on_primary(lambda: self._validate(writer))
                 if self.step % training.checkpoint_every == 0 or self.step == training.max_steps:
                     self._save(milestone=True)
         except KeyboardInterrupt:
@@ -778,8 +824,9 @@ class Trainer:
                 failed = True
                 raise
             stop_reason = "keyboard interrupt"
-        except BaseException:
+        except BaseException as error:
             failed = True
+            failure = f"{type(error).__name__}: {error}"
             raise
         finally:
             # A failed rank must exit promptly so torchrun can terminate its
@@ -787,11 +834,22 @@ class Trainer:
             try:
                 if not failed:
                     self._save(milestone=False)
+            except BaseException as error:
+                failed = True
+                failure = f"{type(error).__name__}: {error}"
+                raise
             finally:
                 for signum, previous in handlers.items():
                     signal.signal(signum, previous)
                 if writer is not None:
                     writer.close()
+                if self.runtime.primary:
+                    atomic_write_json(self.run_dir / "timings.json", self.timings.record())
+                    atomic_write_json(self.run_dir / "training_status.json", {
+                        "status": "failed" if failed else "stopped" if stop_reason else "complete",
+                        "step": self.step, "max_steps": training.max_steps, "start_step": start_step,
+                        "stop_reason": stop_reason, "error": failure,
+                    })
         if stop_reason is not None:
             logger.info("stopped early at step %d (%s)", self.step, stop_reason)
         else:

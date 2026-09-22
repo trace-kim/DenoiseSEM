@@ -20,10 +20,10 @@ coordinates are derived from the delivered uint8 pixels only.
 
 The workflow accepts single-frame `edge_denoise` checkpoints with different
 objectives, representations, backbones and native tile sizes, including N2N,
-Sobel/consistency fine-tunes, mean-target fine-tunes, and gradient/hybrid models
-once their real-data training support is implemented. Burst-input fusion needs
-a separate comparison and is rejected here. Supporting a checkpoint in the
-viewer does not implement its training method.
+Sobel/consistency fine-tunes, mean-target fine-tunes, and gradient/hybrid models.
+All five methods for the next phase have real-data training paths; see
+[the sequential suite](real_sem_next_phase.md). Burst-input fusion needs a
+separate comparison and is rejected here.
 
 Use named checkpoint arguments without editing YAML. `--only-checkpoints`
 omits the six example arms from the base recipe. New names read registration
@@ -47,7 +47,14 @@ checked. All models must have the same original acquisition content, site
 splits, channels and intensity normalization. Test-frame leakage, manifest
 fingerprints, output shape and uint8 measurement provenance remain checked.
 `arms.csv`, `arms.json` and Run details record each model's representation,
-target, loss weights and crop size; `comparison.json` retains its full recipe.
+target, loss weights, consistency domain and crop size; `comparison.json` retains
+its full recipe. Arm exports also retain initialization and training budgets.
+
+Default `--split test` excludes both training and validation acquisitions.
+For selection on a prepared validation site, use `--split val --site-dir PATH`
+and a separate output directory. Every input must match recorded validation
+content; this mode cannot accept training or unknown content. It is recorded
+in the report settings and arm metadata. Rebuilds preserve the recorded split.
 
 The **ECD · all models** chart starts with every model selected, independently
 of panes A/B. Select a hole from its dropdown or click a matched contour. Each

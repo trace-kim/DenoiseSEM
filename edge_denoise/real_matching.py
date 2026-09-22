@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from burst_diffusion.data import BurstCache, BurstSource
 from burst_diffusion.real_data import normalize_native
+from runctl.run_logging import atomic_write_json
 
 from .config import Config, RealMatchingConfig
 from .data import PairBatch, PairInfo, ValPairBatch
@@ -19,6 +20,7 @@ from .real_data import LOSS_MARGIN, RealPairFactory, estimate_translations, fixe
 
 logger = logging.getLogger(__name__)
 PERCENTILES = np.arange(10, 91, 5)
+MEASUREMENT_VERSION = 1
 
 
 def percentile_mapping(input_quantiles: np.ndarray, target_quantiles: np.ndarray) -> tuple[float, float]:
@@ -106,7 +108,8 @@ class MatchedRealPairFactory(RealPairFactory):
     average on their common valid pixels; it never includes A in its target.
     """
 
-    def __init__(self, cache: BurstCache, config: Config, *, seed: int) -> None:
+    def __init__(self, cache: BurstCache, config: Config, *, seed: int,
+                 measurements: dict | None = None) -> None:
         if cache.real_metadata is None or config.data.real_matching is None:
             raise ValueError("inline real matching requires a prepared real dataset and data.real_matching settings")
         if cache.real_metadata["registration"]["mode"] != "none":
@@ -118,6 +121,23 @@ class MatchedRealPairFactory(RealPairFactory):
         self.sites = {key: dict(site) for key, site in self.sites.items()}
         self.measurements = {}
         self.matrices, self.quantiles, self.geometry_available = {}, {}, {}
+        measurement_path = config.data.real_matching_cache
+        if measurements is not None:
+            self.measurements = measurements
+            self._set_measurements()
+            logger.info("restored real matching measurements from checkpoint")
+            return
+        if measurement_path is not None and measurement_path.exists():
+            record = json.loads(measurement_path.read_text(encoding="utf-8"))
+            if (record.get("measurement_version") != MEASUREMENT_VERSION
+                    or record.get("dataset_fingerprint") != cache.real_fingerprint
+                    or record.get("settings") != self.settings.model_dump()
+                    or record.get("percentiles") != PERCENTILES.tolist()):
+                raise ValueError("real matching cache identity differs: use a new cache path for changed data/settings")
+            self.measurements = record["sites"]
+            self._set_measurements()
+            logger.info("reused verified real matching measurements from %s", measurement_path)
+            return
         for source in cache.train_sources + cache.val_sources:
             site = self.sites[source.source_index]
             logger.info("measuring %s: geometry=%s, brightness=%s on %d full raw frames",
@@ -132,6 +152,8 @@ class MatchedRealPairFactory(RealPairFactory):
                 logger.warning("%s: %d/%d frames have unmeasured identity geometry; frames remain in training",
                                site["name"], skipped, len(source.frames))
         self._set_measurements()
+        if measurement_path is not None:
+            atomic_write_json(measurement_path, self.measurement_record())
 
     def _measure(self, frames: np.ndarray, prepared: dict) -> dict:
         matrices = np.repeat(np.eye(3)[None], len(frames), axis=0)
@@ -190,9 +212,23 @@ class MatchedRealPairFactory(RealPairFactory):
         return record
 
     def _set_measurements(self) -> None:
+        sources = {s.source_index: s for s in self.cache.train_sources + self.cache.val_sources}
+        if set(self.measurements) != {str(index) for index in sources}:
+            raise ValueError("matching measurements must cover exactly the train/val sites")
         for key, record in self.measurements.items():
             index = int(key)
             matrices = np.asarray(record["matrices"], dtype=np.float64)
+            count = len(sources[index].frames)
+            if (matrices.shape != (count, 3, 3) or not np.isfinite(matrices).all()
+                    or not np.allclose(matrices[:, 2], [0, 0, 1])
+                    or np.any(np.abs(np.linalg.det(matrices[:, :2, :2])) < 1e-12)):
+                raise ValueError("invalid cached registration matrices")
+            if self.settings.brightness == "percentile":
+                points = np.asarray(record["percentiles_dn"], dtype=np.float64)
+                if points.shape != (count, len(PERCENTILES)) or not np.isfinite(points).all():
+                    raise ValueError("invalid cached percentile measurements")
+                for point in points:
+                    percentile_mapping(point, point)
             self.matrices[index] = matrices
             self.quantiles[index] = np.asarray(record["percentiles_dn"], dtype=np.float64)
             diagnostics = record.get("diagnostics")
@@ -288,14 +324,17 @@ class MatchedRealPairFactory(RealPairFactory):
             self._set_measurements()
         super().load_state_dict(state)
 
-    def write_measurements(self, path: Path) -> None:
-        record = {"dataset_fingerprint": self.cache.real_fingerprint, "settings": self.settings.model_dump(),
+    def measurement_record(self) -> dict:
+        return {"measurement_version": MEASUREMENT_VERSION,
+                  "dataset_fingerprint": self.cache.real_fingerprint, "settings": self.settings.model_dump(),
                   "percentiles": PERCENTILES.tolist(), "sites": self.measurements,
                   "brightness": "full raw frame percentiles; B mapped directly to each sampled A; no output clipping",
                   "geometry": "matrices map the site reference to each raw frame; pair W = W_B @ inverse(W_A)",
                   "registration_fallback": "if either frame has unavailable geometry, the pair uses identity; "
                                            "all frames remain eligible, including for mean targets and consistency"}
-        path.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+    def write_measurements(self, path: Path) -> None:
+        atomic_write_json(path, self.measurement_record())
         from .registration_report import write_registration_report
 
         write_registration_report(path.parent, self.cache, self.measurements, self.settings.registration)

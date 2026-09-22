@@ -1,0 +1,43 @@
+# Prepared align-none real data; corrections apply only to training targets.
+# Override paths through CLI flags. The suite inherits the supplied teacher's backbone.
+data:
+  dataset_dir: data/SEM-real-none
+  image_size: 512
+  channels: 1
+  real_matching:
+    registration: affine
+    brightness: percentile
+objective:
+  representation: hybrid
+  target: noisy
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 4.0
+  lambda_consistency: 0.0
+  consistency_domain: image
+  loss: l2
+model:
+  ch: 64
+  ch_mult: [1, 1, 2, 2, 4, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_real_hybrid_affine_percentile
+  init_checkpoint: runs/edge_denoise/sem_real_n2n/ckpt_latest.pt
+  init_mode: image_to_hybrid
+  batch_size: 4
+  accumulation_steps: 4
+  precision: fp32
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: cuda:0
+  log_every: 50
+  val_every: 1000
+  val_images: 4
+  checkpoint_every: 1000

@@ -49,11 +49,18 @@ def comparison_arms(record: dict) -> list[dict]:
         rows.append({
             "arm": name, "registration": model["arm"]["registration"],
             "brightness": model["arm"]["brightness"], "step": model["step"],
+            "evaluation_split": model["arm"].get("evaluation_split", "test"),
             "ema": model["ema"], "settings_source": model["arm"]["settings_source"],
             "checkpoint": model["checkpoint"], "checkpoint_sha256": model["sha256"],
             "image_size": config.get("data", {}).get("image_size"),
             **{key: objective.get(key) for key in ("representation", "target", "gradient_target", "loss",
                                                   "lambda_image", "lambda_gradient", "lambda_consistency")},
+            "consistency_domain": objective.get("consistency_domain", "image"),
+            "init_checkpoint": config.get("training", {}).get("init_checkpoint"),
+            "init_mode": config.get("training", {}).get("init_mode", "strict"),
+            "max_steps": config.get("training", {}).get("max_steps"),
+            "batch_size_per_worker": config.get("training", {}).get("batch_size"),
+            "accumulation_steps": config.get("training", {}).get("accumulation_steps", 1),
         })
     return rows
 
@@ -267,8 +274,8 @@ def render_comparison(root: Path, record: dict) -> Path:
     html = (Path(__file__).parent / "assets/comparison.html").read_text(encoding="utf-8")
     details = _warning(record, [r for r in record["prediction_ranges"] if r.get("clipped")])
     details += _table(record["arms"], ["arm", "representation", "target", "gradient_target", "loss",
-                                       "lambda_image", "lambda_gradient", "lambda_consistency", "image_size",
-                                       "registration", "brightness", "step", "ema", "settings_source"])
+                                       "lambda_image", "lambda_gradient", "lambda_consistency", "consistency_domain", "image_size",
+                                       "registration", "brightness", "evaluation_split", "step", "ema", "settings_source"])
     details += "".join(f"<p>{escape(w)}</p>" for w in record.get("warnings", []))
     destination = root / "index.html"
     destination.write_text(html.replace("<!-- AUDIT_DETAILS -->", details), encoding="utf-8")

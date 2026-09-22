@@ -83,14 +83,15 @@ class EdgeDenoiser(nn.Module):
 
         For ``gradient`` the predicted Sobel field is inverted by the exact
         FFT least-squares solve; the unrecoverable DC offset is restored from
-        the noisy input's crop mean (Poisson noise is mean-preserving, so the
-        crop mean is an unbiased estimate of the clean mean).  Note the CD /
-        registration measurements downstream are invariant to a DC shift --
-        the 50% threshold is re-derived from each profile's own extremes -- so
-        the mean estimate's variance costs pixel-sigma/PSNR only, never edge
-        position.
+        the noisy input's crop mean. This is a defined part of image production,
+        not an output correction fitted during measurement. Real acquisitions
+        can have brightness drift; quantization, clipping and the detector can
+        affect measured contours. Assess the delivered uint8 images.
         """
-        prediction = self.forward(frames, t)
+        return self.image_from_prediction(self.forward(frames, t), frames)
+
+    def image_from_prediction(self, prediction: torch.Tensor, frames: torch.Tensor) -> torch.Tensor:
+        """Recover an image from an existing forward pass (also used in validation)."""
         if self.representation != "gradient":
             return prediction
         return reconstruct_from_sobel(prediction, mean=frames.mean(dim=(1, 2, 3)))
@@ -98,3 +99,22 @@ class EdgeDenoiser(nn.Module):
 
 def build_model(config: Config) -> EdgeDenoiser:
     return EdgeDenoiser(config)
+
+
+def initialize_from_image(model: EdgeDenoiser, state: dict[str, torch.Tensor]) -> None:
+    """Function-preserving image -> hybrid warm start, with strict remaining keys.
+
+    Extra Sobel input channels initially contribute zero. This is an explicit
+    initialization strategy, never an implicit relaxation of checkpoint loading.
+    """
+    if model.representation != "hybrid":
+        raise ValueError("image_to_hybrid requires a hybrid model")
+    key = "unet.conv_in.weight"
+    source = state.get(key)
+    destination = model.state_dict()[key]
+    if (source is None or source.ndim != 4 or source.shape[1] != 1
+            or source.shape[0] != destination.shape[0] or source.shape[2:] != destination.shape[2:]):
+        raise ValueError("image_to_hybrid requires a compatible one-channel image checkpoint")
+    expanded = source.new_zeros(destination.shape)
+    expanded[:, :1] = source
+    model.load_state_dict({**state, key: expanded}, strict=True)

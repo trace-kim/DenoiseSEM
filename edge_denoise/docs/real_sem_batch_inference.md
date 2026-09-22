@@ -108,12 +108,14 @@ image's brightness. It cannot recover clipped values or undo changes introduced
 by the model. Compare frame brightness to see whether the denoiser altered your
 acquisition's decreasing intensity trend.
 
-PNG analysis measures the final uint8 output, including rounding. For precise
-residual noise measurements, retain the TIFFs and analyze float copies converted
-to original units without rounding. `sem_noise` does not automatically rescale
-normalized TIFFs to match raw images. Lower noise alone does not prove that edges
-or absolute intensity are accurate; denoised mean–variance fits describe the
-estimator output, not detector calibration.
+All brightness, noise, registration, contour and metrology measurements must
+decode the final saved uint8 PNGs, including their rounding/clipping. Normalized
+TIFFs are diagnostic artifacts and must not supply measurements. Lower noise
+alone does not prove that edges or absolute intensity are accurate.
+
+For the current phase use [the multi-model comparison](real_sem_comparison.md)
+and [the five-model training suite](real_sem_next_phase.md), which preserve the
+saved-uint8 contract and the agreed detector throughout the workflow.
 
 See the [sem_noise guide](../../sem_noise/README.md) for analysis options and
 report interpretation.

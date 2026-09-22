@@ -5,6 +5,12 @@ per site, 1024×1024 frames, and native 512×512 training patches. No clean
 images or simulator manifest are required. Every model in this guide takes
 **one raw frame at inference**.
 
+For the training phase agreed on 2026-09-22, use
+[the five-model suite and remote commands](real_sem_next_phase.md). It includes
+noisy-target fine-tuning, gradient reconstruction, hybrid inputs and gradient
+consistency, with affine/percentile defaults and failure-continuing resume.
+The older mean-target recipes below remain available as separate experiments.
+
 The workflow is:
 
 1. Organize and inspect the acquisitions.
@@ -413,10 +419,12 @@ tensorboard --logdir runs/edge_denoise
 
 Useful scalars are `train/loss`, its component losses,
 `train/patches_per_sec`, `train/effective_batch`, `val/loss`, and
-`val/consistency_sigma`. `val/input_pred_target` shows raw input, prediction,
-and target. Real-data training deliberately does not report `val/psnr` against
-a nonexistent clean image. A falling consistency score alone can reward
-over-smoothing; pair it with the evaluation below.
+`val/loss_image`, `val/loss_gradient` and `val/loss_consistency` when enabled.
+`val/input_pred_target` shows training tensors, not metrology measurements.
+Real-data validation reports optimization losses, not floating-prediction noise
+or PSNR against a nonexistent clean image. Use the saved-uint8 comparison for
+brightness, noise and metrology. `val/consistency_sigma` remains a synthetic
+benchmark diagnostic only.
 
 To stop cooperatively after an optimizer step:
 
@@ -454,60 +462,27 @@ reproducibility.
 
 ## 8. Evaluate the validation sites
 
-Run the models on the same raw input frames. A separate frame pool supplies
-the registered reference average and fixed measurement boxes:
+Use the saved-uint8 multi-model workflow. Point `VAL_SITE` at an original raw
+128-frame site in the prepared dataset's validation split:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m edge_denoise evaluate-real \
-  --config edge_denoise/configs/sem_real_n2n.yml \
-  --checkpoint n2n=runs/edge_denoise/sem_real_ft_n2n/ckpt_latest.pt \
-  --checkpoint mean=runs/edge_denoise/sem_real_ft_mean/ckpt_latest.pt \
-  --checkpoint avgfull=runs/edge_denoise/sem_real_ft_avgfull/ckpt_latest.pt \
-  --checkpoint consist=runs/edge_denoise/sem_real_ft_avgfull_consist/ckpt_latest.pt \
-  --out output/sem_real_val \
-  --split val --input-frames 32 --rois 5 --max-batch 4 --device cuda
+python tools/real_sem_compare.py --only-checkpoints \
+  --checkpoint n2n=runs/edge_denoise/sem_real_n2n/ckpt_latest.pt \
+  --split val --site-dir "$VAL_SITE" \
+  --output-dir output/sem_real_val --device cuda:0 --metrology-device cuda:0
 ```
 
-With 128 accepted frames this uses 32 raw inference inputs and the other 96
-as references. Pools are deterministic, spread across acquisition order, and
-recorded in `results.json`; they share no image frames. At least two input
-frames and two remaining reference frames are required. Registration itself
-was estimated from the acquisition, so this is reference-based evaluation,
-not a claim of fully independent ground truth.
+Add named `--checkpoint NAME=PATH` arguments for other models, or use the suite's
+generated `comparison.yml`. `--split val` requires recorded validation content;
+the default `--split test` excludes both train and validation content. Keep the
+detector and all measurement settings fixed for the final held-out report.
+See [real_sem_comparison.md](real_sem_comparison.md) for ECD repeatability, mean
+shifts, measurement failures, brightness and per-stage timing outputs.
 
-The evaluator visits fixed center/corner windows inside common overlap. It
-uses the saved acquisition transforms to compare outputs in common
-coordinates, without re-registering each model output to hide edge shifts.
-`results.json` contains per-site/per-ROI details, checkpoint hashes, and:
-
-- `psnr_vs_reference` and `ssim_vs_reference`: similarity to the reference mean.
-- `gradient_mse_vs_reference`: edge-field differences relative to that mean.
-- `pixel_sigma`: RMS temporal output variation over the evaluated pixels.
-- `cd_3sigma_px`: three times the sample CD standard deviation, summarized
-  over measurable edge locations.
-- `cd_bias_vs_reference_px`: systematic width difference from the reference.
-- `cd_failure_fraction`: fraction of attempted edge measurements that failed.
-
-All distance units are native pixels. Absolute accuracy against a truly clean
-specimen is unavailable. A null CD result means insufficient measurable
-locations or valid realizations, not perfect repeatability. Inspect failure
-rates, small features, and edge profiles alongside variance.
-
-The summary takes the median across sites after averaging each site's ROI
-metrics. It does not treat overlapping patches or repeated images as new
-independent sites. PNG comparisons are previews of the same fixed regions.
-
-Registered averages of 4, 8, and 16 input frames are included when at least two
-disjoint groups are available. These consume more frames per result than the
-single-frame models. With 32 inputs, avg-of-16 has only two realizations and
-its repeatability estimate is correspondingly uncertain. The full acquisition
-mean in preparation previews is a QC reference, not a repeatability baseline.
-
-Select the recipe on validation sites. Then run the chosen checkpoint once
-with `--split test` and a separate output directory. Keep inference settings
-and measurement settings fixed for that final comparison. The historical
-`evaluate`/`repeatability` commands use synthetic clean references; use
-`evaluate-real` for these prepared real datasets.
+The historical `evaluate-real` command remains a legacy floating-reference
+research diagnostic; it does **not** satisfy the saved-uint8 measurement contract
+and is not the measurement workflow for this phase. Training target arrays and
+legacy reference TIFFs likewise must not supply delivered-image metrology.
 
 ## 9. Test inference on a full raw frame
 
@@ -530,15 +505,17 @@ noise of the results, see
 Outputs are:
 
 ```text
-frame_000_input.png        8-bit input preview
-frame_000_denoised.png     8-bit output preview
-frame_000_denoised.tif     float32 normalized output for quantitative use
+frame_000_input.png        native uint8 input (identical RGB channels)
+frame_000_denoised.png     delivered uint8 image; decode this for measurements
+frame_000_prediction_range.json  pre-export range audit for uint8 acquisitions
+frame_000_denoised.tif     normalized float32 diagnostic only
 ```
 
-The TIFF values are in `[0,1]`, not original detector counts. Convert back
-with `output * (white_level - black_level) + black_level` using the checkpoint
-normalization if your measurement software expects detector units. Keep the
-float result for analysis; the PNG is only a preview.
+For native uint8 acquisitions the PNG restores the fixed checkpoint intensity
+scale and rounds/clips once to 0–255. It is saved as identical-channel RGB.
+All brightness, noise, registration, contour and metrology measurements must
+decode the saved PNG. The TIFF is a normalized diagnostic, not a measurement
+source. Output brightness and geometry are not fitted to the input.
 
 Check dimensions, intensity range, edge widths, and small features. Tiles are
 glued with a cross-fade that gives a tile's outermost pixels no visible
@@ -552,10 +529,10 @@ larger stride only reduces how many tiles vote for each pixel. Reduce
 result. `--center-crop` explicitly tests one 512×512 tile instead of the full
 frame.
 
-For example, inspect the quantitative output:
+For example, inspect the delivered uint8 output:
 
 ```bash
-python -c "from PIL import Image; import numpy as np; a=np.asarray(Image.open('output/sem_real_inference/frame_000_denoised.tif')); print(a.shape, a.dtype, a.min(), a.max())"
+python -c "from PIL import Image; import numpy as np; a=np.asarray(Image.open('output/sem_real_inference/frame_000_denoised.png')); print(a.shape, a.dtype, a.min(), a.max())"
 ```
 
 ## 10. Development verification and Windows notes

@@ -235,11 +235,14 @@ Docs: [user guide](../burst_diffusion/docs/burst_diffusion_guide.md) ·
 
 ## 4b. Workflow B2 — `edge_denoise`: edge-preserving metrology denoisers
 
-For real noisy-only SEM repeats, start with the
-[real SEM training and inference guide](../edge_denoise/docs/real_sem_training.md).
-It covers `prepare-real`, fixed site splits, native 512-pixel patches,
-N2N/mean-target comparisons, 1–4 GPU training, `evaluate-real`, and full-frame
-inference with quantitative float32 output. To denoise a whole folder of real
+For the current real-SEM phase, use the
+[five-model sequential suite](../edge_denoise/docs/real_sem_next_phase.md): affine
+registration/percentile targets, native inputs, per-run logs, failure continuation
+and resume, and saved-uint8 validation/test comparisons on one allocated GPU.
+The [real SEM training guide](../edge_denoise/docs/real_sem_training.md) also
+covers `prepare-real`, fixed site splits, native 512-pixel patches and the older
+N2N/mean-target experiments. All real measurements use decoded saved uint8 PNGs.
+To denoise a whole folder of real
 noisy frames with an existing checkpoint and characterize the noise before and
 after, see the
 [batch inference runbook](../edge_denoise/docs/real_sem_batch_inference.md) —

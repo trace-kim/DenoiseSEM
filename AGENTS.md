@@ -132,7 +132,11 @@ stop handling. Any new dataset path must hash content before splitting.
   All new model recipes default to affine registration and percentile brightness
   matching. Before the server's several-day unattended training period, deliver
   a script/command that runs every agreed training pipeline sequentially with
-  logs and restart support. See `edge_denoise/docs/real_sem_model_plan.md`.
+  logs and restart support. Continue to the next pipeline after an individual
+  failure; record failures and never count unfinished training as complete.
+  Explicit user/scheduler stops should stop the suite cooperatively.
+  See `edge_denoise/docs/real_sem_model_plan.md` and
+  `edge_denoise/docs/real_sem_next_phase.md`.
 
 ## Testing Guidelines
 

@@ -40,6 +40,8 @@ and channel 1 = d/dy (y = height axis, increasing downward).
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 import torch.nn.functional as F
 
@@ -148,12 +150,7 @@ def reconstruct_from_sobel(
     gy_ext = _odd_even_extend(work[:, 1], odd_axis=-2)
     shape = (2 * height - 2, 2 * width - 2)
 
-    spectrum_x = _kernel_spectrum(_KERNEL_X, shape, device)
-    spectrum_y = _kernel_spectrum(_KERNEL_Y, shape, device)
-    denominator = spectrum_x.abs() ** 2 + spectrum_y.abs() ** 2
-    # Null space of the operator pair (DC + both full Nyquist lines) and its
-    # ill-conditioned neighborhood: excluded from the solve and set to zero.
-    invertible = denominator > denominator.max() * null_threshold
+    spectrum_x, spectrum_y, denominator, invertible = _inverse_spectra(shape, device, null_threshold)
 
     numerator = spectrum_x.conj() * torch.fft.fft2(gx_ext) + spectrum_y.conj() * torch.fft.fft2(gy_ext)
     solution = torch.zeros_like(numerator)
@@ -168,3 +165,13 @@ def reconstruct_from_sobel(
         raise ValueError(f"mean must be a scalar or [B]={batch} values, got {offset.numel()}")
     image = image + offset.view(batch, 1, 1)
     return image.unsqueeze(1).to(torch.float32)
+
+
+@lru_cache(maxsize=4)
+def _inverse_spectra(shape: tuple[int, int], device: torch.device, null_threshold: float) -> tuple:
+    """Reuse unchanged FFT operators, bounded to four shape/device combinations."""
+    spectrum_x = _kernel_spectrum(_KERNEL_X, shape, device)
+    spectrum_y = _kernel_spectrum(_KERNEL_Y, shape, device)
+    denominator = spectrum_x.abs() ** 2 + spectrum_y.abs() ** 2
+    invertible = denominator > denominator.max() * null_threshold
+    return spectrum_x, spectrum_y, denominator, invertible

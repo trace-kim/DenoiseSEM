@@ -27,16 +27,19 @@ class DistributedRuntime:
         self.enabled = self.world_size > 1
         self.primary = self.rank == 0
         cuda = requested != "cpu" and torch.cuda.is_available()
-        if requested == "cuda" and not cuda:
+        if requested.startswith("cuda") and not cuda:
             raise RuntimeError("training.device is 'cuda' but CUDA is not available")
         if self.enabled and requested == "auto" and not cuda:
             raise RuntimeError("torchrun requires CUDA; use explicit device: cpu for CPU diagnostics")
         if self.enabled:
+            if requested.startswith("cuda:"):
+                raise ValueError("torchrun binds LOCAL_RANK; use device=cuda without an index")
             self.device = torch.device("cuda", self.local_rank) if cuda else torch.device("cpu")
         else:
-            self.device = select_device("cuda" if cuda else "cpu")
-        # runctl's single-worker selector requires one isolated visible GPU.
-        # DDP workers instead see the allocation and bind their LOCAL_RANK.
+            selected = requested if requested.startswith("cuda:") else "cuda:0" if cuda else "cpu"
+            self.device = select_device(selected, isolated=False)
+        # One worker uses a logical device inside the allocation without
+        # rewriting CUDA_VISIBLE_DEVICES. DDP binds each LOCAL_RANK instead.
         if self.enabled and self.device.type == "cuda":
             if self.device.index >= torch.cuda.device_count():
                 raise ValueError("LOCAL_RANK exceeds the allocated visible GPUs")

@@ -259,7 +259,8 @@ def test_fresh_run_refuses_an_occupied_run_dir_unless_overwritten(tmp_path: Path
     Trainer(config).run()
     (run_dir / "notes.txt").write_text("keep me", encoding="utf-8")
     names = {path.name for path in existing_run_artifacts(run_dir)}
-    assert names == {"ckpt_0000002.pt", LATEST_CHECKPOINT_NAME, "config.yml", TENSORBOARD_DIR_NAME}
+    assert names == {"ckpt_0000002.pt", LATEST_CHECKPOINT_NAME, "config.yml", TENSORBOARD_DIR_NAME,
+                     "timings.json", "training_status.json"}
 
     with pytest.raises(FileExistsError, match="already holds a run"):
         Trainer(config)

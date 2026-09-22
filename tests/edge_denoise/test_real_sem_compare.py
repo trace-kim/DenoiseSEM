@@ -100,6 +100,20 @@ def _inputs(tmp_path):
     return source, checkpoint
 
 
+def test_validation_comparison_requires_recorded_holdout_and_keeps_test_exclusions():
+    metadata = {"train_val_content_hashes": ["train", "val"], "validation_content_hashes": ["val"]}
+    compare.validate_evaluation_content(metadata, {"val"}, "val")
+    compare.validate_evaluation_content(metadata, {"unseen-test"}, "test")
+    for content in ({"train"}, {"unseen-test"}, {"train", "val"}, set()):
+        with pytest.raises(ValueError, match="recorded validation"):
+            compare.validate_evaluation_content(metadata, content, "val")
+    for content in ({"train"}, {"val"}):
+        with pytest.raises(ValueError, match="train/validation"):
+            compare.validate_evaluation_content(metadata, content, "test")
+    args = compare.build_parser().parse_args(["--split", "val"])
+    assert compare.configure_run(args).evaluation_split == "val"
+
+
 TREATMENTS = [("affine", "percentile"), ("translation", "percentile"), ("none", "percentile"),
               ("affine", "none"), ("translation", "none"), ("none", "none")]
 
@@ -439,9 +453,11 @@ def test_non_n2n_treatments_and_objectives_are_exported(tmp_path, representation
     metadata = compare.checkpoint_arm_metadata(compare.ComparisonArm(checkpoint=arm.checkpoint,
         prepared_manifest=arm.prepared_manifest), SimpleNamespace(config=config, dataset_fingerprint=digest))
     assert (metadata["registration"], metadata["brightness"]) == ("affine", "percentile")
+    metadata["evaluation_split"] = "val"
     exported = comparison_arms({"models": {"candidate": {"config": config.model_dump(mode="json"),
         "arm": metadata, "checkpoint": str(arm.checkpoint), "sha256": "weights", "step": 100, "ema": True}}})[0]
     assert (exported["representation"], exported["target"]) == (representation, target)
+    assert exported["evaluation_split"] == "val"
     assert (exported["lambda_image"], exported["lambda_gradient"], exported["lambda_consistency"]) == (image, gradient, consistency)
 
 

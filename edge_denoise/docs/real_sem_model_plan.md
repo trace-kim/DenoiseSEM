@@ -36,6 +36,13 @@ per-run logs, failure reporting, and safe restart/resume behavior. Do not
 silently skip unfinished or failed training. Validate locally on synthetic
 fixtures; remote artifacts cannot be copied to this PC.
 
+User clarification on 2026-09-22: **continue to the next pipeline after a
+pipeline fails**. Record the failure, attempt every remaining pipeline, and
+return an unsuccessful suite status until every required pipeline completes.
+An explicit user/scheduler stop should stop the suite, preserving restart state.
+The implementation checklist and remote handoff are maintained in
+[real_sem_next_phase.md](real_sem_next_phase.md).
+
 Use one allocated H100 by default and preserve scheduler GPU visibility. Check
 the full CPU/GPU/data-loading path before setting unattended budgets. Record
 wall time and compare models on held-out sites using the multi-model report.
