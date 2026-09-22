@@ -176,6 +176,21 @@ examining test sites.
 
 ## GPU execution
 
+For delays after `contours/CD complete`, see the
+[performance audit and resolution plan](real_sem_performance_audit.md). The
+comparison now logs record serialization, summaries, individual exports,
+viewer assets and TensorBoard encoding/flush, with 30-second stage heartbeats.
+It writes a small `timings.json` beside `comparison.json`; final save durations
+are included there. The audit includes full-run and render-only timing commands.
+
+Checkpoint saves serialize only new contours into compact external parts.
+Finalization assembles the compatible `contours.json` by copying those encoded
+rows; it does not repeatedly convert earlier models' coordinates. Record and
+contour writes use atomic replacement. Existing completed reports retain their
+v3 format, and `--render-only` reuses their saved contour export. See the audit
+for measured local serialization savings; no additional full comparison is
+required solely to profile these changes.
+
 The base config uses logical `cuda:0` for inference, native brightness/temporal
 statistics, Gaussian smoothing, ordinary per-image Otsu thresholds, four-connected
 component labeling and minimum-area filtering. CUDA execution uses the existing

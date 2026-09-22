@@ -215,6 +215,15 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert "site/average8: contours/CD 16/16" in progress
     assert "Combined comparison report finished" in progress
     assert "TensorBoard comparison finished" in progress
+    after_contours = progress[progress.index("site/none_none: contours/CD complete"):]
+    stages = ["Saving comparison.json", "Finalizing comparison", "repeatability summary",
+              "site/observations.csv", "site/contours.json", "Rendering interactive comparison report",
+              "site/raw: viewer contour JSON/JS", "site/raw: coarse contour SVG",
+              "site/raw: TensorBoard decode/overlay/encode", "TensorBoard: flushing and closing",
+              "Comparison finalization complete"]
+    positions = [after_contours.index(stage) for stage in stages]
+    assert positions == sorted(positions)
+    assert "Saved comparison.json:" in progress
     for series in result["sites"][0]["series"].values():
         assert series["timings_s"]["contours_cd"] >= 0
         assert series["timings_s"]["native_analysis"] >= 0
@@ -240,6 +249,13 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert "Link acquisitions" in html and "Overlapping wipe" in html
     assert "below_zero" in (config.output_dir / "prediction_ranges.csv").read_text()
     saved = json.loads((config.output_dir / "comparison.json").read_text())
+    assert "contours" not in saved["sites"][0] and "contours_parts" not in saved["sites"][0]
+    assert json.loads((config.output_dir / saved["sites"][0]["contours_path"]).read_text()) == result["sites"][0]["contours"]
+    timings = json.loads((config.output_dir / "timings.json").read_text())
+    assert timings["timings_s"]["save_comparison_json"] == result["timings_s"]["save_comparison_json"]
+    assert timings["timings_s"]["save_comparison_json"] >= saved["timings_s"]["save_comparison_json"]
+    assert timings["sites"]["site"]["timings_s"]["export_contours_json"] >= 0
+    assert timings["sites"]["site"]["series"]["none_none"]["report_timings_s"]["tensorboard_images"] >= 0
     assert saved["prediction_ranges"][0]["clipped"]
     assert [(r["registration"], r["brightness"]) for r in saved["arms"]] == TREATMENTS
     assert "training_registration" in (config.output_dir / "metrics.csv").read_text()
@@ -266,6 +282,50 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     assert not any(Path(a["path"]).name.startswith("block_") for a in result["artifacts"])
     assert result["sites"][0]["correspondence_reference"] == "average128"
     assert result["sites"][0]["series"]["average128"]["native"]["temporal_rms_dn"] is None
+
+
+def test_save_logs_before_serialization_and_names_failed_stage(tmp_path, monkeypatch, capsys):
+    from sem_noise import comparison_storage
+
+    def failed_write(path, value):
+        assert path.name == "comparison.json"
+        output = capsys.readouterr().out
+        assert "Saving comparison.json (serialize/write; 0 embedded contours): starting" in output
+        raise OSError("disk full")
+
+    monkeypatch.setattr(comparison_storage, "write_record", failed_write)
+    with pytest.raises(OSError, match="disk full"):
+        compare.save_record(tmp_path, {"sites": [], "prediction_ranges": []})
+    output = capsys.readouterr().out
+    assert "Saving comparison.json" in output and "failed after" in output
+    assert "Saved comparison.json:" not in output
+
+
+def test_intermediate_record_references_saved_contours_and_does_not_rewrite_them(tmp_path, monkeypatch):
+    from sem_noise import comparison_storage
+
+    site = {"name": "site", "series": {}, "contours": [{"coarse": [[1., .5]]}]}
+    record = {"sites": [site], "prediction_ranges": []}
+    compare.save_record(tmp_path, record)
+    saved = json.loads((tmp_path / "comparison.json").read_text())
+    assert "contours" not in saved["sites"][0]
+    assert comparison_storage.load_contours(tmp_path, saved["sites"][0]) == site["contours"]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("An unchanged contour part was written again")
+
+    part_path = tmp_path / site["contours_parts"][0]["path"]
+    before = part_path.read_bytes()
+    atomic = comparison_storage.atomic_binary
+
+    def metadata_only(path):
+        if path == part_path:
+            forbidden()
+        return atomic(path)
+
+    monkeypatch.setattr(comparison_storage, "atomic_binary", metadata_only)
+    compare.save_record(tmp_path, record)
+    assert part_path.read_bytes() == before
 
 
 def test_incomplete_site_rejected_before_outputs(tmp_path):

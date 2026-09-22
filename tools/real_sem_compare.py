@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, replace
-from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -29,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from tools.real_sem_experiment import EXTENSIONS
 from edge_denoise.uint8_output import RANGE_WARNING, average_uint8, prediction_uint8
+from sem_noise.progress import Progress
 from sem_segment.otsu_baseline import OtsuSettings
 
 if TYPE_CHECKING:
@@ -238,29 +238,26 @@ def registration_tracks(reference: np.ndarray, paths: list[Path], sigma: float) 
     from sem_noise.pair_matching import estimate_geometry
 
     tracks = []
-    started = last_progress = time.perf_counter()
     label = "/".join(paths[0].parts[-3:-1]) if paths else "empty series"
-    print(f"{label}: translation diagnostics starting ({len(paths)} frames)", flush=True)
-    for path in paths:
-        pixels = read_uint8(path)
-        row = {"mean_dn": float(pixels.mean())}
-        try:
-            matrix, score = estimate_geometry(reference, pixels, motion="translation", sigma=sigma)
-            row.update(dy_px=float(matrix[1, 2]), dx_px=float(matrix[0, 2]),
-                       registration_status="registered", registration_score=score, registration_error="")
-        except ValueError as error:
-            row.update(dy_px=None, dx_px=None, registration_status="failed",
-                       registration_score=None, registration_error=str(error))
-        tracks.append(row)
-        now = time.perf_counter()
-        if len(tracks) == 1 or len(tracks) % 16 == 0 or len(tracks) == len(paths) or now - last_progress >= 30:
-            print(f"{label}: translation diagnostics {len(tracks)}/{len(paths)}; {now - started:.1f}s elapsed", flush=True)
-            last_progress = now
+    with Progress(f"{label}: translation diagnostics (CPU ECC)", total=len(paths)) as progress:
+        for path in paths:
+            pixels = read_uint8(path)
+            row = {"mean_dn": float(pixels.mean())}
+            try:
+                matrix, score = estimate_geometry(reference, pixels, motion="translation", sigma=sigma)
+                row.update(dy_px=float(matrix[1, 2]), dx_px=float(matrix[0, 2]),
+                           registration_status="registered", registration_score=score, registration_error="")
+            except ValueError as error:
+                row.update(dy_px=None, dx_px=None, registration_status="failed",
+                           registration_score=None, registration_error=str(error))
+            tracks.append(row)
+            progress.update(len(tracks), path.name)
     return tracks
 
 
 def output_registration_diagnostics(root: Path, reference: np.ndarray, series: dict, sigma: float) -> None:
     """Measure each output's drift independently, without changing correspondence."""
+    started = time.perf_counter()
     tracks = registration_tracks(reference, [root / f["path"] for f in series["frames"]], sigma)
     for frame, track in zip(series["frames"], tracks):
         for key in ("dy_px", "dx_px", "registration_status", "registration_score", "registration_error"):
@@ -268,6 +265,7 @@ def output_registration_diagnostics(root: Path, reference: np.ndarray, series: d
         valid = frame["registration_status"] == "registered" and track["registration_status"] == "registered"
         for component in ("dy_px", "dx_px"):
             frame[f"output_minus_raw_{component}"] = track[component] - frame[component] if valid else None
+    series.setdefault("timings_s", {})["translation_diagnostics"] = time.perf_counter() - started
 
 
 def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
@@ -282,8 +280,12 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         results = iter_measure_saved_otsu([root / f["path"] for f in series["frames"]], settings,
             crop=segment_config.input.crop, device=segment_config.refine.device, metrology=segment_config.metrology,
             batch_size=analysis_batch, memory_mb=analysis_memory_mb, io_workers=io_workers)
-        with closing(results):
+        try:
             return _measure_series(root, name, series, template, gate, segment_config, otsu=settings, results=results)
+        finally:
+            label = Path(series["frames"][0]["path"]).parent.as_posix() if series["frames"] else name
+            with Progress(f"{label}: closing Otsu workers", timings=series.setdefault("timings_s", {}), key="contour_cleanup"):
+                results.close()
     if contour_method != "current":
         raise ValueError("contour_method must be current or otsu")
     if segment_config.refine.enabled and segment_config.refine.device != "cpu":
@@ -428,7 +430,17 @@ def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisCo
 
     started = time.perf_counter()
     print(f"{name}: measuring native uint8 brightness and temporal variation", flush=True)
-    rows, std = native_series_statistics((read_uint8(root / f["path"]) for f in series["frames"]), device=device)
+    timings = series.setdefault("timings_s", {})
+    label = Path(series["frames"][0]["path"]).parent.as_posix() if series["frames"] else name
+    with Progress(f"{label}: native statistics on {device}", total=len(series["frames"]),
+                  timings=timings, key="native_statistics") as progress:
+        def images():
+            for number, frame in enumerate(series["frames"], 1):
+                yield read_uint8(root / frame["path"])
+                # GPU work may be queued here; stage completion includes the download.
+                progress.update(number, "frames submitted; final statistics may still be pending")
+
+        rows, std = native_series_statistics(images(), device=device)
     for frame, row in zip(series["frames"], rows):
         frame.update(row)
     series["native"] = {"frames": len(rows), "temporal_rms_dn": float(np.sqrt(np.mean(std**2))) if std is not None else None,
@@ -436,24 +448,29 @@ def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisCo
     folder = Path(series["frames"][0]["path"]).parent
     if std is not None:
         relative = folder / "temporal_std.npy"
-        np.save(root / relative, std.astype(np.float32), allow_pickle=False)
+        with Progress(f"{label}: saving temporal_std.npy", timings=timings, key="save_temporal_std"):
+            np.save(root / relative, std.astype(np.float32), allow_pickle=False)
         series["temporal_std"] = relative.as_posix()
     if raw_frames is not None:
         if len(raw_frames) != len(series["frames"]):
             raise ValueError("model and raw acquisition counts differ")
-        for frame, raw in zip(series["frames"], raw_frames):
-            if frame["index"] != raw["index"]:
-                raise ValueError("model and raw acquisition indices differ")
-            output, source = read_uint8(root / frame["path"]), read_uint8(root / raw["path"])
-            frame["brightness_delta_dn"] = float(output.mean() - source.mean())
-            relative = folder / "differences" / Path(frame["path"]).name
-            (root / relative).parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(difference_rgb(output, source, difference_limit)).save(root / relative)
-            frame["difference_path"] = relative.as_posix()
+        with Progress(f"{label}: output-minus-raw difference PNGs", total=len(raw_frames),
+                      timings=timings, key="difference_pngs") as progress:
+            for number, (frame, raw) in enumerate(zip(series["frames"], raw_frames), 1):
+                if frame["index"] != raw["index"]:
+                    raise ValueError("model and raw acquisition indices differ")
+                output, source = read_uint8(root / frame["path"]), read_uint8(root / raw["path"])
+                frame["brightness_delta_dn"] = float(output.mean() - source.mean())
+                relative = folder / "differences" / Path(frame["path"]).name
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(difference_rgb(output, source, difference_limit)).save(root / relative)
+                frame["difference_path"] = relative.as_posix()
+                progress.update(number, relative.as_posix())
         series["difference_limit_dn"] = difference_limit
     for key in ("noise_report", "noise_settings", "noise", "noise_status"):
         series.pop(key, None)
-    series.setdefault("timings_s", {})["native_analysis"] = time.perf_counter() - started
+    timings["native_analysis"] = time.perf_counter() - started
+    print(f"{label}: native analysis complete in {timings['native_analysis']:.1f}s", flush=True)
 
 
 def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
@@ -530,48 +547,84 @@ def prepare_reference(root: Path, site: dict, segment: SegmentConfig, *,
 
 def save_record(root: Path, record: dict) -> None:
     from sem_noise.pipeline import write_csv, write_json
-
-    # Contours are stored once, separately from the compact comparison record.
-    sites = [{k: v for k, v in site.items() if k != "contours" or "contours_path" not in site}
-             for site in record["sites"]]
-    write_json(root / "comparison.json", {**record, "sites": sites})
-    write_csv(root / "prediction_ranges.csv", record["prediction_ranges"])
-
-
-def finish_comparison(root: Path, record: dict) -> None:
-    from sem_noise.pipeline import write_csv, write_json
-    from sem_noise.comparison_report import render_comparison, write_tensorboard
-    from sem_segment.repeatability import summarize_observations
+    from sem_noise.comparison_storage import checkpoint_contours, write_record
 
     for site in record["sites"]:
+        checkpoint_contours(root, site)
+    # Running snapshots reference immutable parts; complete reports keep their
+    # existing site-wide contours_path. Never re-encode old coordinates here.
+    sites = [{k: v for k, v in site.items() if k != "contours" and
+              (k != "contours_parts" or "contours_path" not in site)}
+             for site in record["sites"]]
+    timings = record.setdefault("timings_s", {})
+    with Progress("Saving comparison.json (serialize/write; 0 embedded contours)",
+                  timings=timings, key="save_comparison_json"):
+        write_record(root / "comparison.json", {**record, "sites": sites})
+    print(f"Saved comparison.json: {(root / 'comparison.json').stat().st_size / 1024**2:.1f} MiB", flush=True)
+    with Progress(f"Saving prediction_ranges.csv ({len(record['prediction_ranges']):,} rows)",
+                  timings=timings, key="save_prediction_ranges_csv"):
+        write_csv(root / "prediction_ranges.csv", record["prediction_ranges"])
+    # A small sidecar includes the just-finished save, without rewriting the
+    # large comparison a second time to store the duration of its own write.
+    write_json(root / "timings.json", {
+        "note": "Wall seconds; nested stages overlap. Save times accumulate. Render-only series analysis timings come from the source report.",
+        "timings_s": timings,
+        "sites": {site["name"]: {
+            "timings_s": site.get("timings_s", {}),
+            "series": {name: {"timings_s": series.get("timings_s", {}),
+                              "report_timings_s": series.get("report_timings_s", {})}
+                       for name, series in site.get("series", {}).items()}}
+                  for site in record["sites"]}})
+
+
+def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False) -> None:
+    from sem_noise.pipeline import write_csv
+    from sem_noise.comparison_report import render_comparison, write_tensorboard
+    from sem_noise.comparison_storage import finish_contours
+    from sem_segment.repeatability import summarize_observations
+
+    started_finalization = time.perf_counter()
+    print("Finalizing comparison: summaries and exports before report rendering", flush=True)
+    for site in record["sites"]:
+        timings = site.setdefault("timings_s", {})
         names = [name for name in site["series"] if name != "average128"]
         models = [name for name in record["models"] if name in names]
-        holes, summaries = summarize_observations(site["observations"], names, comparison_series=models)
+        with Progress(f"{site['name']}: repeatability summary ({len(site['observations']):,} observations)",
+                      timings=timings, key="repeatability_summary"):
+            holes, summaries = summarize_observations(site["observations"], names, comparison_series=models)
         site.update(per_hole=holes, repeatability=summaries)
         for filename, rows in (("observations", site["observations"]), ("per_hole", holes), ("repeatability", summaries)):
-            write_csv(root / site["name"] / f"{filename}.csv", rows)
-        site["contours_path"] = f"{site['name']}/contours.json"
-        write_json(root / site["contours_path"], site["contours"])
-        write_csv(root / site["name"] / "frames.csv", [dict(series=name, **frame)
-                  for name, series in site["series"].items() for frame in series["frames"]])
+            with Progress(f"{site['name']}/{filename}.csv: serialize/write ({len(rows):,} rows)",
+                          timings=timings, key=f"export_{filename}_csv"):
+                write_csv(root / site["name"] / f"{filename}.csv", rows)
+        if reuse_contours and "contours_path" in site:
+            print(f"{site['contours_path']}: reusing saved contour export", flush=True)
+        else:
+            site.pop("contours_path", None)
+            finish_contours(root, site)
+        print(f"Saved {site['contours_path']}: {(root / site['contours_path']).stat().st_size / 1024**2:.1f} MiB", flush=True)
+        with Progress(f"{site['name']}/frames.csv: serialize/write", timings=timings, key="export_frames_csv"):
+            write_csv(root / site["name"] / "frames.csv", [dict(series=name, **frame)
+                      for name, series in site["series"].items() for frame in series["frames"]])
         frames = [f for name in names for f in site["series"][name]["frames"]]
         available = sum(f.get("contour_status") == "available" for f in frames)
         site["contour_status"] = "available" if available == len(frames) else "partial" if available else "unavailable"
     record.update(schema_version=3, status="complete", measurement_source="saved uint8 RGB, identical channels")
     print("Rendering interactive comparison report", flush=True)
-    started = time.perf_counter()
-    render_comparison(root, record)
-    record.setdefault("timings_s", {})["comparison_report"] = time.perf_counter() - started
+    timings = record.setdefault("timings_s", {})
+    with Progress("Interactive comparison report", timings=timings, key="comparison_report"):
+        render_comparison(root, record)
     if record.get("settings", {}).get("tensorboard", True):
         print("Combined comparison report finished; writing TensorBoard images", flush=True)
-        started = time.perf_counter()
-        write_tensorboard(root, record)
-        record["timings_s"]["tensorboard"] = time.perf_counter() - started
+        with Progress("TensorBoard comparison", timings=timings, key="tensorboard"):
+            write_tensorboard(root, record)
         print("TensorBoard comparison finished", flush=True)
     else:
         record["timings_s"].pop("tensorboard", None)
         print("Combined comparison report finished; TensorBoard disabled", flush=True)
+    timings["finalization_before_record_save"] = time.perf_counter() - started_finalization
     save_record(root, record)
+    print(f"Comparison finalization complete in {time.perf_counter() - started_finalization:.1f}s", flush=True)
 
 
 def run(config: ComparisonSettings) -> dict:
@@ -580,7 +633,8 @@ def run(config: ComparisonSettings) -> dict:
     from sem_noise.config import AnalysisConfig, load_config as load_noise
     from sem_noise.io import file_hash, pixel_hash
 
-    files_by_site = validate_inputs(config)
+    with Progress("Validating inputs (decode every source frame)") as validation:
+        files_by_site = validate_inputs(config)
     noise = load_noise(config.analysis_config) if config.analysis_config else AnalysisConfig()
     noise = replace(noise, registration="none", compare_direct_registration="none")
     segment = resolve_segmentation_settings(config)
@@ -601,6 +655,7 @@ def run(config: ComparisonSettings) -> dict:
               "unit": "nm" if segment.input.pixel_size_nm else "px", "range_warning": RANGE_WARNING,
               "models": {}, "sites": [], "prediction_ranges": [], "artifacts": [], "warnings": []}
     record.update(contour_method=config.contour_method, otsu_settings=config.otsu.model_dump())
+    record["timings_s"] = {"validate_inputs": validation.elapsed_s}
     contour_options = {"contour_method": "otsu", "otsu": config.otsu} if config.contour_method == "otsu" else {}
     execution_options = ({key: getattr(config, key) for key in ("analysis_batch", "analysis_memory_mb", "io_workers")}
                          if config.contour_method == "otsu" else {})
@@ -619,27 +674,30 @@ def run(config: ComparisonSettings) -> dict:
             if timestamps is None and noise.frame_interval_s is not None:
                 timestamps = (np.arange(128) * noise.frame_interval_s).tolist()
             raw_frames, blocks, total = [], [], None
-            for i, source in enumerate(files):
-                pixels = read_uint8(source)
-                if total is None:
-                    total = np.zeros(pixels.shape, dtype=np.float64)
-                total += pixels
-                path = Path(name) / "raw" / f"frame_{i + 1:03d}.png"
-                save_rgb(root / path, pixels)
-                raw_frames.append({"index": i + 1, "order": i + 1, "timestamp_s": timestamps[i] if timestamps else None,
-                                   "path": path.as_posix(), "source": str(source), "source_sha256": file_hash(source),
-                                   "pixel_sha256": pixel_hash(pixels), "content_sha256": content_key(pixels), "clipped": False})
-                blocks.append(pixels)
-                if len(blocks) == 8:
-                    block = i // 8 + 1
-                    average_path = Path(name) / "average8" / f"block_{block:02d}_{i - 6:03d}-{i + 1:03d}.png"
-                    save_rgb(root / average_path, average_uint8(np.stack(blocks)))
-                    series = site["series"].setdefault("average8", {"frames": [], "step": 0})
-                    series["frames"].append({"index": block, "order": i - 2.5, "first_acquisition": i - 6,
-                                             "last_acquisition": i + 1, "path": average_path.as_posix(),
-                                             "timestamp_s": float(np.mean(timestamps[i-7:i+1])) if timestamps else None,
-                                             "clipped": False})
-                    blocks.clear()
+            with Progress(f"{name}: saving raw images and averages", total=len(files),
+                          timings=site.setdefault("timings_s", {}), key="prepare_saved_images") as progress:
+                for i, source in enumerate(files):
+                    pixels = read_uint8(source)
+                    if total is None:
+                        total = np.zeros(pixels.shape, dtype=np.float64)
+                    total += pixels
+                    path = Path(name) / "raw" / f"frame_{i + 1:03d}.png"
+                    save_rgb(root / path, pixels)
+                    raw_frames.append({"index": i + 1, "order": i + 1, "timestamp_s": timestamps[i] if timestamps else None,
+                                       "path": path.as_posix(), "source": str(source), "source_sha256": file_hash(source),
+                                       "pixel_sha256": pixel_hash(pixels), "content_sha256": content_key(pixels), "clipped": False})
+                    blocks.append(pixels)
+                    if len(blocks) == 8:
+                        block = i // 8 + 1
+                        average_path = Path(name) / "average8" / f"block_{block:02d}_{i - 6:03d}-{i + 1:03d}.png"
+                        save_rgb(root / average_path, average_uint8(np.stack(blocks)))
+                        series = site["series"].setdefault("average8", {"frames": [], "step": 0})
+                        series["frames"].append({"index": block, "order": i - 2.5, "first_acquisition": i - 6,
+                                                 "last_acquisition": i + 1, "path": average_path.as_posix(),
+                                                 "timestamp_s": float(np.mean(timestamps[i-7:i+1])) if timestamps else None,
+                                                 "clipped": False})
+                        blocks.clear()
+                    progress.update(i + 1, source.name)
             full = Path(name) / "visual_reference_only" / "full_average.png"
             save_rgb(root / full, np.rint(total / 128).astype(np.uint8))
             site["full_average"] = full.as_posix()
@@ -648,9 +706,11 @@ def run(config: ComparisonSettings) -> dict:
             reference, template = prepare_reference(root, site, segment, **contour_options,
                 **{key: value for key, value in execution_options.items() if key != "analysis_batch"})
             for series_name, series in site["series"].items():
+                started_registration = time.perf_counter()
                 tracks = registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)
                 for frame, track in zip(series["frames"], tracks):
                     frame.update(track)
+                series.setdefault("timings_s", {})["translation_diagnostics"] = time.perf_counter() - started_registration
                 analyze_series(root, series_name, series, noise, **native_options)
                 observations, contours = measure_series(root, series_name, series, template, site["match_gate_px"], segment,
                                                         **contour_options, **execution_options)
@@ -662,19 +722,21 @@ def run(config: ComparisonSettings) -> dict:
         for model_name, arm in config.checkpoints.items():
             print(f"Loading {model_name}", flush=True)
             checkpoint = arm.checkpoint
-            checkpoint_hash = file_hash(checkpoint)
-            denoiser = Denoiser.from_checkpoint(checkpoint, device=config.device, use_ema=config.ema)
-            metadata = checkpoint_arm_metadata(arm, denoiser)
-            model_config = denoiser.config.model_dump(mode="json")
-            validate_comparable_arm(metadata, model_config, record["models"])
-            forbidden = set(metadata.pop("train_val_content_hashes"))
-            if any(f["content_sha256"] in forbidden for site in record["sites"] for f in site["series"]["raw"]["frames"]):
-                raise ValueError("A comparison test acquisition appears in this checkpoint's train/validation sites")
-            record["warnings"].extend(f"{model_name}: {warning}" for warning in metadata["warnings"])
-            black, white = denoiser.config.data.black_level, denoiser.config.data.white_level
-            if black is None and white is None:
-                black, white = 0.0, 255.0
-            prediction_uint8(np.zeros((1, 1)), black, white)  # Validate fixed levels.
+            with Progress(f"{model_name}: checkpoint hash, weights and training metadata",
+                          timings=record.setdefault("timings_s", {}), key="load_models"):
+                checkpoint_hash = file_hash(checkpoint)
+                denoiser = Denoiser.from_checkpoint(checkpoint, device=config.device, use_ema=config.ema)
+                metadata = checkpoint_arm_metadata(arm, denoiser)
+                model_config = denoiser.config.model_dump(mode="json")
+                validate_comparable_arm(metadata, model_config, record["models"])
+                forbidden = set(metadata.pop("train_val_content_hashes"))
+                if any(f["content_sha256"] in forbidden for site in record["sites"] for f in site["series"]["raw"]["frames"]):
+                    raise ValueError("A comparison test acquisition appears in this checkpoint's train/validation sites")
+                record["warnings"].extend(f"{model_name}: {warning}" for warning in metadata["warnings"])
+                black, white = denoiser.config.data.black_level, denoiser.config.data.white_level
+                if black is None and white is None:
+                    black, white = 0.0, 255.0
+                prediction_uint8(np.zeros((1, 1)), black, white)  # Validate fixed levels.
             model_record = {"checkpoint": str(checkpoint), "sha256": checkpoint_hash,
                             "step": denoiser.checkpoint_step, "black_level": black, "white_level": white,
                             "config": model_config, "arm": metadata,
@@ -686,30 +748,31 @@ def run(config: ComparisonSettings) -> dict:
             for site in record["sites"]:
                 series = {"frames": [], "step": denoiser.checkpoint_step}
                 site["series"][model_name] = series
-                for raw in site["series"]["raw"]["frames"]:
-                    path = Path(site["name"]) / model_name / Path(raw["path"]).name
-                    audit = {"site": site["name"], "model": model_name, "filename": path.as_posix(), "status": "pending"}
-                    record["prediction_ranges"].append(audit)
-                    try:
-                        pixels = read_uint8(root / raw["path"])
-                        normalized = np.clip((pixels.astype(float) - black) / (white - black), 0, 1)
-                        prediction = denoiser.denoise_full(normalized, stride=model_record["stride"],
-                                                           tile_batch=config.tile_batch, clip_output=False)
-                        if prediction.shape != pixels.shape:
-                            raise ValueError("Prediction dimensions differ from the source")
-                        quantized, stats = prediction_uint8(prediction, black, white)
-                    except Exception as error:
-                        audit.update(status="failed", error=str(error))
-                        raise
-                    audit.update(stats, status="complete")
-                    save_rgb(root / path, quantized)
-                    # Reuse RAW translations even if the prediction changes feature positions.
-                    frame = {k: raw[k] for k in ("index", "order", "timestamp_s", "dy_px", "dx_px", "registration_status",
-                                                 "registration_score", "registration_error")}
-                    frame.update(path=path.as_posix(), **stats)
-                    series["frames"].append(frame)
-                    if raw["index"] % 16 == 0:
-                        print(f"{site['name']}/{model_name}: {raw['index']}/128", flush=True)
+                with Progress(f"{site['name']}/{model_name}: inference and saved PNG export", total=128,
+                              timings=series.setdefault("timings_s", {}), key="inference_and_pngs") as progress:
+                    for raw in site["series"]["raw"]["frames"]:
+                        path = Path(site["name"]) / model_name / Path(raw["path"]).name
+                        audit = {"site": site["name"], "model": model_name, "filename": path.as_posix(), "status": "pending"}
+                        record["prediction_ranges"].append(audit)
+                        try:
+                            pixels = read_uint8(root / raw["path"])
+                            normalized = np.clip((pixels.astype(float) - black) / (white - black), 0, 1)
+                            prediction = denoiser.denoise_full(normalized, stride=model_record["stride"],
+                                                               tile_batch=config.tile_batch, clip_output=False)
+                            if prediction.shape != pixels.shape:
+                                raise ValueError("Prediction dimensions differ from the source")
+                            quantized, stats = prediction_uint8(prediction, black, white)
+                        except Exception as error:
+                            audit.update(status="failed", error=str(error))
+                            raise
+                        audit.update(stats, status="complete")
+                        save_rgb(root / path, quantized)
+                        # Reuse RAW translations even if the prediction changes feature positions.
+                        frame = {k: raw[k] for k in ("index", "order", "timestamp_s", "dy_px", "dx_px", "registration_status",
+                                                     "registration_score", "registration_error")}
+                        frame.update(path=path.as_posix(), **stats)
+                        series["frames"].append(frame)
+                        progress.update(len(series["frames"]), path.as_posix())
                 reference = read_uint8(root / site["full_average"])
                 output_registration_diagnostics(root, reference, series, noise.registration_sigma)
                 analyze_series(root, model_name, series, noise, raw_frames=site["series"]["raw"]["frames"],
@@ -719,7 +782,8 @@ def run(config: ComparisonSettings) -> dict:
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
                 save()
-            del denoiser
+            with Progress(f"{model_name}: releasing denoiser"):
+                del denoiser
         finish_comparison(root, record)
     except Exception as error:
         record.update(status="failed", error=str(error))
@@ -761,11 +825,14 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
             io_workers: int | None = None, tensorboard: bool | None = None) -> dict:
     """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
     from sem_noise.config import AnalysisConfig
+    from sem_noise.comparison_storage import load_contours
     from sem_segment.config import Config as SegmentConfig, load_config as load_segment
 
     record_path = record_path.resolve()
     source_root, root = record_path.parent, output_dir.resolve()
-    record = json.loads(record_path.read_text(encoding="utf-8"))
+    with Progress(f"Loading saved comparison {record_path}") as loading:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["timings_s"] = {"load_comparison_json": loading.elapsed_s}
     if contours_only and render_only:
         raise ValueError("--contours-only and --render-only are alternative rebuild modes")
     if contours_only:
@@ -805,11 +872,20 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         return path
 
     for site in record["sites"]:
+        site["timings_s"] = {}
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", site["name"]):
             raise ValueError("Invalid saved site name")
         paths.add(site["full_average"])
-        if "contours" not in site:
-            site["contours"] = json.loads(source(site["contours_path"]).read_text(encoding="utf-8")) if render_only else []
+        if render_only:
+            with Progress(f"{site['name']}: loading saved contours", timings=site["timings_s"], key="load_contours_json"):
+                site["contours"] = load_contours(source_root, site)
+            if "contours_path" in site:
+                paths.add(site["contours_path"])
+        else:
+            site["contours"] = []
+            site.pop("contours_path", None)
+        # Old parts belong to the source bundle; new measurements start afresh.
+        site.pop("contours_parts", None)
         for name, series in site["series"].items():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
                 raise ValueError("Invalid saved series name")
@@ -819,15 +895,22 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                     paths.add(frame["difference_path"])
             if (render_only or contours_only) and series.get("temporal_std"):
                 paths.add(series["temporal_std"])
-    for relative in paths:
-        if not source(relative).is_file():
-            raise ValueError(f"Missing saved image/measurement: {relative}")
+    with Progress("Checking saved comparison assets", total=len(paths)) as progress:
+        for number, relative in enumerate(paths, 1):
+            if not source(relative).is_file():
+                raise ValueError(f"Missing saved image/measurement: {relative}")
+            progress.update(number, relative)
     if root != source_root:
         root.mkdir(parents=True)
-        for relative in sorted(paths):
-            destination = root / source(relative).relative_to(source_root)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source(relative), destination)
+        with Progress("Copying saved comparison assets", total=len(paths),
+                      timings=record["timings_s"], key="copy_saved_assets") as progress:
+            copied_bytes = 0
+            for number, relative in enumerate(sorted(paths), 1):
+                destination = root / source(relative).relative_to(source_root)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source(relative), destination)
+                copied_bytes += destination.stat().st_size
+                progress.update(number, f"{copied_bytes / 1024**2:.1f} MiB copied; {relative}")
     record["rebuilt_from"] = str(record_path)
     record["settings"]["output_dir"] = str(root)
     if tensorboard is not None:
@@ -874,8 +957,10 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                             frame[key] = original[key]
                     output_registration_diagnostics(root, reference, series, noise.registration_sigma)
                 else:
+                    started_registration = time.perf_counter()
                     for frame, track in zip(series["frames"], registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)):
                         frame.update(track)
+                    series["timings_s"]["translation_diagnostics"] = time.perf_counter() - started_registration
                 if not contours_only:
                     series.pop("analysis_reused_from", None)
                     analyze_series(root, name, series, noise, raw_frames=raw,
@@ -884,7 +969,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                                                         **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
-    finish_comparison(root, record)
+    finish_comparison(root, record, reuse_contours=render_only)
     return record
 
 
@@ -982,6 +1067,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    started = time.perf_counter()
     try:
         if args.from_comparison:
             if not args.output_dir:
@@ -1001,10 +1087,10 @@ def main() -> int:
             config = configure_run(args)
             record = run(config)
             output = config.output_dir
-        print(f"Comparison: {output / 'index.html'} ({record['status']})")
+        print(f"Comparison: {output / 'index.html'} ({record['status']}); workflow {time.perf_counter() - started:.1f}s", flush=True)
         return 0 if record["status"] == "complete" else 1
     except (ValueError, OSError, RuntimeError, ImportError) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Error: {error} (workflow {time.perf_counter() - started:.1f}s)", file=sys.stderr, flush=True)
         return 1
 
 

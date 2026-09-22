@@ -8,6 +8,7 @@ import csv
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
+import math
 from pathlib import Path
 import platform
 import shutil
@@ -29,6 +30,10 @@ FRAME_TABLE_KEYS = ("dy_px", "dy_px_se", "dx_px", "dx_px_se", "gain", "gain_se",
 
 
 def _json_value(value):
+    # Contour coordinates are ordinary Python floats. Avoid a NumPy scalar
+    # dispatch for every coordinate while retaining nonfinite -> null behavior.
+    if type(value) is float:
+        return value if math.isfinite(value) else None
     if isinstance(value, dict):
         return {str(k): _json_value(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, np.ndarray)):
@@ -50,7 +55,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
             keys = list(dict.fromkeys(key for row in rows for key in row))
             writer = csv.DictWriter(stream, fieldnames=keys)
             writer.writeheader()
-            writer.writerows(_json_value(rows))
+            writer.writerows(_json_value(row) for row in rows)
 
 
 def _provenance(config: AnalysisConfig, order_source: str) -> dict:

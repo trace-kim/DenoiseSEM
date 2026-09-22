@@ -45,7 +45,7 @@ def saved_record(root: Path, count: int = 8) -> Path:
     return root / "comparison.json"
 
 
-def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction(tmp_path, monkeypatch):
+def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction(tmp_path, monkeypatch, capsys):
     from edge_denoise.infer import Denoiser
     from sem_noise import pipeline, comparison_report
 
@@ -53,6 +53,8 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
     saved = json.loads(source.read_text(encoding="utf-8"))
     series = saved["sites"][0]["series"]
     saved["sites"][0]["series"] = {name: series[name] for name in ("model", "average8", "raw")}
+    saved["timings_s"] = {"save_comparison_json": 1e9}
+    saved["sites"][0]["timings_s"] = {"export_contours_json": 1e9}
     write_json(source, saved)  # JSON key order cannot decide the drift reference.
 
     def forbidden(*args, **kwargs):
@@ -62,6 +64,8 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
     monkeypatch.setattr(pipeline, "analyze_dataset", forbidden)
     monkeypatch.setattr(comparison_report, "write_tensorboard", lambda *args: None)
     record = compare.rebuild(source, tmp_path / "new", metrology_device="cpu")
+    assert record["timings_s"]["save_comparison_json"] < 1e9
+    assert record["sites"][0]["timings_s"]["export_contours_json"] < 1e9
     assert record["schema_version"] == 3
     site = record["sites"][0]
     assert site["contour_status"] == "available"
@@ -76,7 +80,15 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
     original_pngs = {p.relative_to(source.parent): p.read_bytes() for p in source.parent.rglob("*.png")}
     monkeypatch.setattr(compare, "measure_series", forbidden)
     monkeypatch.setattr(compare, "registration_tracks", forbidden)
+    from sem_noise import comparison_storage
+    monkeypatch.setattr(comparison_storage, "finish_contours", forbidden)
     compare.rebuild(tmp_path / "new/comparison.json", tmp_path / "rendered", render_only=True)
+    assert (tmp_path / "new/site/contours.json").read_bytes() == (tmp_path / "rendered/site/contours.json").read_bytes()
+    progress = capsys.readouterr().out
+    assert "Loading saved comparison" in progress
+    assert "site: loading saved contours: starting" in progress
+    assert "Copying saved comparison assets: starting" in progress
+    assert "MiB copied" in progress
     assert (tmp_path / "new" / band).read_bytes() == (tmp_path / "rendered" / band).read_bytes()
     for relative, pixels in original_pngs.items():
         assert (source.parent / relative).read_bytes() == pixels
@@ -85,6 +97,34 @@ def test_rebuild_and_render_only_use_saved_uint8_without_inference_or_correction
         compare.rebuild(source, tmp_path / "invalid", render_only=True)
     with pytest.raises(ValueError, match="new --output-dir"):
         compare.rebuild(source, source.parent)
+
+
+def test_render_only_recovers_incremental_contour_parts_without_remeasurement(tmp_path, monkeypatch):
+    from sem_noise.comparison_storage import load_contours
+
+    source = saved_record(tmp_path / "source", count=2)
+    completed = tmp_path / "measured"
+    record = compare.rebuild(source, completed, contour_method="otsu", metrology_device="cpu", tensorboard=False)
+    expected = record["sites"][0]["contours"]
+    # Reproduce a running snapshot taken after measurements, before finalization.
+    record["sites"][0].pop("contours_path")
+    record["status"] = "running"
+    compare.save_record(completed, record)
+    snapshot = json.loads((completed / "comparison.json").read_text())
+    assert "contours_parts" in snapshot["sites"][0] and "contours" not in snapshot["sites"][0]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Recovery must reuse saved measurements")
+
+    monkeypatch.setattr(compare, "measure_series", forbidden)
+    monkeypatch.setattr(compare, "registration_tracks", forbidden)
+    monkeypatch.setattr(compare, "analyze_series", forbidden)
+    recovered = tmp_path / "recovered"
+    result = compare.rebuild(completed / "comparison.json", recovered, render_only=True, tensorboard=False)
+    assert result["status"] == "complete"
+    saved = json.loads((recovered / "comparison.json").read_text())
+    assert load_contours(recovered, saved["sites"][0]) == expected
+    assert saved["sites"][0]["observations"] == snapshot["sites"][0]["observations"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed for asynchronous viewer regression checks")

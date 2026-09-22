@@ -11,6 +11,8 @@ import shutil
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .progress import Progress
+
 
 def comparison_metrics(record: dict) -> list[dict]:
     rows = []
@@ -98,7 +100,7 @@ def _overlay(image: Image.Image, contours: list[dict]) -> Image.Image:
 
 
 def _contour_band(path: Path, shape: list[int], name: str, frames: list[dict],
-                  grouped: dict, method: str) -> None:
+                  grouped: dict, method: str, *, progress: Progress | None = None) -> None:
     """Export every saved outline in native coordinates, without remeasurement.
 
     SVG keeps subpixel vertices visible when enlarged. Write one acquisition at
@@ -124,7 +126,7 @@ def _contour_band(path: Path, shape: list[int], name: str, frames: list[dict],
                      'Dashed lines mark partial boundaries or mask fallback.</desc>'
                      '<rect x="-100%" y="-100%" width="300%" height="300%" fill="white"/>'
                      '<g fill="none" stroke-width="0.8" stroke-opacity="0.45">')
-        for frame in frames:
+        for number, frame in enumerate(frames, 1):
             t = (frame["order"] - first) / (last - first) if last != first else .5
             (a, start), (b, end) = stops[:2] if t <= .5 else stops[1:]
             color = "#" + "".join(f"{round(x + (y - x) * (t - a) / (b - a)):02x}" for x, y in zip(start, end))
@@ -152,6 +154,8 @@ def _contour_band(path: Path, shape: list[int], name: str, frames: list[dict],
                 if data:
                     stream.write(f'<path d="{data}"{dash}/>')
             stream.write('</g>')
+            if progress is not None:
+                progress.update(number, f"image {frame['index']}")
         bar_y, bar_width = height + 12 * scale, width * .6
         stream.write('</g><defs><linearGradient id="acquisitions">')
         for offset, rgb in stops:
@@ -172,11 +176,12 @@ def render_comparison(root: Path, record: dict) -> Path:
     from .pipeline import write_csv, write_json
 
     root = Path(root)
-    record["metrics"], record["arms"], record["artifacts"] = comparison_metrics(record), comparison_arms(record), []
-    write_json(root / "metrics.json", record["metrics"])
-    write_csv(root / "metrics.csv", [{k: v for k, v in r.items() if k != "values"} | r["values"] for r in record["metrics"]])
-    write_csv(root / "arms.csv", record["arms"])
-    write_json(root / "arms.json", record["arms"])
+    with Progress("Viewer metrics and arm exports"):
+        record["metrics"], record["arms"], record["artifacts"] = comparison_metrics(record), comparison_arms(record), []
+        write_json(root / "metrics.json", record["metrics"])
+        write_csv(root / "metrics.csv", [{k: v for k, v in r.items() if k != "values"} | r["values"] for r in record["metrics"]])
+        write_csv(root / "arms.csv", record["arms"])
+        write_json(root / "arms.json", record["arms"])
     (root / "viewer").mkdir(exist_ok=True)
     for filename in ("comparison.js", "comparison.css"):
         shutil.copyfile(Path(__file__).parent / "assets" / filename, root / "viewer" / filename)
@@ -190,7 +195,11 @@ def render_comparison(root: Path, record: dict) -> Path:
     for site in record["sites"]:
         contours = site.get("contours")
         if contours is None:
-            contours = json.loads((root / site["contours_path"]).read_text(encoding="utf-8"))
+            from .comparison_storage import load_contours
+
+            with Progress(f"{site['name']}: loading viewer contours"):
+                contours = load_contours(root, site)
+        print(f"{site['name']}: viewer uses {len(contours):,} contours and {len(site['observations']):,} observations", flush=True)
         grouped = defaultdict(list)
         for contour in contours:
             grouped[contour["series"], contour["frame"]].append(contour)
@@ -202,37 +211,50 @@ def render_comparison(root: Path, record: dict) -> Path:
         output = {"name": site["name"], "shape": site["image_shape"], "series": {}, "traces": traces,
                   "contour_status": site["contour_status"], "warnings": site["warnings"],
                   "repeatability": site["repeatability"], "hole_count": len(site["template_centroids"])}
-        maps = {name: np.load(root / s["temporal_std"], allow_pickle=False)
-                for name, s in site["series"].items() if s.get("temporal_std")}
-        limit = max((float(m.max()) for m in maps.values()), default=1) or 1
+        with Progress(f"{site['name']}: loading temporal variation maps", timings=site.setdefault("timings_s", {}),
+                      key="viewer_load_temporal_maps"):
+            maps = {name: np.load(root / s["temporal_std"], allow_pickle=False)
+                    for name, s in site["series"].items() if s.get("temporal_std")}
+            limit = max((float(m.max()) for m in maps.values()), default=1) or 1
         for name, series in site["series"].items():
+            label = f"{site['name']}/{name}"
+            timings = series["report_timings_s"] = {}
             frames = []
-            for frame in series["frames"]:
-                key = f"{site['name']}/{name}/{frame['index']}"
-                relative = f"{site['name']}/viewer/{name}/{frame['index']:03d}.js"
-                _script(root / relative, f"window.SEM_CONTOURS[{json.dumps(key)}]", grouped[name, frame["index"]])
-                frames.append({**{k: frame.get(k) for k in frame_keys}, "overlay": relative, "overlay_key": key})
+            with Progress(f"{label}: viewer contour JSON/JS", total=len(series["frames"]),
+                          timings=timings, key="contour_assets") as progress:
+                for number, frame in enumerate(series["frames"], 1):
+                    key = f"{site['name']}/{name}/{frame['index']}"
+                    relative = f"{site['name']}/viewer/{name}/{frame['index']:03d}.js"
+                    _script(root / relative, f"window.SEM_CONTOURS[{json.dumps(key)}]", grouped[name, frame["index"]])
+                    frames.append({**{k: frame.get(k) for k in frame_keys}, "overlay": relative, "overlay_key": key})
+                    progress.update(number, relative)
             item = {"frames": frames, "step": series["step"],
                     "difference_limit_dn": series.get("difference_limit_dn"),
                     "temporal_rms_dn": series.get("native", {}).get("temporal_rms_dn")}
             item["contour_bands"] = {}
             for method in (["coarse"] if view["contour_method"] == "otsu" else ["coarse", "refined"]):
                 relative = f"{site['name']}/viewer/{name}/{method}_band.svg"
-                _contour_band(root / relative, site["image_shape"], name, series["frames"], grouped, method)
+                with Progress(f"{label}: {method} contour SVG", total=len(series["frames"]),
+                              timings=timings, key=f"{method}_band") as progress:
+                    _contour_band(root / relative, site["image_shape"], name, series["frames"], grouped, method,
+                                  progress=progress)
                 item["contour_bands"][method] = relative
             if name in maps:
                 relative = f"{site['name']}/viewer/{name}/temporal_std.png"
-                values = np.rint(np.clip(maps[name] / limit, 0, 1) * 255).astype(np.uint8)
-                Image.fromarray(values).save(root / relative)
+                with Progress(f"{label}: temporal variation PNG", timings=timings, key="temporal_png"):
+                    values = np.rint(np.clip(maps[name] / limit, 0, 1) * 255).astype(np.uint8)
+                    Image.fromarray(values).save(root / relative)
                 item.update(temporal_image=relative, temporal_limit_dn=limit)
             output["series"][name] = item
             first = series["frames"][0]
             relative = f"{site['name']}/viewer/{name}/overview.png"
-            with Image.open(root / first["path"]) as original:
-                _overlay(original, grouped[name, first["index"]]).save(root / relative)
+            with Progress(f"{label}: overview PNG", timings=timings, key="overview_png"):
+                with Image.open(root / first["path"]) as original:
+                    _overlay(original, grouped[name, first["index"]]).save(root / relative)
             record["artifacts"].append({"path": relative, "site": site["name"], "series": name, "label": "Full-image contours"})
         view["sites"].append(output)
-    _script(root / "viewer/data.js", "window.SEM_REPORT", view)
+    with Progress("viewer/data.js: serialize/write", timings=record.setdefault("timings_s", {}), key="viewer_data_js"):
+        _script(root / "viewer/data.js", "window.SEM_REPORT", view)
     html = (Path(__file__).parent / "assets/comparison.html").read_text(encoding="utf-8")
     details = _warning(record, [r for r in record["prediction_ranges"] if r.get("clipped")])
     details += _table(record["arms"], ["arm", "registration", "brightness", "step", "ema", "settings_source"])
@@ -247,7 +269,8 @@ def write_tensorboard(root: Path, record: dict, *, writer_factory=None) -> None:
     if writer_factory is None:
         from torch.utils.tensorboard import SummaryWriter
         writer_factory = SummaryWriter
-    writer = writer_factory(log_dir=str(root / "tensorboard_comparison"))
+    with Progress("TensorBoard: opening event writer"):
+        writer = writer_factory(log_dir=str(root / "tensorboard_comparison"))
     try:
         writer.add_text("comparison/protocol", "All analysis measures saved uint8 images. Acquisition image steps are acquisition numbers; "
                         "average8 uses each block's first acquisition. Average128 is a static reference, not ground truth. "
@@ -264,17 +287,23 @@ def write_tensorboard(root: Path, record: dict, *, writer_factory=None) -> None:
             for contour in site["contours"]:
                 grouped[contour["series"], contour["frame"]].append(contour)
             for name, series in site["series"].items():
-                for frame in series["frames"]:
-                    prefix = f"acquisitions/{site['name']}/{name}"
-                    step = frame.get("first_acquisition", frame["index"]) if name != "average128" else 0
-                    with Image.open(root / frame["path"]) as original:
-                        writer.add_image(f"{prefix}/pixels", np.asarray(original.convert("RGB")), step, dataformats="HWC")
-                        annotated = _overlay(original, grouped[name, frame["index"]])
-                        writer.add_image(f"{prefix}/contours", np.asarray(annotated), step, dataformats="HWC")
-                    for key in ("mean_dn", "brightness_delta_dn", "output_minus_raw_dy_px", "output_minus_raw_dx_px"):
-                        if frame.get(key) is not None:
-                            writer.add_scalar(f"{prefix}/{key}", frame[key], step)
+                with Progress(f"{site['name']}/{name}: TensorBoard decode/overlay/encode (2 images per frame)",
+                              total=len(series["frames"]), timings=series.setdefault("report_timings_s", {}),
+                              key="tensorboard_images") as progress:
+                    for number, frame in enumerate(series["frames"], 1):
+                        prefix = f"acquisitions/{site['name']}/{name}"
+                        step = frame.get("first_acquisition", frame["index"]) if name != "average128" else 0
+                        with Image.open(root / frame["path"]) as original:
+                            writer.add_image(f"{prefix}/pixels", np.asarray(original.convert("RGB")), step, dataformats="HWC")
+                            annotated = _overlay(original, grouped[name, frame["index"]])
+                            writer.add_image(f"{prefix}/contours", np.asarray(annotated), step, dataformats="HWC")
+                        for key in ("mean_dn", "brightness_delta_dn", "output_minus_raw_dy_px", "output_minus_raw_dx_px"):
+                            if frame.get(key) is not None:
+                                writer.add_scalar(f"{prefix}/{key}", frame[key], step)
+                        progress.update(number, frame["path"])
                 if any(f.get("clipped") for f in series["frames"]):
                     writer.add_text(f"{site['name']}/{name}/range_warning", record["range_warning"], series["step"])
     finally:
-        writer.close()
+        with Progress("TensorBoard: flushing and closing event writer", timings=record.setdefault("timings_s", {}),
+                      key="tensorboard_close"):
+            writer.close()
