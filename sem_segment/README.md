@@ -228,6 +228,10 @@ cleanly.
 [Saved-image contour preview](docs/contour_preview.md) compares existing report
 outlines with a Gaussian + Otsu baseline, without inference or new metrology.
 It includes the remote command and a reproducible, labeled synthetic example.
+The [main comparison workflow](../edge_denoise/docs/real_sem_comparison.md#gpu-execution)
+uses batched CuPy Gaussian/Otsu/component detection with CPU contour tracing and
+documents the remote CPU/GPU equivalence and throughput check. This is separate
+from the optional gradient-refinement CUDA implementation described above.
 
 `docs/sem_segment_method.md` — the maths: normal estimation under staircase
 quantisation, the three edge estimators and where each is biased, the roughness

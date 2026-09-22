@@ -8,6 +8,7 @@ separately for display. No edge refinement or additional mask cleanup runs.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 import time
 
@@ -17,7 +18,7 @@ from .backends import InstanceMask
 from .config import MetrologyConfig
 from .contours import Contour, polygon_area
 from .metrology import measure_region, summarise_image
-from .otsu_baseline import OtsuSettings, otsu_baseline
+from .otsu_baseline import OtsuResult, OtsuSettings, otsu_baseline
 from .pipeline import Diagnostics, SegmentationResult
 
 
@@ -28,20 +29,53 @@ def measure_saved_otsu(
     crop: tuple[int, int, int, int] | None = None,
     device: str = "cpu",
     metrology: MetrologyConfig | None = None,
+    memory_mb: int = 8192,
+    io_workers: int = 2,
 ) -> SegmentationResult:
     """Measure closed baseline masks using the existing area/ECD definitions.
 
     Returned geometry is relative to the measurement crop, like segment_image.
     The caller restores the crop offset once when exporting full-image contours.
     """
-    from scipy import ndimage
-    from skimage.measure import regionprops
-
     settings = settings or OtsuSettings()
     metrology = metrology or MetrologyConfig()
-    result = otsu_baseline(path, settings, crop=crop, device=device)
+    result = otsu_baseline(path, settings, crop=crop, device=device, memory_mb=memory_mb, io_workers=io_workers)
+    return measure_otsu_result(result, settings, crop=crop, device=device, metrology=metrology)
+
+
+def iter_measure_saved_otsu(paths: Sequence[Path], settings: OtsuSettings, *,
+                            crop: tuple[int, int, int, int] | None = None,
+                            device: str = "cpu", metrology: MetrologyConfig | None = None,
+                            batch_size: int = 16, memory_mb: int = 8192,
+                            io_workers: int = 2) -> Iterator[SegmentationResult]:
+    """Stream measurements while the CUDA producer processes the next batch."""
+    if device == "cpu":
+        for path in paths:
+            yield measure_saved_otsu(path, settings, crop=crop, device=device, metrology=metrology)
+        return
+    from .otsu_cuda import iter_saved_otsu
+
+    results = iter_saved_otsu(paths, settings, crop=crop, device=device,
+                              batch_size=batch_size, memory_mb=memory_mb, io_workers=io_workers)
+    try:
+        for result in results:
+            yield measure_otsu_result(result, settings, crop=crop, device=device, metrology=metrology)
+            del result
+    finally:
+        results.close()
+
+
+def measure_otsu_result(result: OtsuResult, settings: OtsuSettings, *,
+                        crop: tuple[int, int, int, int] | None = None,
+                        device: str = "cpu", metrology: MetrologyConfig | None = None) -> SegmentationResult:
+    """Adapt a detected label map without decoding or labeling it a second time."""
+    from skimage.measure import regionprops
+
+    metrology = metrology or MetrologyConfig()
     started = time.perf_counter()
-    labels, _ = ndimage.label(result.mask, structure=ndimage.generate_binary_structure(2, 1))
+    labels = result.labels
+    if labels is None:
+        raise ValueError("Otsu measurement requires the detector's retained label map")
     grouped = defaultdict(list)
     offset = np.array([crop[0], crop[2]]) if crop else np.zeros(2)
     for full_path in result.outlines:
@@ -91,7 +125,8 @@ def measure_saved_otsu(
             backend={"backend": "otsu", "algorithm": "gaussian + otsu + four-connected components",
                      "settings": settings.model_dump(), "threshold_dn": result.threshold_dn,
                      "gaussian_backend": result.gaussian_backend, "device": device,
-                     "component_count": result.component_count, "retained_count": result.retained_count},
+                     "component_count": result.component_count, "retained_count": result.retained_count,
+                     "execution": result.execution},
             timings_s=timings, refinement={"backend": "disabled", "device": None},
         ),
     )

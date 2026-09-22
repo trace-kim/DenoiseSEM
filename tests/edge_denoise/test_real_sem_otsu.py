@@ -79,7 +79,8 @@ def test_rebuild_uses_otsu_in_main_report_without_inference(tmp_path, monkeypatc
         compare.rebuild(output / "comparison.json", tmp_path / "invalid", render_only=True, contour_method="current")
 
 
-def test_new_comparison_runs_otsu_on_reference_raw_averages_and_quantized_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_new_comparison_runs_otsu_on_reference_raw_averages_and_quantized_model(tmp_path, monkeypatch, fake_cupy, device):
     from sem_noise import comparison_report
     from sem_segment import otsu_measurement
 
@@ -106,39 +107,32 @@ def test_new_comparison_runs_otsu_on_reference_raw_averages_and_quantized_model(
     monkeypatch.setattr(otsu_measurement, "measure_saved_otsu", measured)
     settings = compare.ComparisonSettings(checkpoints={"model": arm},
         sites={"site": compare.SiteSettings(source_dir=source)}, output_dir=tmp_path / "new",
-        contour_method="otsu", metrology_device="cpu", otsu={"polarity": "dark", "sigma_px": 1., "min_area_px": 25})
+        contour_method="otsu", metrology_device=device, otsu={"polarity": "dark", "sigma_px": 1., "min_area_px": 25})
     record = compare.run(settings)
     assert record["status"] == "complete" and record["contour_method"] == "otsu"
-    assert len(calls) == 1 + 128 + 16 + 1 + 128
+    assert len(calls) == (1 + 128 + 16 + 1 + 128 if device == "cpu" else 1)
+    if device != "cpu":
+        assert len(fake_cupy.labels) == 1 + 128 + 16 + 1 + 128
+        assert any(shape[0] == 16 for shape, _ in fake_cupy.filters)
     assert all(config == settings.otsu for _, config in calls)
     assert all(frame["brightness_delta_dn"] == 5 for frame in record["sites"][0]["series"]["model"]["frames"])
     assert all(frame["contour_counts"]["complete"] == 1
                for series in record["sites"][0]["series"].values() for frame in series["frames"])
 
 
-def test_otsu_cuda_uses_only_gaussian_and_records_actual_backend(tmp_path, monkeypatch):
-    from scipy.ndimage import gaussian_filter
+def test_otsu_cuda_batches_detector_and_native_analysis(tmp_path, monkeypatch, fake_cupy):
     from sem_noise import comparison_report
 
     source = saved_record(tmp_path / "source", count=2)
     forbid_legacy(monkeypatch)
     monkeypatch.setattr(comparison_report, "write_tensorboard", lambda *args: None)
-    calls = []
-
-    class Device:
-        def __init__(self, index):
-            calls.append(index)
-        def __enter__(self):
-            pass
-        def __exit__(self, *args):
-            pass
-
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
-    monkeypatch.setitem(sys.modules, "cupy", SimpleNamespace(cuda=SimpleNamespace(Device=Device), asarray=np.asarray, asnumpy=np.asarray))
-    monkeypatch.setitem(sys.modules, "cupyx.scipy.ndimage", SimpleNamespace(gaussian_filter=gaussian_filter))
     record = compare.rebuild(source, tmp_path / "cuda", contour_method="otsu", metrology_device="cuda:1")
-    assert calls == [1] * 7  # Reference plus six saved images.
+    assert set(fake_cupy.devices) == {1}
+    assert len(fake_cupy.labels) == 7  # Reference plus six saved images.
+    assert any(shape[0] == 2 for shape, _ in fake_cupy.filters)
     assert all(f["gaussian_backend"] == "cupy" for s in record["sites"][0]["series"].values() for f in s["frames"])
+    assert all(s["native"]["backend"] == "cupy" for s in record["sites"][0]["series"].values())
 
 
 def test_main_report_preserves_border_paths_and_crop_offsets(tmp_path):
@@ -200,3 +194,55 @@ def test_switching_back_to_current_clears_active_otsu_frame_metadata(tmp_path, m
         assert series["segmentation_backend"]["backend"] == "classical"
         assert all("otsu_threshold_dn" not in f and "gaussian_backend" not in f for f in series["frames"])
     assert any(c["status"]["refined"] == "valid" for c in current["sites"][0]["contours"])
+
+
+def test_contours_only_reuses_complete_analysis_and_skips_tensorboard(tmp_path, monkeypatch, fake_cupy):
+    from sem_noise import comparison_report
+
+    source = saved_record(tmp_path / "source", count=3)
+    monkeypatch.setattr(comparison_report, "write_tensorboard", lambda *args: None)
+    full = compare.rebuild(source, tmp_path / "complete", contour_method="otsu", metrology_device="cpu")
+    previous = {name: series.copy() for name, series in full["sites"][0]["series"].items()}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A contour-only experiment cannot redo brightness, drift, inference or TensorBoard")
+
+    monkeypatch.setattr(compare, "registration_tracks", forbidden)
+    monkeypatch.setattr(compare, "analyze_series", forbidden)
+    monkeypatch.setattr(comparison_report, "write_tensorboard", forbidden)
+    monkeypatch.setattr(Denoiser, "from_checkpoint", forbidden)
+    result = compare.rebuild(tmp_path / "complete/comparison.json", tmp_path / "fast",
+        contours_only=True, metrology_device="cuda:1", analysis_batch=2, analysis_memory_mb=128,
+        io_workers=1, tensorboard=False)
+    assert result["status"] == "complete" and not result["settings"]["tensorboard"]
+    assert result["settings"]["analysis_batch"] == 2
+    assert (tmp_path / "fast/index.html").is_file()
+    for name, series in result["sites"][0]["series"].items():
+        original = previous[name]
+        assert series["native"] == original["native"]
+        assert series["analysis_reused_from"]
+        for old, new in zip(original["frames"], series["frames"]):
+            for key in ("mean_dn", "dy_px", "dx_px", "brightness_delta_dn", "output_minus_raw_dx_px"):
+                assert old.get(key) == new.get(key)
+            for key in ("path", "difference_path"):
+                if key in old:
+                    assert (tmp_path / "complete" / old[key]).read_bytes() == (tmp_path / "fast" / new[key]).read_bytes()
+            assert new["segmentation_execution"]["batch_capacity"] == 2
+        if "temporal_std" in original:
+            assert (tmp_path / "complete" / original["temporal_std"]).read_bytes() == (tmp_path / "fast" / series["temporal_std"]).read_bytes()
+    with pytest.raises(ValueError, match="complete saved analysis"):
+        compare.rebuild(source, tmp_path / "bad", contours_only=True)
+    assert not (tmp_path / "bad").exists()
+    with pytest.raises(ValueError, match="alternative"):
+        compare.rebuild(source, tmp_path / "bad", contours_only=True, render_only=True)
+
+
+def test_execution_flags_validate_and_do_not_change_detector_settings():
+    args = compare.build_parser().parse_args(["--analysis-batch", "24", "--analysis-memory-mb", "4096",
+        "--io-workers", "3", "--tile-batch", "64", "--no-tensorboard"])
+    config = compare.configure_run(args)
+    assert (config.analysis_batch, config.analysis_memory_mb, config.io_workers, config.tile_batch) == (24, 4096, 3, 64)
+    assert not config.tensorboard and config.otsu == OtsuSettings()
+    for option in ("--analysis-batch", "--analysis-memory-mb", "--io-workers"):
+        with pytest.raises(ValueError):
+            compare.configure_run(compare.build_parser().parse_args([option, "0"]))

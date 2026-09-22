@@ -1,5 +1,13 @@
 # Establish a simple contour baseline before replacing the algorithm
 
+> Execution update (2026-09-22): algorithmic simplicity does not relax GPU or
+> workflow-efficiency requirements. The historical CPU-only remainder below is
+> superseded: CUDA runs Gaussian, ordinary per-image Otsu and connected-component
+> filtering in bounded batches, overlapping CPU contours. The main workflow also
+> supports CUDA native statistics and explicit reuse of unrelated completed
+> analysis. See the real SEM comparison guide for execution controls and the
+> remote equivalence/throughput benchmark. The detector itself remains unchanged.
+
 > Follow-up scope, 2026-09-22: the user requested integration into the actual
 > remote analysis workflow. Gaussian + Otsu now runs through
 > `tools/real_sem_compare.py` for both new runs and saved-report rebuilds, and

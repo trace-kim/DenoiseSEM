@@ -26,7 +26,7 @@ Replace `--from-comparison` with the actual saved report and choose a new,
 separate output directory. Open its `index.html` on that machine, keeping its
 assets alongside it. There is no need to transfer images or logs to this PC.
 Use `--device cpu` locally. The command requires the existing `[analysis]`
-dependencies; CUDA smoothing uses the same optional CuPy installation described
+dependencies; CUDA detection uses the same optional CuPy installation described
 in [the package guide](../README.md). No model weights are required.
 
 ## Detector
@@ -57,11 +57,15 @@ border stay open. The detector never pads, fills holes, splits connected regions
 fits circles, resamples, or refines boundaries. Crop offsets are restored to
 full-image coordinates for display.
 
-Only Gaussian smoothing runs on CUDA. Transfers and blocking completion are
-included in its timing. Otsu, component filtering, and tracing run on CPU.
+Gaussian smoothing, Otsu thresholding and four-connected component filtering run
+on CUDA when requested. Only integer labels and scalar diagnostics return to CPU;
+tracing uses the same scikit-image function as the CPU reference. CUDA events
+record stage times and transfers. The standalone preview processes one image at
+a time; the main comparison pipeline batches and overlaps these operations.
 `cuda:N` refers to the scheduler-visible device N; GPU visibility is left alone.
-CUDA errors are reported without silently switching to CPU. Sigma zero does not
-use CUDA even if requested. Metadata records the actual Gaussian backend.
+CUDA errors are reported without silently switching to CPU. Sigma zero disables
+smoothing only; CUDA thresholding and components still require CuPy. Metadata
+records the actual Gaussian backend.
 
 ## Viewer and saved files
 

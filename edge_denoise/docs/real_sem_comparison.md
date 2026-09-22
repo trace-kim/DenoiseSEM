@@ -63,6 +63,26 @@ segment images, or load a model. It requires the revised report format.
 Detector/device overrides require remeasurement and cannot accompany
 `--render-only`.
 
+For repeated contour experiments on a **completed** report, use:
+
+```bash
+python tools/real_sem_compare.py \
+  --from-comparison output/260921_real_n2n_comparison/comparison.json \
+  --output-dir output/260921_real_n2n_otsu_fast \
+  --contour-method otsu --metrology-device cuda:0 \
+  --contours-only --no-tensorboard
+```
+
+`--contours-only` recomputes the full-average feature IDs, every image's contours,
+matching and metrology, while reusing stored brightness, temporal variation and
+translation diagnostics. It validates that those measurements and their image
+assets are present, and rejects incomplete reports. As with `--render-only`,
+the saved images must still be the images described by the report. The source
+report and its files are preserved. Omit this flag for complete reanalysis.
+`--no-tensorboard` skips duplicate image encoding for TensorBoard; HTML, native
+image links and CSV/JSON measurements are still produced. Both flags work without
+checkpoints or inference. Use `--tensorboard` to enable TensorBoard again.
+
 ## Otsu detector and measurements
 
 The default is dark foreground, Gaussian sigma 1 px, and minimum component area
@@ -134,9 +154,14 @@ GPU settings come from the base config. Other useful flags:
 | `--segmentation-config PATH` | Crop, physical scale and metrology settings; also detector/refinement settings for `current`. |
 | `--contour-method otsu` | Use Gaussian + Otsu in the main report; `current` selects the previous method. |
 | `--otsu-config PATH` | Detector YAML with `polarity`, `sigma_px`, and `min_area_px`. |
-| `--tile-batch N` | Inference tile batch size. |
+| `--tile-batch N` | Inference tile batch size; default 32. |
+| `--analysis-batch N` | Maximum images per CUDA Otsu batch; default 16. |
+| `--analysis-memory-mb N` | Estimated batch working-set budget in MiB; default 8192. |
+| `--io-workers N` | Saved-image decoding workers; default 2. |
+| `--contours-only` | On rebuilds, reuse completed brightness/noise/drift analysis and remeasure contours. |
+| `--no-tensorboard` | Produce the HTML/CSV/JSON report without TensorBoard image encoding. |
 | `--difference-limit-dn 32` | One symmetric display limit for output-minus-raw images, in DN. |
-| `--metrology-device cpu` | CPU Otsu smoothing or current-method refinement. |
+| `--metrology-device cpu` | CPU Otsu/native analysis or current-method refinement. |
 
 The current six-arm study checks the same real N2N objective, architecture,
 normalization, native source content and train/validation/test splits. It rejects
@@ -146,20 +171,56 @@ examining test sites.
 
 ## GPU execution
 
-The base config uses logical `cuda:0` for inference and Otsu Gaussian smoothing.
-It uses one GPU at a time and keeps one model resident. This is appropriate on
-the four-H100 server without introducing distributed report execution. CUDA
-smoothing/refinement uses the existing optional CuPy dependency; install the wheel matching
+The base config uses logical `cuda:0` for inference, native brightness/temporal
+statistics, Gaussian smoothing, ordinary per-image Otsu thresholds, four-connected
+component labeling and minimum-area filtering. CUDA execution uses the existing
+optional CuPy dependency; install the wheel matching
 the server's toolkit as described in [sem_segment](../../sem_segment/README.md).
 CUDA errors are explicit, with no silent CPU fallback. Under Slurm, preserve
 the scheduler's GPU visibility and use its logical device numbering.
 
-Otsu thresholding, component labeling, ECC translation estimation, polygon
-geometry and rendering remain on CPU. Only Gaussian filtering runs on CUDA
-for Otsu; sigma zero disables it. The current method uses CUDA for refinement.
-Native brightness and temporal statistics stream through the saved images and
-do not run the expensive acquisition-correction reports. Per-series timings and
-the active detector and actual Gaussian backend remain in `comparison.json`.
+Gaussian filtering batches images without smoothing along the acquisition axis.
+Every image has its own 256-bin histogram and threshold. Labels and minimum-area
+filtering stay on GPU; only retained int32 label maps and scalar diagnostics
+return to CPU. Metrology reuses those labels instead of labeling the mask again.
+One producer decodes and processes the next batch while the caller traces and
+measures the previous batch. One batch is queued ahead of the consumer; `--analysis-batch`
+and an estimated 96 bytes per pixel working-set budget bound their size. A single
+image exceeding the budget fails explicitly. This is a batching estimate, not a
+hard limit on CuPy's memory pool or concurrent inference allocations. Reduce the
+batch/budget if other jobs or models occupy GPU memory.
+
+The ordinary detector and float64 measurement arithmetic are unchanged. Sigma
+zero disables only smoothing; CUDA thresholding and labeling still run. Native
+statistics keep float64 Welford accumulators on GPU and return the final SD map
+and frame summaries. OpenCV ECC, scikit-image contour tracing, polygon geometry,
+image encoding and report writing remain on CPU. No new registration estimator
+is substituted. `--contours-only` avoids repeating ECC when testing contours.
+
+`comparison.json` records actual batch sizes, execution backends, CUDA-event
+stage times, transfers and series wall time. Per-frame CUDA timings are amortized
+batch costs; overlapping stage totals do not add up to wall time. TensorBoard
+generation has its own elapsed time. The GPU implementation uses one selected
+GPU; this command does not distribute work across all four H100s.
+
+Validate the hardware path on the server without copying anything here:
+
+```bash
+python tools/benchmark_sem_analysis.py \
+  --from-comparison output/260921_real_n2n_comparison/comparison.json \
+  --device cuda:0 --frames-per-source 16 --analysis-batch 16 \
+  --output-json output/260921_real_n2n_otsu_benchmark.json
+```
+
+This compares CPU reference and CUDA masks, outline coordinates, thresholds,
+counts, ECD and native brightness/temporal statistics on saved images from every source. Sampling includes acquisitions
+9 and 29 where available. It separates warm-up from timing, prints per-source
+throughput and stage costs, and exits unsuccessfully on differences. It measures
+decoding, detection and mask metrology; the separate native-statistics agreement
+check is outside that timer, as are inference, ECC and report rendering.
+`--otsu-config` selects a detector YAML; `--device cpu` exercises the command
+locally. Local tests use numerical CuPy mocks; hardware speed and floating-point
+agreement must be established by this remote check.
 
 ## Inspect the report on the server
 

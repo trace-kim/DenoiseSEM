@@ -22,6 +22,15 @@ python tools/real_sem_compare.py \
 Replace the input directory with your saved report. `--contour-method current`
 selects the previous method; `--metrology-device cpu` selects CPU execution.
 
+For subsequent contour experiments on a completed report, add `--contours-only`
+and `--no-tensorboard` to reuse brightness/noise/drift measurements and skip TensorBoard
+image encoding. CUDA now runs smoothing, Otsu, component filtering and native
+statistics; batched contour analysis defaults to 16 images with an 8192 MiB
+estimated working-set budget. `--analysis-batch`, `--analysis-memory-mb` and
+`--io-workers` control execution independently of the detector settings. The
+[comparison guide](../edge_denoise/docs/real_sem_comparison.md#gpu-execution)
+includes the remote CPU/GPU agreement and throughput benchmark.
+
 This repository holds seven independent pieces of work, separated by ownership.
 The original packages used to share one folder. **Every command below is run
 from the repository root** (`E:\PythonProjects\DenoiseSEM`).

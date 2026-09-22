@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -187,27 +186,8 @@ def test_invalid_settings_fail(setting):
         OtsuSettings(**setting)
 
 
-def test_cuda_gaussian_selects_visible_device_and_matches_cpu(tmp_path, monkeypatch):
-    from scipy.ndimage import gaussian_filter
-
-    calls = []
-
-    class Device:
-        def __init__(self, index):
-            calls.append(("device", index))
-        def __enter__(self):
-            calls.append("enter")
-        def __exit__(self, *args):
-            calls.append("exit")
-
-    def to_cpu(value):
-        calls.append("copy_to_cpu")
-        return value
-
+def test_cuda_detector_selects_visible_device_and_matches_cpu(tmp_path, monkeypatch, fake_cupy):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
-    monkeypatch.setitem(sys.modules, "cupy", SimpleNamespace(cuda=SimpleNamespace(Device=Device),
-                                                           asarray=np.asarray, asnumpy=to_cpu))
-    monkeypatch.setitem(sys.modules, "cupyx.scipy.ndimage", SimpleNamespace(gaussian_filter=gaussian_filter))
     pixels = np.full((48, 48), 200, dtype=np.uint8)
     pixels[10:30, 10:30] = 40
     path = save(tmp_path / "cuda.png", pixels)
@@ -215,17 +195,20 @@ def test_cuda_gaussian_selects_visible_device_and_matches_cpu(tmp_path, monkeypa
     cuda = otsu_baseline(path, device="cuda:1")
     np.testing.assert_array_equal(cpu.mask, cuda.mask)
     assert cuda.threshold_dn == cpu.threshold_dn
-    assert calls == [("device", 1), "enter", "copy_to_cpu", "exit"]
+    assert fake_cupy.devices == [1]
+    assert fake_cupy.labels == [(48, 48)]
+    assert fake_cupy.downloads[0] == ((1, 48, 48), np.dtype("int32"))
     assert cuda.gaussian_backend == "cupy"
     assert all(t >= 0 for t in cuda.timings_s.values())
 
 
-def test_cuda_unavailable_fails_and_sigma_zero_skips_cuda(tmp_path, monkeypatch):
+def test_cuda_unavailable_fails_even_when_smoothing_is_disabled(tmp_path, monkeypatch):
     path = save(tmp_path / "cuda.png", np.full((32, 32), 40, dtype=np.uint8))
     monkeypatch.setitem(sys.modules, "cupy", None)
     with pytest.raises(RuntimeError, match="requires CuPy"):
         otsu_baseline(path, device="cuda:0")
-    assert otsu_baseline(path, OtsuSettings(sigma_px=0), device="cuda:0").gaussian_backend == "disabled"
+    with pytest.raises(RuntimeError, match="requires CuPy"):
+        otsu_baseline(path, OtsuSettings(sigma_px=0), device="cuda:0")
     with pytest.raises(ValueError, match="device"):
         otsu_baseline(path, device="auto")
 

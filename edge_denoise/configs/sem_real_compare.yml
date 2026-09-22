@@ -37,10 +37,16 @@ sites:
   260904_0947-13: /data/260904_raw_data/test/260904_0947-13
 output_dir: output/260921_real_n2n_comparison
 device: cuda:0
-# Use one H100 for inference and Otsu Gaussian smoothing. Requires CuPy for CUDA.
+# Use one H100 for inference, native statistics, Gaussian + Otsu, and components.
+# Requires CuPy for CUDA. Contour tracing and OpenCV ECC remain on CPU.
 # --metrology-device cpu is available for CPU-only installations.
 metrology_device: cuda:0
-tile_batch: 4
+tile_batch: 32
+# Execution controls; these do not change the three detector settings below.
+analysis_batch: 16
+analysis_memory_mb: 8192
+io_workers: 2
+tensorboard: true
 ema: true
 # Only registration_sigma / frame_interval_s from a legacy analysis config
 # affect the comparison. Acquisition correction diagnostics are never run.

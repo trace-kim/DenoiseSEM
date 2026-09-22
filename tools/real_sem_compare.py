@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, replace
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -64,7 +65,11 @@ class ComparisonSettings(BaseModel):
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
-    tile_batch: int = Field(default=4, ge=1)
+    tile_batch: int = Field(default=32, ge=1)
+    analysis_batch: int = Field(default=16, ge=1)
+    analysis_memory_mb: int = Field(default=8192, ge=1)
+    io_workers: int = Field(default=2, ge=1)
+    tensorboard: bool = True
     difference_limit_dn: float = Field(default=32.0, gt=0, allow_inf_nan=False)
     ema: bool = True
     frame_interval_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -267,9 +272,18 @@ def output_registration_diagnostics(root: Path, reference: np.ndarray, series: d
 
 def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                    gate: float, segment_config: SegmentConfig, *,
-                   contour_method: str = "current", otsu: OtsuSettings | None = None) -> tuple[list[dict], list[dict]]:
+                   contour_method: str = "current", otsu: OtsuSettings | None = None,
+                   analysis_batch: int = 16, analysis_memory_mb: int = 8192,
+                   io_workers: int = 2) -> tuple[list[dict], list[dict]]:
     if contour_method == "otsu":
-        return _measure_series(root, name, series, template, gate, segment_config, otsu=otsu or OtsuSettings())
+        from sem_segment.otsu_measurement import iter_measure_saved_otsu
+
+        settings = otsu or OtsuSettings()
+        results = iter_measure_saved_otsu([root / f["path"] for f in series["frames"]], settings,
+            crop=segment_config.input.crop, device=segment_config.refine.device, metrology=segment_config.metrology,
+            batch_size=analysis_batch, memory_mb=analysis_memory_mb, io_workers=io_workers)
+        with closing(results):
+            return _measure_series(root, name, series, template, gate, segment_config, otsu=settings, results=results)
     if contour_method != "current":
         raise ValueError("contour_method must be current or otsu")
     if segment_config.refine.enabled and segment_config.refine.device != "cpu":
@@ -297,7 +311,7 @@ def _measurement_status(region, method: str, config: SegmentConfig, *, mask_only
 
 def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                     gate: float, segment_config: SegmentConfig, *, refiner=None,
-                    otsu: OtsuSettings | None = None) -> tuple[list[dict], list[dict]]:
+                    otsu: OtsuSettings | None = None, results=None) -> tuple[list[dict], list[dict]]:
     from sem_segment.backends import build_segmenter
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import match_centroids
@@ -315,14 +329,13 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         # Measurements always start by decoding the saved, quantized file.
         crop = segment_config.input.crop
         if otsu is not None:
-            from sem_segment.otsu_measurement import measure_saved_otsu
-
-            result = measure_saved_otsu(root / frame["path"], otsu, crop=crop,
-                                        device=segment_config.refine.device, metrology=segment_config.metrology)
+            result = next(results)
             frame["otsu_threshold_dn"] = result.diagnostics.backend["threshold_dn"]
             frame["gaussian_backend"] = result.diagnostics.backend["gaussian_backend"]
+            frame["segmentation_execution"] = result.diagnostics.backend["execution"]
             series["segmentation_backend"] = {"backend": "otsu", "settings": otsu.model_dump(),
-                                               "device": segment_config.refine.device}
+                                               "device": segment_config.refine.device,
+                                               "execution": result.diagnostics.backend["execution"]}
         else:
             pixels = read_uint8(root / frame["path"])
             if crop:
@@ -332,6 +345,7 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
             result = segment_image(pixels.astype(np.float64) / 255.0, segment_config, segmenter=segmenter, **extra)
             frame.pop("otsu_threshold_dn", None)
             frame.pop("gaussian_backend", None)
+            frame.pop("segmentation_execution", None)
             series["segmentation_backend"] = result.diagnostics.backend
         series["refinement_backend"] = result.diagnostics.refinement
         frame["segmentation_timings_s"] = result.diagnostics.timings_s
@@ -407,16 +421,18 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
 
 
 def analyze_series(root: Path, name: str, series: dict, noise_config: AnalysisConfig,
-                   *, raw_frames: list[dict] | None = None, difference_limit: float = 32.0) -> None:
+                   *, raw_frames: list[dict] | None = None, difference_limit: float = 32.0,
+                   device: str = "cpu") -> None:
     """Measure delivered pixels only; never call the acquisition-correction pipeline."""
     from sem_noise.comparison_metrics import difference_rgb, native_series_statistics
 
     started = time.perf_counter()
     print(f"{name}: measuring native uint8 brightness and temporal variation", flush=True)
-    rows, std = native_series_statistics(read_uint8(root / f["path"]) for f in series["frames"])
+    rows, std = native_series_statistics((read_uint8(root / f["path"]) for f in series["frames"]), device=device)
     for frame, row in zip(series["frames"], rows):
         frame.update(row)
-    series["native"] = {"frames": len(rows), "temporal_rms_dn": float(np.sqrt(np.mean(std**2))) if std is not None else None}
+    series["native"] = {"frames": len(rows), "temporal_rms_dn": float(np.sqrt(np.mean(std**2))) if std is not None else None,
+                        "backend": "numpy" if device == "cpu" else "cupy", "device": device}
     folder = Path(series["frames"][0]["path"]).parent
     if std is not None:
         relative = folder / "temporal_std.npy"
@@ -474,7 +490,8 @@ def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
 
 
 def prepare_reference(root: Path, site: dict, segment: SegmentConfig, *,
-                      contour_method: str = "current", otsu: OtsuSettings | None = None) -> tuple[np.ndarray, np.ndarray]:
+                      contour_method: str = "current", otsu: OtsuSettings | None = None,
+                      analysis_memory_mb: int = 8192, io_workers: int = 2) -> tuple[np.ndarray, np.ndarray]:
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import correspondence_gate
 
@@ -489,7 +506,8 @@ def prepare_reference(root: Path, site: dict, segment: SegmentConfig, *,
         from sem_segment.otsu_measurement import measure_saved_otsu
 
         result = measure_saved_otsu(root / site["full_average"], otsu, crop=crop,
-                                    device=segment.refine.device, metrology=segment.metrology)
+                                    device=segment.refine.device, metrology=segment.metrology,
+                                    memory_mb=analysis_memory_mb, io_workers=io_workers)
     elif contour_method == "current":
         result = segment_image(template_image.astype(float) / 255, segment)
     else:
@@ -544,9 +562,15 @@ def finish_comparison(root: Path, record: dict) -> None:
     started = time.perf_counter()
     render_comparison(root, record)
     record.setdefault("timings_s", {})["comparison_report"] = time.perf_counter() - started
-    print("Combined comparison report finished; writing TensorBoard images", flush=True)
-    write_tensorboard(root, record)
-    print("TensorBoard comparison finished", flush=True)
+    if record.get("settings", {}).get("tensorboard", True):
+        print("Combined comparison report finished; writing TensorBoard images", flush=True)
+        started = time.perf_counter()
+        write_tensorboard(root, record)
+        record["timings_s"]["tensorboard"] = time.perf_counter() - started
+        print("TensorBoard comparison finished", flush=True)
+    else:
+        record["timings_s"].pop("tensorboard", None)
+        print("Combined comparison report finished; TensorBoard disabled", flush=True)
     save_record(root, record)
 
 
@@ -578,6 +602,9 @@ def run(config: ComparisonSettings) -> dict:
               "models": {}, "sites": [], "prediction_ranges": [], "artifacts": [], "warnings": []}
     record.update(contour_method=config.contour_method, otsu_settings=config.otsu.model_dump())
     contour_options = {"contour_method": "otsu", "otsu": config.otsu} if config.contour_method == "otsu" else {}
+    execution_options = ({key: getattr(config, key) for key in ("analysis_batch", "analysis_memory_mb", "io_workers")}
+                         if config.contour_method == "otsu" else {})
+    native_options = {"device": segment.refine.device} if config.contour_method == "otsu" else {}
 
     def save() -> None:
         save_record(root, record)
@@ -618,14 +645,15 @@ def run(config: ComparisonSettings) -> dict:
             site["full_average"] = full.as_posix()
             site["series"] = {"raw": {"frames": raw_frames, "step": 0}, **site["series"]}
             site["requested_match_gate_px"] = config.match_gate_px
-            reference, template = prepare_reference(root, site, segment, **contour_options)
+            reference, template = prepare_reference(root, site, segment, **contour_options,
+                **{key: value for key, value in execution_options.items() if key != "analysis_batch"})
             for series_name, series in site["series"].items():
                 tracks = registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)
                 for frame, track in zip(series["frames"], tracks):
                     frame.update(track)
-                analyze_series(root, series_name, series, noise)
+                analyze_series(root, series_name, series, noise, **native_options)
                 observations, contours = measure_series(root, series_name, series, template, site["match_gate_px"], segment,
-                                                        **contour_options)
+                                                        **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
             save()
@@ -685,9 +713,9 @@ def run(config: ComparisonSettings) -> dict:
                 reference = read_uint8(root / site["full_average"])
                 output_registration_diagnostics(root, reference, series, noise.registration_sigma)
                 analyze_series(root, model_name, series, noise, raw_frames=site["series"]["raw"]["frames"],
-                               difference_limit=config.difference_limit_dn)
+                               difference_limit=config.difference_limit_dn, **native_options)
                 observations, contours = measure_series(root, model_name, series, np.array(site["template_centroids"]),
-                                                        site["match_gate_px"], segment, **contour_options)
+                                                        site["match_gate_px"], segment, **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
                 save()
@@ -701,9 +729,36 @@ def run(config: ComparisonSettings) -> dict:
     return record
 
 
+def require_reusable_analysis(record: dict) -> None:
+    """Contour-only experiments must never silently reuse incomplete analysis."""
+    error = "--contours-only needs a complete saved analysis; rebuild once without this flag"
+    if record.get("status") != "complete" or record.get("schema_version", 0) < 3:
+        raise ValueError(error)
+    for site in record["sites"]:
+        average = site["series"].get("average128", {}).get("frames", [])
+        if len(average) != 1 or average[0]["path"] != site["full_average"]:
+            raise ValueError(error)
+        for name, series in site["series"].items():
+            frames = series["frames"]
+            if not frames or series.get("native", {}).get("frames") != len(frames):
+                raise ValueError(error)
+            if len(frames) > 1 and not series.get("temporal_std"):
+                raise ValueError(error)
+            keys = {"mean_dn", "minimum_saved_dn", "maximum_saved_dn", "dy_px", "dx_px",
+                    "registration_status", "registration_score", "registration_error"}
+            if name in record["models"]:
+                keys |= {"brightness_delta_dn", "difference_path", "output_dy_px", "output_dx_px",
+                         "output_registration_status", "output_registration_score", "output_registration_error",
+                         "output_minus_raw_dy_px", "output_minus_raw_dx_px"}
+            if any(not keys <= frame.keys() for frame in frames):
+                raise ValueError(error)
+
+
 def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None = None,
             segmentation_config: Path | None = None, contour_method: str | None = None,
-            otsu_config: Path | None = None, render_only: bool = False) -> dict:
+            otsu_config: Path | None = None, render_only: bool = False, contours_only: bool = False,
+            analysis_batch: int | None = None, analysis_memory_mb: int | None = None,
+            io_workers: int | None = None, tensorboard: bool | None = None) -> dict:
     """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
     from sem_noise.config import AnalysisConfig
     from sem_segment.config import Config as SegmentConfig, load_config as load_segment
@@ -711,10 +766,22 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
     record_path = record_path.resolve()
     source_root, root = record_path.parent, output_dir.resolve()
     record = json.loads(record_path.read_text(encoding="utf-8"))
+    if contours_only and render_only:
+        raise ValueError("--contours-only and --render-only are alternative rebuild modes")
+    if contours_only:
+        require_reusable_analysis(record)
+    execution_options = {}
+    for key, override, default in (("analysis_batch", analysis_batch, 16),
+                                   ("analysis_memory_mb", analysis_memory_mb, 8192), ("io_workers", io_workers, 2)):
+        value = override if override is not None else record["settings"].get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{key} must be a positive integer")
+        execution_options[key] = value
     if render_only and record.get("schema_version", 0) < 3:
         raise ValueError("This older report needs contour remeasurement; omit --render-only")
     if render_only and any(value is not None for value in (
-            metrology_device, segmentation_config, contour_method, otsu_config)):
+            metrology_device, segmentation_config, contour_method, otsu_config,
+            analysis_batch, analysis_memory_mb, io_workers)):
         raise ValueError("--render-only reuses measurements; omit segmentation/device overrides")
     method = contour_method or record.get("contour_method", record.get("settings", {}).get("contour_method", "current"))
     if method not in {"current", "otsu"}:
@@ -748,9 +815,9 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 raise ValueError("Invalid saved series name")
             for frame in series["frames"]:
                 paths.add(frame["path"])
-                if render_only and frame.get("difference_path"):
+                if (render_only or contours_only) and frame.get("difference_path"):
                     paths.add(frame["difference_path"])
-            if render_only and series.get("temporal_std"):
+            if (render_only or contours_only) and series.get("temporal_std"):
                 paths.add(series["temporal_std"])
     for relative in paths:
         if not source(relative).is_file():
@@ -763,9 +830,12 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
             shutil.copy2(source(relative), destination)
     record["rebuilt_from"] = str(record_path)
     record["settings"]["output_dir"] = str(root)
+    if tensorboard is not None:
+        record["settings"]["tensorboard"] = tensorboard
     if not render_only:
         record.update(contour_method=method, otsu_settings=otsu.model_dump())
         record["settings"].update(contour_method=method, otsu=otsu.model_dump())
+        record["settings"].update(execution_options)
         segment = load_segment(segmentation_config) if segmentation_config else SegmentConfig.model_validate(record["segmentation_settings"])
         if metrology_device is not None:
             segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(), "device": metrology_device})
@@ -777,11 +847,17 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         record["segmentation_settings"] = segment.model_dump(mode="json")
         record["unit"] = "nm" if segment.input.pixel_size_nm else "px"
         noise = AnalysisConfig(registration="none", registration_sigma=record.get("noise_settings", {}).get("registration_sigma", 1.0))
-        record["noise_settings"] = asdict(noise)
+        if not contours_only:
+            record["noise_settings"] = asdict(noise)
+        native_options = {"device": segment.refine.device} if method == "otsu" else {}
         for site in record["sites"]:
             site.update(observations=[], contours=[])
             site.setdefault("requested_match_gate_px", record["settings"].get("match_gate_px"))
-            reference, template = prepare_reference(root, site, segment, **contour_options)
+            previous_average = site["series"].get("average128")
+            reference, template = prepare_reference(root, site, segment, **contour_options,
+                **{key: value for key, value in execution_options.items() if key != "analysis_batch"})
+            if contours_only:
+                site["series"]["average128"] = previous_average
             # Model correspondence reuses freshly measured raw drift, regardless
             # of the key order in the saved JSON.
             names = ["raw", *(name for name in site["series"] if name != "raw")]
@@ -789,7 +865,10 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 series = site["series"][name]
                 series["timings_s"] = {}
                 raw = site["series"]["raw"]["frames"] if name in record["models"] else None
-                if raw is not None:
+                if contours_only:
+                    series["analysis_reused_from"] = str(record_path)
+                    print(f"{site['name']}/{name}: reusing saved brightness, variation and translation diagnostics", flush=True)
+                elif raw is not None:
                     for frame, original in zip(series["frames"], raw):
                         for key in ("dy_px", "dx_px", "registration_status", "registration_score", "registration_error"):
                             frame[key] = original[key]
@@ -797,10 +876,12 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 else:
                     for frame, track in zip(series["frames"], registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)):
                         frame.update(track)
-                analyze_series(root, name, series, noise, raw_frames=raw,
-                               difference_limit=record["settings"].get("difference_limit_dn", 32.0))
+                if not contours_only:
+                    series.pop("analysis_reused_from", None)
+                    analyze_series(root, name, series, noise, raw_frames=raw,
+                                   difference_limit=record["settings"].get("difference_limit_dn", 32.0), **native_options)
                 observations, contours = measure_series(root, name, series, template, site["match_gate_px"], segment,
-                                                        **contour_options)
+                                                        **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
     finish_comparison(root, record)
@@ -853,7 +934,8 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
-    for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method"):
+    for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
+                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
@@ -870,6 +952,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--config", type=Path, help="Base YAML; defaults to edge_denoise/configs/sem_real_compare.yml")
     source.add_argument("--from-comparison", type=Path, help="Rebuild from comparison.json and saved uint8 images; no inference")
     parser.add_argument("--render-only", action="store_true", help="Reuse v3 measurements instead of remeasuring contours")
+    parser.add_argument("--contours-only", action="store_true", help="Remeasure contours; reuse saved brightness/noise/drift analysis")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--site-dir", type=Path, help="Override with one remote acquisition folder")
     parser.add_argument("--site", help="Pilot only this named site from the YAML")
@@ -884,9 +967,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Use Gaussian + Otsu masks, or the existing segmentation/refinement method")
     parser.add_argument("--otsu-config", type=Path,
                         help="Override Otsu polarity, sigma_px and min_area_px with a detector YAML")
-    parser.add_argument("--metrology-device", help="Otsu smoothing or current-method refinement device: cpu, cuda, or cuda:N")
+    parser.add_argument("--metrology-device", help="Otsu/native analysis or current-method refinement device: cpu, cuda, or cuda:N")
     parser.add_argument("--device", help="Denoiser device")
     parser.add_argument("--tile-batch", type=int)
+    parser.add_argument("--analysis-batch", type=int, help="Maximum images per CUDA Otsu batch (default 16)")
+    parser.add_argument("--analysis-memory-mb", type=int, help="Estimated CUDA batch working-set budget in MiB (default 8192)")
+    parser.add_argument("--io-workers", type=int, help="Saved-image decoder workers (default 2)")
+    parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=None,
+                        help="Write TensorBoard images as well as the HTML report; --no-tensorboard speeds visual iterations")
     parser.add_argument("--difference-limit-dn", type=float)
     return parser
 
@@ -903,11 +991,13 @@ def main() -> int:
                 raise ValueError("Rebuild uses saved images and settings; omit inference/site overrides")
             record = rebuild(args.from_comparison, args.output_dir, metrology_device=args.metrology_device,
                              segmentation_config=args.segmentation_config, contour_method=args.contour_method,
-                             otsu_config=args.otsu_config, render_only=args.render_only)
+                             otsu_config=args.otsu_config, render_only=args.render_only, contours_only=args.contours_only,
+                             analysis_batch=args.analysis_batch, analysis_memory_mb=args.analysis_memory_mb,
+                             io_workers=args.io_workers, tensorboard=args.tensorboard)
             output = args.output_dir
         else:
-            if args.render_only:
-                raise ValueError("--render-only requires --from-comparison")
+            if args.render_only or args.contours_only:
+                raise ValueError("--render-only/--contours-only require --from-comparison")
             config = configure_run(args)
             record = run(config)
             output = config.output_dir

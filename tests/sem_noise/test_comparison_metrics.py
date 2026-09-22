@@ -31,3 +31,20 @@ def test_difference_map_is_signed_fixed_scale_and_does_not_correct_pixels():
     np.testing.assert_array_equal(output, [[12, 20, 28]])
     with pytest.raises(ValueError):
         difference_rgb(output.astype(float), raw, 8)
+
+
+def test_cuda_native_statistics_match_cpu_without_full_float_downloads(fake_cupy):
+    rng = np.random.default_rng(921)
+    frames = rng.integers(0, 256, (17, 48, 64), dtype=np.uint8)
+    before = frames.copy()
+    expected_rows, expected_std = native_series_statistics(iter(frames))
+    rows, std = native_series_statistics(iter(frames), device="cuda:2")
+    assert rows == expected_rows
+    np.testing.assert_array_equal(std, expected_std)
+    np.testing.assert_array_equal(frames, before)
+    assert fake_cupy.devices == [2]
+    assert len(fake_cupy.downloads) == 2  # Frame summaries and the final SD map.
+    assert native_series_statistics([frames[0]], device="cuda")[1] is None
+    for bad in ([], [frames[0].astype(float)], [frames[0], frames[0][:-1]]):
+        with pytest.raises(ValueError):
+            native_series_statistics(bad, device="cuda:0")

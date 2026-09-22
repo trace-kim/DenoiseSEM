@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from contextlib import closing
 from pathlib import Path
 import re
 import time
@@ -34,6 +35,8 @@ class OtsuResult:
     retained_count: int
     gaussian_backend: str
     timings_s: dict[str, float]
+    labels: np.ndarray | None = None
+    execution: dict = field(default_factory=dict)
 
 
 def otsu_baseline(
@@ -42,6 +45,8 @@ def otsu_baseline(
     *,
     crop: tuple[int, int, int, int] | None = None,
     device: str = "cpu",
+    memory_mb: int = 8192,
+    io_workers: int = 2,
 ) -> OtsuResult:
     """Decode saved uint8 pixels, smooth a copy, threshold, filter, and outline.
 
@@ -63,6 +68,14 @@ def otsu_baseline(
     if not re.fullmatch(r"cpu|cuda(?::[0-9]+)?", device):
         raise ValueError("device must be cpu, cuda, or cuda:N")
     crop = InputConfig(crop=crop).crop
+    if device != "cpu":
+        # The CUDA implementation keeps smoothing, thresholding and component
+        # filtering on device. The public single-image API shares that path.
+        from .otsu_cuda import iter_saved_otsu
+
+        with closing(iter_saved_otsu([Path(path)], settings, crop=crop, device=device, batch_size=1,
+                                    memory_mb=memory_mb, io_workers=io_workers)) as results:
+            return next(results)
     stage = time.perf_counter()
     pixels, _ = read_native(path, crop=crop)
     if pixels.dtype != np.uint8:
@@ -73,28 +86,8 @@ def otsu_baseline(
     working = pixels.astype(np.float64)
     backend = "disabled"
     if settings.sigma_px > 0:
-        if device == "cpu":
-            working = ndimage.gaussian_filter(working, settings.sigma_px, mode="reflect")
-            backend = "scipy"
-        else:
-            try:
-                import cupy as cp
-                from cupyx.scipy.ndimage import gaussian_filter
-            except ImportError as error:
-                raise RuntimeError(
-                    "CUDA smoothing requires CuPy; see sem_segment/README.md "
-                    "for installation, or use --device cpu."
-                ) from error
-            index = int(device.split(":")[1]) if ":" in device else 0
-            try:
-                # Device indices are relative to scheduler-provided visibility.
-                with cp.cuda.Device(index):
-                    working = cp.asnumpy(gaussian_filter(
-                        cp.asarray(working), settings.sigma_px, mode="reflect"))
-                # asnumpy is blocking: timing includes transfers and completion.
-            except Exception as error:
-                raise RuntimeError(f"CUDA smoothing failed on {device}: {error}") from error
-            backend = "cupy"
+        working = ndimage.gaussian_filter(working, settings.sigma_px, mode="reflect")
+        backend = "scipy"
     timings["gaussian"] = time.perf_counter() - stage
 
     stage = time.perf_counter()
@@ -108,7 +101,10 @@ def otsu_baseline(
     labels, count = ndimage.label(foreground, structure=ndimage.generate_binary_structure(2, 1))
     keep = np.bincount(labels.ravel()) >= settings.min_area_px
     keep[0] = False
-    mask = keep[labels]
+    remap = np.cumsum(keep, dtype=np.int32)
+    remap[~keep] = 0
+    labels = remap[labels]
+    mask = labels > 0
     timings["components"] = time.perf_counter() - stage
 
     stage = time.perf_counter()
@@ -120,4 +116,5 @@ def otsu_baseline(
         outlines = [outline + offset for outline in outlines]
     timings["outlines"] = time.perf_counter() - stage
     timings["total"] = time.perf_counter() - started
-    return OtsuResult(mask, outlines, threshold, int(count), int(keep.sum()), backend, timings)
+    return OtsuResult(mask, outlines, threshold, int(count), int(keep.sum()), backend, timings,
+                      labels=labels, execution={"backend": "scipy", "batch_size": 1})

@@ -62,6 +62,12 @@ Never overengineer. Always start with a simple solution and build up on it.
 Preserve working baselines and add complexity only to address a demonstrated
 problem in the project's real data.
 
+Algorithmic simplicity is not permission to neglect execution efficiency.
+Keep the scientific method ordinary and verifiable while implementing suitable
+GPU operations, batching, bounded memory use and reuse of unchanged analysis.
+Evaluate the whole remote testing workflow, including CPU work and image I/O;
+do not treat a GPU flag for one small stage as adequate GPU implementation.
+
 Do not make ad hoc ("monkey patch") fixes unless the issue is small and obvious.
 Before editing, decide whether the problem needs deeper analysis; a small code
 change can still have broad behavioral consequences. For nontrivial issues,
@@ -106,6 +112,11 @@ stop handling. Any new dataset path must hash content before splitting.
   limited CPU capacity. Prefer existing GPU acceleration where meaningful.
   A single GPU is a reasonable default; do not add distributed machinery without
   a demonstrated need. Respect scheduler-provided GPU visibility.
+- Performance changes must preserve saved-uint8 measurement provenance and the
+  agreed detector. Supply remote timing and CPU/GPU equivalence checks; report
+  unverified hardware performance honestly. Reuse unchanged measurements during
+  contour experiments through an explicit mode rather than silently skipping
+  requested analysis or repeatedly running unrelated expensive stages.
 - Default remote test site: `/data/260904_raw_data/test/260904_0947-13`.
   Use this when filling a test-site configuration unless instructed otherwise.
 - Experiment folders normally live under `runs/edge_denoise` and use
