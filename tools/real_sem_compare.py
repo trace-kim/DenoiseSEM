@@ -47,8 +47,8 @@ class ComparisonArm(BaseModel):
     """The training treatment, not a correction to apply at inference."""
     model_config = ConfigDict(extra="forbid")
     checkpoint: Path
-    registration: Literal["affine", "translation", "none"]
-    brightness: Literal["percentile", "none"]
+    registration: Literal["affine", "translation", "none"] | None = None
+    brightness: Literal["percentile", "none"] | None = None
     prepared_manifest: Path | None = None
 
 
@@ -157,7 +157,7 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
 
 
 def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
-    """Verify the six N2N treatments, including the two prepared-data baselines.
+    """Verify a single-frame real-SEM model and its training treatment.
 
     A missing inline setting does NOT mean registration=none: old checkpoints
     get their registration from the original prepared manifest. Only metadata
@@ -167,12 +167,8 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
     from sem_noise.io import file_hash
 
     config = denoiser.config
-    objective = config.objective
-    if (objective.representation != "image" or objective.target != "noisy"
-            or objective.loss != "l2" or objective.lambda_image != 1
-            or objective.lambda_gradient != 0 or objective.lambda_consistency != 0
-            or objective.fusion is not None):
-        raise ValueError("This comparison requires the sem_real_n2n image/noisy L2 objective in every arm")
+    if config.objective.fusion is not None:
+        raise ValueError("This comparison requires single-frame denoisers; burst fusion needs a burst-input comparison")
     manifest_path = arm.prepared_manifest
     if manifest_path is None:
         try:
@@ -199,7 +195,8 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
     else:
         registration, brightness = prepared["mode"], "none"
         source = "legacy prepared dataset"
-    if (arm.registration, arm.brightness) != (registration, brightness):
+    if ((arm.registration is not None and arm.registration != registration)
+            or (arm.brightness is not None and arm.brightness != brightness)):
         raise ValueError(f"Declared arm {arm.registration}+{arm.brightness} conflicts with "
                          f"{source}: {registration}+{brightness}")
     # Registered/unaligned manifests have different hashes even when they use
@@ -220,16 +217,18 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
 
 
 def validate_comparable_arm(metadata: dict, model_config: dict, previous: dict[str, dict]) -> None:
-    """Keep architecture, objective, normalization and source splits comparable."""
+    """Compare the same data and intensity scale across different models.
+
+    Each checkpoint supplies its own objective, backbone and native tile size;
+    inference still exports the original full-frame dimensions. Those settings
+    are recorded, not required to match across experimental methods.
+    """
     if not previous:
         return
     first = next(iter(previous.values()))
     if metadata["raw_content_split_sha256"] != first["arm"]["raw_content_split_sha256"]:
         raise ValueError("Comparison arms must use the same raw acquisition content and train/val/test site splits")
-    for section in ("model", "objective"):
-        if model_config[section] != first["config"][section]:
-            raise ValueError(f"Comparison arms have different {section} settings")
-    for field in ("image_size", "channels", "black_level", "white_level"):
+    for field in ("channels", "black_level", "white_level"):
         if model_config["data"][field] != first["config"]["data"][field]:
             raise ValueError(f"Comparison arms have different data.{field}")
 
@@ -650,7 +649,7 @@ def run(config: ComparisonSettings) -> dict:
         noise = replace(noise, frame_interval_s=config.frame_interval_s)
     root = config.output_dir
     root.mkdir(parents=True)
-    record = {"schema_version": 3, "study": "real N2N registration/brightness comparison", "status": "running", "settings": config.model_dump(mode="json"),
+    record = {"schema_version": 3, "study": "real SEM denoiser comparison", "status": "running", "settings": config.model_dump(mode="json"),
               "segmentation_settings": segment.model_dump(mode="json"), "noise_settings": asdict(noise),
               "unit": "nm" if segment.input.pixel_size_nm else "px", "range_warning": RANGE_WARNING,
               "models": {}, "sites": [], "prediction_ranges": [], "artifacts": [], "warnings": []}
@@ -997,24 +996,37 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
         if args.site not in config.sites:
             raise ValueError(f"Unknown site: {args.site}")
         config.sites = {args.site: config.sites[args.site]}
-    if args.model:
-        unknown = set(args.model) - config.checkpoints.keys()
-        if unknown:
-            raise ValueError(f"Unknown models: {sorted(unknown)}")
-        config.checkpoints = {name: arm for name, arm in config.checkpoints.items() if name in args.model}
+    checkpoints = _assignments(args.checkpoint)
+    if args.only_checkpoints:
+        if not checkpoints:
+            raise ValueError("--only-checkpoints requires at least one --checkpoint NAME=PATH")
+        config.checkpoints = {name: arm for name, arm in config.checkpoints.items() if name in checkpoints}
     if args.experiment_prefix:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.experiment_prefix):
             raise ValueError("Experiment prefix must be a folder name")
         if Path(args.checkpoint_name).name != args.checkpoint_name:
             raise ValueError("Checkpoint name must be a filename")
         for arm in config.checkpoints.values():
+            if arm.registration is None or arm.brightness is None:
+                raise ValueError("--experiment-prefix requires declared registration and brightness; use --checkpoint NAME=PATH")
             arm.checkpoint = (ROOT / args.runs_dir / f"{args.experiment_prefix}_{arm.registration}_{arm.brightness}" / args.checkpoint_name).resolve()
             arm.prepared_manifest = None  # Resolve from the selected checkpoint, not an old example path.
-    for option, field in ((args.checkpoint, "checkpoint"), (args.prepared_manifest, "prepared_manifest")):
-        for name, path in _assignments(option).items():
-            if name not in config.checkpoints:
-                raise ValueError(f"Unknown model override: {name}")
-            setattr(config.checkpoints[name], field, path)
+    for name, path in checkpoints.items():
+        if name in config.checkpoints:
+            config.checkpoints[name].checkpoint = path
+        else:
+            # New model names inherit their actual treatment from the checkpoint
+            # and verified prepared manifest, rather than a guessed default.
+            config.checkpoints[name] = ComparisonArm(checkpoint=path)
+    for name, path in _assignments(args.prepared_manifest).items():
+        if name not in config.checkpoints:
+            raise ValueError(f"Unknown model override: {name}")
+        config.checkpoints[name].prepared_manifest = path
+    if args.model:
+        unknown = set(args.model) - config.checkpoints.keys()
+        if unknown:
+            raise ValueError(f"Unknown models: {sorted(unknown)}")
+        config.checkpoints = {name: arm for name, arm in config.checkpoints.items() if name in args.model}
     for field in ("output_dir", "segmentation_config"):
         value = getattr(args, field)
         if value is not None:
@@ -1045,7 +1057,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-prefix", help="For example 260921_real_n2n; appends _REGISTRATION_BRIGHTNESS")
     parser.add_argument("--runs-dir", type=Path, default=Path("runs/edge_denoise"))
     parser.add_argument("--checkpoint-name", default="ckpt_latest.pt")
-    parser.add_argument("--checkpoint", action="append", metavar="NAME=PATH", help="Override one checkpoint, including older baselines")
+    parser.add_argument("--checkpoint", action="append", metavar="NAME=PATH", help="Add a named model or override a checkpoint; new names read their training treatment from checkpoint metadata")
+    parser.add_argument("--only-checkpoints", action="store_true", help="Compare only the named --checkpoint entries, omitting other base-config arms")
     parser.add_argument("--prepared-manifest", action="append", metavar="NAME=PATH")
     parser.add_argument("--segmentation-config", type=Path)
     parser.add_argument("--contour-method", choices=("otsu", "current"),
@@ -1072,7 +1085,7 @@ def main() -> int:
         if args.from_comparison:
             if not args.output_dir:
                 raise ValueError("--from-comparison requires --output-dir (may be the original directory with --render-only)")
-            if any((args.site_dir, args.site, args.model, args.experiment_prefix, args.checkpoint,
+            if any((args.site_dir, args.site, args.model, args.experiment_prefix, args.checkpoint, args.only_checkpoints,
                     args.prepared_manifest, args.device, args.tile_batch, args.difference_limit_dn)):
                 raise ValueError("Rebuild uses saved images and settings; omit inference/site overrides")
             record = rebuild(args.from_comparison, args.output_dir, metrology_device=args.metrology_device,

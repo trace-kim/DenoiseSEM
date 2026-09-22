@@ -36,7 +36,13 @@
 <label>Measurement<select id="measure"><option value="coarse">Mask ECD</option><option value="refined">Refined ECD</option></select></label>
 <div id="measurement-values"></div><p id="ecd-coverage" class="muted"></p></div>
 <div><svg id="overview" class="overview" role="img" aria-label="Full-field location of selected region"></svg><p class="muted">Full-field location</p><div id="scale-overview"></div></div></section>
-<div class="chart"><h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="Selected hole ECD across acquisitions"></svg><div id="ecd-statistics"></div><p class="muted">Solid horizontal lines: mean. Dashed lines and shaded bands: mean ±3σ, where σ is the sample SD of usable measurements for this hole (n−1 denominator). This describes observed variation, not a confidence interval or accuracy. Missing measurements leave gaps; fewer than two have no SD. Click a point to inspect that acquisition.</p></div>
+<div class="chart"><h2>ECD · all models</h2>
+<div class="ecd-controls"><label>Hole<select id="ecd-hole" aria-label="ECD hole"></select></label><button id="ecd-all">Show all models</button>
+<label class="check"><input id="ecd-bands" type="checkbox">Show mean ±3σ bands</label></div>
+<p class="muted">All models start selected, independently of image panes A/B. Toggle sources below; raw and averages are optional references.</p>
+<div id="ecd-sources" class="ecd-sources" role="group" aria-label="ECD sources"></div>
+<h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="All selected models ECD across acquisitions"></svg>
+<div id="ecd-statistics"></div><p class="muted">Table sorted by increasing 3σ. Solid horizontal lines: mean. Optional dashed lines and shaded bands: mean ±3σ, where σ is the sample SD of usable measurements for this hole (n−1 denominator). Compare coverage as well as variation: missing measurements leave gaps; fewer than two have no SD. This is repeatability, not accuracy. Click any model's point to inspect its saved image in pane B.</p></div>
 <details id="band-section"><summary>All-acquisition contour band</summary>
 <div class="band-controls"><label>Source<select id="band-source" aria-label="Contour band source"></select></label><a id="band-file" target="_blank" rel="noopener">Open vector plot</a></div>
 <p id="band-label" class="muted"></p><img id="contour-band" class="contour-band" alt="All detected contours across acquisitions, colored by acquisition" loading="lazy">
@@ -49,7 +55,7 @@
 <p class="muted">Drift is measured against the same full average. Estimates never warp output pixels. Temporal variation also contains motion, charging and specimen change; lower variation alone does not establish better denoising.</p>
 <div class="chart"><h3>Output minus raw translation · px</h3><p id="drift-legend" class="muted"></p><svg id="drift-chart" role="img" aria-label="Output minus raw drift"></svg></div>
 <div class="variation"><figure><img id="variation-a" alt="Temporal variation of source A"><div id="scale-variation-a"></div><figcaption id="variation-label-a"></figcaption></figure><figure><img id="variation-b" alt="Temporal variation of source B"><div id="scale-variation-b"></div><figcaption id="variation-label-b"></figcaption></figure></div></details>
-<details><summary>Measurement coverage and repeatability</summary><p class="muted">For the selected A/B images: median within-hole sample SD on common holes among the selected models. Raw and average8 have separate coverage. Counts refer to contributing holes. This measures repeatability, not accuracy. Failed raw segmentation does not remove model-only results. Exports retain the comparison across all models.</p><div id="coverage"></div></details>
+<details open><summary>All-model repeatability across holes</summary><p class="muted">Every model, independent of A/B and chart visibility. Median within-hole sample SD and 3σ use the same common holes across all models, matching the exports. Raw and averages have separate coverage. Counts include failed measurements; absent common holes produce unavailable statistics. Lower variation does not establish accuracy or preserved edges.</p><div id="coverage"></div></details>
 <details><summary>Run details and exports</summary><p>Every measurement starts from decoded uint8 images. Pre-export range flags describe image production only. Average128 provides correspondence and a visual reference; it is not ground truth.</p>
 <!-- AUDIT_DETAILS -->
 <p><a href="comparison.json">Comparison JSON</a> · <a href="metrics.csv">Summary CSV</a> · <a href="arms.csv">Checkpoint identities</a> · <a href="prediction_ranges.csv">Output range audit</a></p><p id="site-exports"></p></details>

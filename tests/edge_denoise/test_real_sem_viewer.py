@@ -16,16 +16,16 @@ from sem_segment.repeatability import summarize_observations
 from tools import real_sem_compare as compare
 
 
-def saved_record(root: Path, count: int = 8) -> Path:
+def saved_record(root: Path, count: int = 8, *, models: tuple[str, ...] = ("model",)) -> Path:
     """A small old-format report, with actual saved pixels and no checkpoints."""
     root.mkdir()
     yy, xx = np.mgrid[:64, :64]
     pixels = np.where(np.hypot(yy - 32, xx - 32) < 12, 40, 180).astype(np.uint8)
-    raw, model = [], []
+    frames = {name: [] for name in ("raw", *models)}
     for i in range(count):
-        for name, rows, image in (("raw", raw, pixels + i), ("model", model, pixels + i + 5)):
+        for j, (name, rows) in enumerate(frames.items()):
             path = f"site/{name}/frame_{i + 1:03d}.png"
-            compare.save_rgb(root / path, image)
+            compare.save_rgb(root / path, pixels + i + 5 * j)
             rows.append({"index": i + 1, "order": i + 1, "timestamp_s": None, "path": path, "clipped": False})
     average = "site/average8/block.png"
     full = "site/reference/full.png"
@@ -35,10 +35,10 @@ def saved_record(root: Path, count: int = 8) -> Path:
     record = {"schema_version": 2, "status": "complete", "unit": "px", "settings": {},
               "segmentation_settings": config.model_dump(mode="json"), "prediction_ranges": [],
               "range_warning": RANGE_WARNING, "warnings": [],
-              "models": {"model": {"arm": {"registration": "none", "brightness": "none", "settings_source": "synthetic fixture"},
-                                     "step": 123, "ema": True, "checkpoint": "absent.pt", "sha256": "unused"}},
+              "models": {name: {"arm": {"registration": "none", "brightness": "none", "settings_source": "synthetic fixture"},
+                                "step": 123, "ema": True, "checkpoint": "absent.pt", "sha256": "unused"} for name in models},
               "sites": [{"name": "site", "full_average": full, "contours": [], "observations": [], "series": {
-                  "raw": {"frames": raw, "step": 0}, "model": {"frames": model, "step": 123},
+                  **{name: {"frames": rows, "step": 0 if name == "raw" else 123} for name, rows in frames.items()},
                   "average8": {"step": 0, "frames": [{"path": average, "index": 1, "order": 4.5,
                     "first_acquisition": 1, "last_acquisition": 8, "timestamp_s": None, "clipped": False}]}}}]}
     write_json(root / "comparison.json", record)
@@ -129,7 +129,7 @@ def test_render_only_recovers_incremental_contour_parts_without_remeasurement(tm
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed for asynchronous viewer regression checks")
 def test_comparison_viewer_keeps_decoded_images_contours_and_statistics_in_sync(tmp_path):
-    source = saved_record(tmp_path / "source")
+    source = saved_record(tmp_path / "source", models=("model", "ft_noisy", "ft_consist"))
     report = tmp_path / "report"
     compare.rebuild(source, report, metrology_device="cpu", tensorboard=False)
     result = subprocess.run([shutil.which("node"), str(Path(__file__).with_name("comparison_controls.cjs")), str(report)],
@@ -221,3 +221,22 @@ def test_cli_directory_overrides_follow_remote_conventions(tmp_path):
     assert all(a.prepared_manifest is None for a in config.checkpoints.values())
     with pytest.raises(ValueError, match="Unknown model"):
         compare.configure_run(compare.build_parser().parse_args(["--model", "missing"]))
+
+
+def test_named_pipeline_checkpoints_need_no_yaml_edits(tmp_path):
+    parser = compare.build_parser()
+    config = compare.configure_run(parser.parse_args([
+        "--only-checkpoints", "--checkpoint", f"n2n={tmp_path / 'teacher.pt'}",
+        "--checkpoint", f"ft_consist={tmp_path / 'consist.pt'}",
+        "--prepared-manifest", f"ft_consist={tmp_path / 'moved.json'}"]))
+    assert list(config.checkpoints) == ["n2n", "ft_consist"]
+    assert config.checkpoints["ft_consist"].checkpoint == tmp_path / "consist.pt"
+    assert config.checkpoints["ft_consist"].prepared_manifest == tmp_path / "moved.json"
+    assert all(a.registration is None and a.brightness is None for a in config.checkpoints.values())
+    selected = compare.configure_run(parser.parse_args([
+        "--checkpoint", f"ft_noisy={tmp_path / 'noisy.pt'}", "--model", "ft_noisy"]))
+    assert list(selected.checkpoints) == ["ft_noisy"]
+    with pytest.raises(ValueError, match="requires at least one"):
+        compare.configure_run(parser.parse_args(["--only-checkpoints"]))
+    with pytest.raises(ValueError, match="Unknown model"):
+        compare.configure_run(parser.parse_args(["--prepared-manifest", "missing=data.json"]))

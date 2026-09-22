@@ -51,7 +51,7 @@ class Element {
 }
 const descendants = e => e.children.flatMap(c => [c, ...descendants(c)]);
 const get = id => {
-  if (!elements.has(id)) elements.set(id, new Element(["site", "source-a", "source-b", "band-source"].includes(id) ? "select" : "div"));
+  if (!elements.has(id)) elements.set(id, new Element(["site", "source-a", "source-b", "band-source", "ecd-hole"].includes(id) ? "select" : "div"));
   return elements.get(id);
 };
 class FakeImage {
@@ -75,6 +75,7 @@ const canvas = id => descendants(get(id)).find(e => e.tagName === "CANVAS");
 const classes = (id, cls) => descendants(get(id)).filter(e => e.attributes.class === cls);
 get("layout").value = "side"; get("display").value = "pixels"; get("contours").value = "coarse";
 get("measure").value = "coarse"; get("linked").checked = true; get("wipe").value = 50;
+get("ecd-bands").checked = false;
 get("contours").append(...["both", "refined", "coarse", "off"].map(value => Object.assign(new Element("option"), {value})));
 context = vm.createContext({window: {}, document: {getElementById: get, head: new Element("head"),
   createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag), addEventListener() {}},
@@ -84,6 +85,13 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/data.js"), "utf8"), cont
 const report = context.window.SEM_REPORT;
 report.sites[0].traces.raw[1].coarse = [[1, 10], [2, 12], [3, null], [4, 14]];
 report.sites[0].traces.model[1].coarse = [[1, 15]];
+report.sites[0].traces.ft_noisy[1].coarse = [[1, 10], [2, 12], [3, null], [4, 14]];
+report.sites[0].traces.ft_consist[1].coarse = [[1, 11], [2, 12], [3, null], [4, 13]];
+const ecdSources = () => descendants(get("ecd-chart")).filter(e => e.tagName === "PATH").map(e => e.dataset.series);
+const ecdToggle = (name, checked) => {
+  const input = descendants(get("ecd-sources")).find(e => e.dataset.series === name);
+  input.checked = checked; input.onchange();
+};
 vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8"), context);
 (async () => {
   await settle();
@@ -93,9 +101,35 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
   get("image-a").events.pointerdown({button: 0, clientX: 10, clientY: 10, target: region});
   get("image-a").events.pointerup({});
   assert.match(text(get("ecd-statistics")), /3 \/ 8\|12.000\|2.000\|6.000\|6.000 … 18.000/);
+  assert.match(text(get("ecd-statistics")), /3 \/ 8\|12.000\|1.000\|3.000\|9.000 … 15.000/);
   assert.match(text(get("ecd-statistics")), /1 \/ 8\|15.000\|Unavailable\|Unavailable/);
-  assert.equal(classes("ecd-chart", "mean-line").length, 2);
-  assert.equal(classes("ecd-chart", "sigma-limit").length, 2);
+  assert.deepEqual(ecdSources(), ["model", "ft_noisy", "ft_consist"]);
+  assert.equal(classes("ecd-chart", "mean-line").length, 3);
+  assert.equal(classes("ecd-chart", "sigma-limit").length, 0);
+  assert.equal(get("ecd-hole").value, "1");
+  const originalColor = descendants(get("ecd-chart")).find(e => e.dataset.series === "ft_consist").attributes.stroke;
+  const loadedCount = images.length;
+  get("ecd-bands").checked = true; event("ecd-bands", "change");
+  assert.equal(classes("ecd-chart", "sigma-limit").length, 4);
+  ecdToggle("ft_noisy", false);
+  assert.deepEqual(ecdSources(), ["model", "ft_consist"]);
+  event("ecd-all", "click");
+  assert.deepEqual(ecdSources(), ["model", "ft_noisy", "ft_consist"]);
+  assert.equal(images.length, loadedCount, "chart-only controls load no images or measurements");
+  ecdToggle("raw", true);
+  assert.equal(classes("ecd-chart", "mean-line").length, 4);
+  assert.equal(classes("ecd-chart", "sigma-limit").length, 6);
+  // A point from a model outside A/B opens the correct saved acquisition.
+  const candidate = classes("ecd-chart", "dot").find(e => e.dataset.series === "ft_consist" && /acquisition 2/.test(text(e)));
+  candidate.events.click(); await settle();
+  assert.match(b.pixels, /ft_consist\/frame_002/);
+  assert.match(a.pixels, /raw\/frame_002/);
+  assert.equal(get("source-b").value, "ft_consist");
+  assert.equal(descendants(get("ecd-chart")).find(e => e.dataset.series === "ft_consist").attributes.stroke, originalColor);
+  assert.match(text(get("coverage")), /ft \+ noisy/);
+  assert.match(text(get("coverage")), /ft \+ consist/);
+  event("frame-a", "input", "1"); await settle();
+  event("source-b", "change", "model"); await settle();
   // While either half is decoding, pixels, labels and overlays stay together.
   hold("site/model/frame_002.png");
   event("frame-a", "input", "2"); await settle();
@@ -152,10 +186,16 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
   assert(get("scale-variation-b").hidden);
   event("source-b", "change", "average8"); await settle();
   assert.match(get("label-b").textContent, /acquisitions 1–8/);
-  report.sites[0].traces.raw[1].coarse = [];
-  report.sites[0].traces.average8[1].coarse = [];
+  assert.deepEqual(ecdSources(), ["model", "ft_noisy", "ft_consist", "raw"]);
+  event("ecd-hole", "change", "");
+  assert.match(text(get("ecd-chart")), /Select a matched hole/);
+  event("ecd-hole", "change", "1");
+  for (const name of ["model", "ft_noisy", "ft_consist", "raw", "average8"]) report.sites[0].traces[name][1].coarse = [];
   event("measure", "change", "coarse");
   assert.match(text(get("ecd-statistics")), /0 \/ 8\|Unavailable\|Unavailable/);
   assert.equal(classes("ecd-chart", "mean-line").length, 0);
-  console.log("Atomic image swaps, stale requests, image failures, wipe, ECD statistics, bands and colorbars passed.");
+  assert.match(text(get("ecd-chart")), /No usable ECD/);
+  for (const name of ["model", "ft_noisy", "ft_consist", "raw"]) ecdToggle(name, false);
+  assert.match(text(get("ecd-chart")), /Select at least one/);
+  console.log("Atomic image swaps, stale requests, image failures, wipe, all-model ECD statistics, bands and colorbars passed.");
 })().catch(error => {console.error(error); process.exitCode = 1;});

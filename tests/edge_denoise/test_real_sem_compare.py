@@ -139,7 +139,8 @@ class CaptureWriter:
         pass
 
 
-def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("mixed_objectives", [False, True])
+def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatch, capsys, mixed_objectives):
     from sem_noise import pipeline
     from sem_noise.comparison_report import write_tensorboard
     from sem_segment import pipeline as segmentation
@@ -147,6 +148,18 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     source, checkpoint = _inputs(tmp_path)
     measured = []
     fixtures = [_arm_fixture(tmp_path, reg, bright, legacy=i >= 4) for i, (reg, bright) in enumerate(TREATMENTS)]
+    if mixed_objectives:
+        from edge_denoise.config import ObjectiveConfig
+
+        for (_, config, _), objective in zip(fixtures, [
+            {"representation": "image", "lambda_gradient": 0},
+            {"representation": "image"},
+            {"representation": "image", "lambda_consistency": 1},
+            {"representation": "image", "target": "noisy_mean", "lambda_consistency": 1},
+            {"representation": "hybrid"},
+            {"representation": "gradient", "lambda_image": 0, "lambda_gradient": 1},
+        ]):
+            config.objective = ObjectiveConfig(**objective)
     arms = {f"{arm.registration}_{arm.brightness}": arm for arm, _, _ in fixtures}
     by_path = {arm.checkpoint: (config, digest) for arm, config, digest in fixtures}
 
@@ -389,7 +402,7 @@ def test_legacy_translation_not_mislabelled_as_none(tmp_path):
         compare.checkpoint_arm_metadata(arm.model_copy(update={"prepared_manifest": None}), denoiser)
 
 
-def test_different_recipes_and_training_content_are_rejected(tmp_path):
+def test_different_models_keep_training_content_and_normalization_checks(tmp_path):
     arm, config, digest = _arm_fixture(tmp_path)
     denoiser = SimpleNamespace(config=config, dataset_fingerprint=digest)
     metadata = compare.checkpoint_arm_metadata(arm, denoiser)
@@ -399,11 +412,46 @@ def test_different_recipes_and_training_content_are_rejected(tmp_path):
         compare.validate_comparable_arm(altered, config.model_dump(mode="json"), previous)
     altered_config = config.model_copy(deep=True)
     altered_config.data.image_size = 32
-    with pytest.raises(ValueError, match="image_size"):
-        compare.validate_comparable_arm(metadata, altered_config.model_dump(mode="json"), previous)
+    altered_config.model.ch = 16
+    altered_config.objective.lambda_consistency = 1
+    compare.validate_comparable_arm(metadata, altered_config.model_dump(mode="json"), previous)
+    for field, value in (("channels", 3), ("black_level", 1), ("white_level", 200)):
+        invalid = altered_config.model_dump(mode="json")
+        invalid["data"][field] = value
+        with pytest.raises(ValueError, match=field):
+            compare.validate_comparable_arm(metadata, invalid, previous)
     config.objective.lambda_gradient = 4
-    with pytest.raises(ValueError, match="sem_real_n2n"):
-        compare.checkpoint_arm_metadata(arm, denoiser)
+    assert compare.checkpoint_arm_metadata(arm, denoiser)["raw_content_split_sha256"] == metadata["raw_content_split_sha256"]
+
+
+@pytest.mark.parametrize("representation,target,image,gradient,consistency", [
+    ("image", "noisy", 1, 4, 0), ("image", "noisy", 1, 4, 1),
+    ("image", "noisy_mean", 1, 4, 1), ("gradient", "noisy", 0, 1, 0),
+    ("hybrid", "noisy", 1, 4, 1),
+])
+def test_non_n2n_treatments_and_objectives_are_exported(tmp_path, representation, target, image, gradient, consistency):
+    from edge_denoise.config import ObjectiveConfig
+    from sem_noise.comparison_report import comparison_arms
+
+    arm, config, digest = _arm_fixture(tmp_path, "affine", "percentile")
+    config.objective = ObjectiveConfig(representation=representation, target=target,
+        lambda_image=image, lambda_gradient=gradient, lambda_consistency=consistency)
+    metadata = compare.checkpoint_arm_metadata(compare.ComparisonArm(checkpoint=arm.checkpoint,
+        prepared_manifest=arm.prepared_manifest), SimpleNamespace(config=config, dataset_fingerprint=digest))
+    assert (metadata["registration"], metadata["brightness"]) == ("affine", "percentile")
+    exported = comparison_arms({"models": {"candidate": {"config": config.model_dump(mode="json"),
+        "arm": metadata, "checkpoint": str(arm.checkpoint), "sha256": "weights", "step": 100, "ema": True}}})[0]
+    assert (exported["representation"], exported["target"]) == (representation, target)
+    assert (exported["lambda_image"], exported["lambda_gradient"], exported["lambda_consistency"]) == (image, gradient, consistency)
+
+
+def test_burst_model_cannot_silently_receive_single_frame_inputs(tmp_path):
+    from edge_denoise.config import FusionConfig
+
+    arm, config, digest = _arm_fixture(tmp_path)
+    config.objective.fusion = FusionConfig(align="none")
+    with pytest.raises(ValueError, match="burst fusion"):
+        compare.checkpoint_arm_metadata(arm, SimpleNamespace(config=config, dataset_fingerprint=digest))
 
 
 def test_shipped_comparison_is_the_six_preprocessing_treatments():

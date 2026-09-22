@@ -16,6 +16,54 @@ is applied to the comparison images. Segmentation receives a fixed 0–255 scale
 with contrast stretching disabled. Floating arithmetic and subpixel contour
 coordinates are derived from the delivered uint8 pixels only.
 
+## Compare different model pipelines
+
+The workflow accepts single-frame `edge_denoise` checkpoints with different
+objectives, representations, backbones and native tile sizes, including N2N,
+Sobel/consistency fine-tunes, mean-target fine-tunes, and gradient/hybrid models
+once their real-data training support is implemented. Burst-input fusion needs
+a separate comparison and is rejected here. Supporting a checkpoint in the
+viewer does not implement its training method.
+
+Use named checkpoint arguments without editing YAML. `--only-checkpoints`
+omits the six example arms from the base recipe. New names read registration
+and brightness from each checkpoint and its verified prepared manifest; these
+are never guessed from a folder name or applied to inference outputs.
+
+```bash
+python tools/real_sem_compare.py --only-checkpoints \
+  --checkpoint n2n=runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt \
+  --checkpoint ft_noisy=runs/edge_denoise/260922_real_ft_noisy_affine_percentile/ckpt_latest.pt \
+  --checkpoint ft_consist=runs/edge_denoise/260922_real_ft_consist_affine_percentile/ckpt_latest.pt \
+  --site-dir /data/260904_raw_data/test/260904_0947-13 \
+  --output-dir output/260922_real_models_comparison \
+  --device cuda:0 --metrology-device cuda:0 --no-tensorboard
+```
+
+Run this after those checkpoints exist; replace the example dates with the
+actual run names. In YAML, registration and brightness may also be omitted
+to read the recorded treatment automatically. Explicit declarations are still
+checked. All models must have the same original acquisition content, site
+splits, channels and intensity normalization. Test-frame leakage, manifest
+fingerprints, output shape and uint8 measurement provenance remain checked.
+`arms.csv`, `arms.json` and Run details record each model's representation,
+target, loss weights and crop size; `comparison.json` retains its full recipe.
+
+The **ECD · all models** chart starts with every model selected, independently
+of panes A/B. Select a hole from its dropdown or click a matched contour. Each
+model keeps one color; raw, average8 and average128 can be enabled separately.
+Toggle mean ±3σ bands if useful. The per-hole table shows mean, sample SD, 3σ
+and usable/total counts, sorted by 3σ. Missing measurements remain gaps and
+fewer than two observations have no SD. Clicking a model's point opens its
+saved acquisition in pane B. The all-hole summary uses the common holes across
+all models and matches the exported statistics, regardless of chart visibility.
+Compare measurement failures and mean ECD changes as well as precision.
+
+Existing completed reports get these chart changes with the `--render-only`
+command below; it reuses their saved measurements without inference or analysis.
+This shows all models already in that report. To add other checkpoints, produce
+a new comparison containing those named models.
+
 ## Rebuild an existing comparison first
 
 Use the existing `comparison.json` and saved PNGs. This does not need the raw
@@ -168,8 +216,8 @@ GPU settings come from the base config. Other useful flags:
 | `--difference-limit-dn 32` | One symmetric display limit for output-minus-raw images, in DN. |
 | `--metrology-device cpu` | CPU Otsu/native analysis or current-method refinement. |
 
-The current six-arm study checks the same real N2N objective, architecture,
-normalization, native source content and train/validation/test splits. It rejects
+The six-arm base recipe remains the N2N preprocessing study. Comparisons check
+normalization, native source content and train/validation/test splits. They reject
 test acquisitions found in training/validation data. Checkpoint steps and EMA
 selection remain explicit. Select checkpoints using validation data before
 examining test sites.

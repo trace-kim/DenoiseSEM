@@ -42,11 +42,20 @@ def comparison_metrics(record: dict) -> list[dict]:
 
 
 def comparison_arms(record: dict) -> list[dict]:
-    return [{"arm": name, "registration": model["arm"]["registration"],
-             "brightness": model["arm"]["brightness"], "step": model["step"],
-             "ema": model["ema"], "settings_source": model["arm"]["settings_source"],
-             "checkpoint": model["checkpoint"], "checkpoint_sha256": model["sha256"]}
-            for name, model in record["models"].items()]
+    rows = []
+    for name, model in record["models"].items():
+        config = model.get("config", {})  # Old saved reports may lack the recipe.
+        objective = config.get("objective", {})
+        rows.append({
+            "arm": name, "registration": model["arm"]["registration"],
+            "brightness": model["arm"]["brightness"], "step": model["step"],
+            "ema": model["ema"], "settings_source": model["arm"]["settings_source"],
+            "checkpoint": model["checkpoint"], "checkpoint_sha256": model["sha256"],
+            "image_size": config.get("data", {}).get("image_size"),
+            **{key: objective.get(key) for key in ("representation", "target", "gradient_target", "loss",
+                                                  "lambda_image", "lambda_gradient", "lambda_consistency")},
+        })
+    return rows
 
 
 def _table(rows: list[dict], columns: list[str]) -> str:
@@ -257,7 +266,9 @@ def render_comparison(root: Path, record: dict) -> Path:
         _script(root / "viewer/data.js", "window.SEM_REPORT", view)
     html = (Path(__file__).parent / "assets/comparison.html").read_text(encoding="utf-8")
     details = _warning(record, [r for r in record["prediction_ranges"] if r.get("clipped")])
-    details += _table(record["arms"], ["arm", "registration", "brightness", "step", "ema", "settings_source"])
+    details += _table(record["arms"], ["arm", "representation", "target", "gradient_target", "loss",
+                                       "lambda_image", "lambda_gradient", "lambda_consistency", "image_size",
+                                       "registration", "brightness", "step", "ema", "settings_source"])
     details += "".join(f"<p>{escape(w)}</p>" for w in record.get("warnings", []))
     destination = root / "index.html"
     destination.write_text(html.replace("<!-- AUDIT_DETAILS -->", details), encoding="utf-8")

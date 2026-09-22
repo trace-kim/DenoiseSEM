@@ -125,6 +125,14 @@ stop handling. Any new dataset path must hash content before splitting.
 - Supply terminal commands for training/reporting tasks. Prefer a reusable base
   config with command-line flags for dataset, experiment/checkpoint, and output
   directories instead of requiring users to edit YAML for every run.
+- Next training phase agreed on 2026-09-22: after the multi-model comparison
+  workflow, test `ft_noisy` and `ft_consist` first, then gradient-only
+  reconstruction, hybrid image/Sobel inputs, and a contour-position or
+  gradient-only consistency loss. Implement missing real-data support properly.
+  All new model recipes default to affine registration and percentile brightness
+  matching. Before the server's several-day unattended training period, deliver
+  a script/command that runs every agreed training pipeline sequentially with
+  logs and restart support. See `edge_denoise/docs/real_sem_model_plan.md`.
 
 ## Testing Guidelines
 

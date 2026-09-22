@@ -7,8 +7,10 @@
   const $ = id => document.getElementById(id);
   const ns = "http://www.w3.org/2000/svg";
   const letters = ["a", "b"], colors = ["#14778d", "#d47732"];
+  const modelColors = ["#14778d", "#d47732", "#7254a1", "#258049", "#bb406b", "#376ec0", "#99751b", "#745548"];
+  const baselineColors = {raw: "#76818d", average8: "#323e49", average128: "#9a8f7c"};
   const state = {site: 0, names: ["raw", ""], indices: [0, 0], acquisition: 1,
-    active: 1, view: [], contours: [[], []], selected: null, revision: 0, playing: null, ready: false};
+    active: 1, view: [], contours: [[], []], selected: null, revision: 0, playing: null, ready: false, ecdSources: new Set()};
   // Requested controls are separate from the fully decoded pair on screen.
   const wanted = {site: 0, names: ["raw", ""], indices: [0, 0], acquisition: 1, display: "pixels"};
   let rendering = false;
@@ -249,13 +251,13 @@
       target.append(paragraph);
     });
   }
-  function chart(id, tracks, {zero = false, selectedX = null, message = "No measurements available."} = {}) {
+  function chart(id, tracks, {zero = false, selectedX = null, bands = true, message = "No measurements available."} = {}) {
     const root = $(id); root.replaceChildren(); root.setAttribute("viewBox", "0 0 1100 185");
     const all = tracks.flatMap(t => t.points).filter(q => Number.isFinite(q.y));
     if (!all.length) {root.append(svg("text", {x: 20, y: 75}, message)); return;}
     const raw = site().series.raw.frames, x0 = time(raw[0]), x1 = time(raw.at(-1));
     const values = all.map(p => p.y);
-    for (const t of tracks) if (t.stats?.sd != null) values.push(t.stats.mean - 3 * t.stats.sd, t.stats.mean + 3 * t.stats.sd);
+    for (const t of tracks) if (bands && t.stats?.sd != null) values.push(t.stats.mean - 3 * t.stats.sd, t.stats.mean + 3 * t.stats.sd);
     let lo = Math.min(...values), hi = Math.max(...values);
     if (zero) {const a = Math.max(Math.abs(lo), Math.abs(hi), .1); lo = -a; hi = a;}
     const pad = Math.max((hi - lo) * .1, .05); lo -= pad; hi += pad;
@@ -274,7 +276,7 @@
     for (const track of tracks) {
       if (track.stats?.mean == null) continue;
       const {mean, sd} = track.stats;
-      if (sd != null) {
+      if (bands && sd != null) {
         const low = mean - 3 * sd, high = mean + 3 * sd;
         root.append(svg("rect", {x: 65, y: y(high), width: 1015, height: y(low) - y(high), fill: track.color, "fill-opacity": .07, class: "sigma-band"}));
         for (const v of [low, high]) root.append(svg("line", {x1: 65, x2: 1080, y1: y(v), y2: y(v), stroke: track.color, "stroke-dasharray": "6 4", class: "sigma-limit"}));
@@ -291,13 +293,18 @@
         if (!Number.isFinite(q.y)) {connected = false; continue;}
         d += `${connected ? "L" : "M"}${x(q.x)},${y(q.y)}`; connected = true;
       }
-      root.append(svg("path", {d, fill: "none", stroke: track.color, "stroke-width": 1.5, "stroke-dasharray": track.dashed ? "4 3" : "none"}));
+      root.append(svg("path", {d, fill: "none", stroke: track.color, "stroke-width": 1.5, "stroke-dasharray": track.dashed ? "4 3" : "none",
+        "data-series": track.name || track.label}));
       for (const q of track.points) {
         if (!Number.isFinite(q.y)) continue;
-        const dot = svg("circle", {cx: x(q.x), cy: y(q.y), r: 2.6, fill: track.color, class: "dot"});
+        const dot = svg("circle", {cx: x(q.x), cy: y(q.y), r: 2.6, fill: track.color, class: "dot", "data-series": track.name || track.label,
+          "aria-label": `${track.label} · ${q.description} · ${fmt(q.y)}`});
         dot.append(svg("title", {}, `${track.label} · ${q.description} · ${fmt(q.y)}`));
         dot.addEventListener("click", () => {
-          if (track.pane != null) setFrame(track.pane, q.index);
+          stop();
+          if (track.name != null) {
+            wanted.names[1] = track.name; $("source-b").value = track.name; setFrame(1, q.index);
+          } else if (track.pane != null) setFrame(track.pane, q.index);
           else {wanted.names[0] = "raw"; $("source-a").value = "raw"; setFrame(0, q.index);}
         }); root.append(dot);
       }
@@ -313,6 +320,31 @@
     const sd = n > 1 ? Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (n - 1)) : null;
     return {n, mean, sd};
   }
+  function ecdNames() {
+    return [...report.arms.map(a => a.arm), ...Object.keys(baselineColors)].filter(n => site().series[n]);
+  }
+  function ecdColor(name) {
+    if (name in baselineColors) return baselineColors[name];
+    const index = report.arms.findIndex(a => a.arm === name);
+    return modelColors[index] || `hsl(${(index * 137.5) % 360} 55% 38%)`;
+  }
+  function ecdControls() {
+    $("ecd-hole").replaceChildren(option("", "Select a matched hole"),
+      ...Array.from({length: site().hole_count}, (_, i) => option(String(i + 1), `Hole ${i + 1}`)));
+    state.ecdSources = new Set(ecdNames().filter(n => !(n in baselineColors)));
+    const root = $("ecd-sources"); root.replaceChildren();
+    for (const name of ecdNames()) {
+      const control = document.createElement("label"), input = document.createElement("input"), swatch = document.createElement("span");
+      input.type = "checkbox"; input.checked = state.ecdSources.has(name);
+      input.setAttribute("data-series", name); input.setAttribute("aria-label", `ECD: ${label(name)}`);
+      swatch.className = "ecd-swatch"; swatch.style.backgroundColor = ecdColor(name);
+      input.onchange = () => {
+        if (input.checked) state.ecdSources.add(name); else state.ecdSources.delete(name);
+        drawCharts();
+      };
+      control.append(input, swatch, label(name)); root.append(control);
+    }
+  }
   function drawStatistics(tracks) {
     const root = $("ecd-statistics"); root.replaceChildren();
     if (state.selected?.hole == null) return;
@@ -320,7 +352,7 @@
     ["Source", "Usable / total", `Mean (${report.unit})`, `σ, sample SD (${report.unit})`, `3σ (${report.unit})`, `Mean ±3σ (${report.unit})`].forEach(value => {
       const th = document.createElement("th"); th.textContent = value; head.append(th);
     }); table.append(head);
-    for (const t of tracks) {
+    for (const t of [...tracks].sort((a, b) => (a.stats.sd ?? Infinity) - (b.stats.sd ?? Infinity))) {
       const {n, mean, sd} = t.stats, tr = document.createElement("tr");
       const range = sd == null ? "Unavailable (n < 2)" : `${fmt(mean - 3 * sd)} … ${fmt(mean + 3 * sd)}`;
       [t.label, `${n} / ${t.points.length}`, fmt(mean), fmt(sd), fmt(sd == null ? null : 3 * sd), range].forEach((value, i) => {
@@ -343,44 +375,31 @@
     $("drift-legend").textContent = "Teal: A · Orange: B · Solid: y displacement · Dashed: x displacement. Missing fits leave gaps.";
     chart("drift-chart", drift, {zero: true, selectedX: time(frame(state.active)), message: "Select a model output to inspect output-minus-raw motion."});
     const hole = state.selected?.hole, method = $("measure").value;
-    const ecd = letters.map((_, p) => {
-      const values = new Map(site().traces[state.names[p]]?.[hole]?.[method] || []);
-      return {label: `${letters[p].toUpperCase()} ${label(state.names[p])}`, color: colors[p], pane: p,
-        points: series(p).frames.map((f, index) => ({x: time(f), y: values.get(f.index), index, description: `acquisition ${f.order}`}))};
+    const ecd = ecdNames().filter(n => state.ecdSources.has(n)).map(name => {
+      const values = new Map(site().traces[name]?.[hole]?.[method] || []);
+      return {name, label: label(name), color: ecdColor(name), dashed: name in baselineColors,
+        points: site().series[name].frames.map((f, index) => ({x: time(f), y: values.get(f.index), index,
+          description: name === "average8" ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.order}`}))};
     });
     for (const track of ecd) track.stats = statistics(track.points);
+    $("ecd-hole").value = hole == null ? "" : String(hole);
     $("ecd-title").textContent = hole != null ? `Hole ${hole} · ${method === "coarse" ? "Mask" : "Refined"} ECD (${report.unit})` : "Diameter across acquisitions";
-    $("ecd-coverage").textContent = hole != null ? ecd.map((t, p) => `${letters[p].toUpperCase()}: ${t.points.filter(q => Number.isFinite(q.y)).length}/${series(p).frames.length} usable observations`).join(" · ") : "";
-    chart("ecd-chart", ecd, {selectedX: time(frame(state.active)), message: "Select a matched hole to inspect its diameter across acquisitions."});
+    $("ecd-coverage").textContent = hole != null ? ecd.map(t => `${t.label}: ${t.stats.n}/${t.points.length} usable observations`).join(" · ") : "";
+    chart("ecd-chart", ecd, {selectedX: time(frame(state.active)), bands: $("ecd-bands").checked,
+      message: hole == null ? "Select a matched hole to compare every model." : !ecd.length ? "Select at least one ECD source." : "No usable ECD measurements for this hole and these sources."});
     drawStatistics(ecd);
   }
   function drawCoverage() {
     const target = $("coverage"); target.replaceChildren();
     const table = document.createElement("table");
     const head = document.createElement("tr");
-    ["Images", "Boundary", "Common holes", "Usable measurements", "Unavailable", `ECD sample SD (${report.unit})`].forEach(text => {const th = document.createElement("th"); th.textContent = text; head.append(th);});
+    ["Images", "Boundary", "Contributing holes", "Usable measurements", "Unavailable", `ECD sample SD (${report.unit})`, `ECD 3σ (${report.unit})`].forEach(text => {const th = document.createElement("th"); th.textContent = text; head.append(th);});
     table.append(head);
-    const names = [...new Set(state.names)];
-    const models = names.filter(n => report.arms.some(a => a.arm === n));
-    const rows = [];
-    for (const method of (maskOnly ? ["coarse"] : ["coarse", "refined"])) {
-      const holes = Object.fromEntries(names.map(n => [n, Object.fromEntries(Object.entries(site().traces[n] || {}).map(([id, t]) =>
-        [id, t[method].map(p => p[1]).filter(Number.isFinite)]).filter(([, v]) => v.length >= 2))]));
-      const common = models.length ? Object.keys(holes[models[0]]).filter(id => models.every(n => id in holes[n])) : [];
-      for (const name of names) {
-        const ids = models.includes(name) ? common : Object.keys(holes[name]);
-        const sds = ids.map(id => {const v = holes[name][id], mean = v.reduce((s, x) => s + x, 0) / v.length;
-          return Math.sqrt(v.reduce((s, x) => s + (x - mean) ** 2, 0) / (v.length - 1));}).sort((a, b) => a - b);
-        const used = ids.reduce((sum, id) => sum + holes[name][id].length, 0);
-        const median = sds.length ? (sds[Math.floor((sds.length - 1) / 2)] + sds[Math.floor(sds.length / 2)]) / 2 : null;
-        rows.push({series: name, method, common_hole_count: ids.length, valid_count: used,
-          failed_count: ids.length ? ids.length * site().series[name].frames.length - used : "No matched sample",
-          median_cd_std: median});
-      }
-    }
+    const rows = site().repeatability.filter(r => !maskOnly || r.method === "coarse");
     for (const r of rows) {
       const tr = document.createElement("tr");
-      [label(r.series), r.method === "coarse" ? "Mask" : "Refined", r.common_hole_count, r.valid_count, r.failed_count, fmt(r.median_cd_std)].forEach(text => {const td = document.createElement("td"); td.textContent = text; tr.append(td);});
+      [label(r.series), r.method === "coarse" ? "Mask" : "Refined", r.common_hole_count, r.valid_count, r.failed_count,
+        fmt(r.median_cd_std), fmt(r.median_cd_std == null ? null : 3 * r.median_cd_std)].forEach(text => {const td = document.createElement("td"); td.textContent = text; tr.append(td);});
       table.append(tr);
     }
     target.append(table);
@@ -450,6 +469,7 @@
           state.view = [0, 0, site().shape[1], site().shape[0]];
           $("band-source").replaceChildren(...Object.keys(site().series).map(n => option(n, label(n))));
           $("band-source").value = state.names[1];
+          ecdControls();
         }
         state.nativeImages = loaded.map(r => r.value.native);
         state.contours = loaded.map(r => r.value.contours.data);
@@ -548,6 +568,22 @@
   $("linked").onchange = () => {if ($("linked").checked) {wanted.indices[1 - state.active] = atAcquisition(wanted.names[1 - state.active], wanted.acquisition); render();}};
   $("wipe").oninput = () => drawImages(false);
   $("measure").onchange = () => {drawImages(); drawMeasurements(); drawCharts(); drawBand();};
+  $("ecd-hole").onchange = () => {
+    if (!state.ready) return;
+    const hole = $("ecd-hole").value;
+    state.selected = hole ? {hole: Number(hole), pane: state.active} : null;
+    $("fit-hole").disabled = !hole;
+    drawImages(); drawMeasurements(); drawCharts();
+  };
+  $("ecd-bands").onchange = drawCharts;
+  $("ecd-all").onclick = () => {
+    if (!state.ready) return;
+    state.ecdSources = new Set(ecdNames().filter(n => !(n in baselineColors)));
+    for (const control of $("ecd-sources").children) {
+      const input = control.children[0]; input.checked = state.ecdSources.has(input.getAttribute("data-series"));
+    }
+    drawCharts();
+  };
   $("band-source").onchange = drawBand;
   $("band-section").ontoggle = drawBand;
   $("fit").onclick = () => {if (state.ready) {state.view = [0, 0, site().shape[1], site().shape[0]]; drawImages(false);}};
