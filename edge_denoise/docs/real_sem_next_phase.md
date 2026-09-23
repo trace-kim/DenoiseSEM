@@ -15,6 +15,12 @@ Agreed on 2026-09-22. Source requirements: `AGENTS.md` and
 - New recipes use affine registration and percentile target matching, native
   inputs, the same verified prepared `align none` dataset and fixed site splits.
   Preserve existing N2N controls and their actual recorded treatments.
+- Blank/noise-only acquisitions skip geometry automatically and stay in training.
+  Affine uses the existing block-contrast gate and first usable reference;
+  unmeasurable/failed ECC fits skip by default without changing the next seed.
+  Flat percentile distributions use native pair brightness. Per-frame reasons
+  survive shared-cache reuse and checkpoint resume. See
+  `real_sem_inline_matching.md` for the exact fallback policy.
 - Measurements use decoded saved uint8 outputs and the agreed detector. Output
   brightness and geometry are never corrected during comparison.
 - Use one allocated GPU and preserve scheduler visibility. Hardware throughput
@@ -200,6 +206,27 @@ optimizer step before saving; a deliberate stop does not start another pipeline.
 Explicit `--resume` clears the old suite stop marker. A checkpoint is saved every
 1,000 steps by default, limiting work lost after an abrupt process/server failure.
 
+### Retry a suite that failed during registration startup
+
+After updating the server checkout, repeat the original suite command with
+`--resume`, retaining its date, paths, budgets and other flags. For the default
+full-run command above:
+
+```bash
+python tools/train_real_sem_suite.py \
+  --dataset-dir "$DATASET" --n2n-checkpoint "$N2N" \
+  --run-root runs/edge_denoise --date "$RUN_DATE" \
+  --device cuda:0 --cpu-threads 2 --resume
+```
+
+The 2026-09-23 fix makes blank/low-contrast registration a recorded skip and
+defaults affine ECC failures to skipping geometry. No new skip flag is needed.
+Adding an override to an existing suite changes its plan identity, so keep the
+original arguments. Failed startup artifacts/logs are retained; uncheckpointed
+pipelines retry initialization and completed pipelines are verified. Review
+each run's `registration_report.html`, `registration_frames.csv` and
+`real_matching.json` on the server for the skipped frames and reasons.
+
 ## CPU/GPU checks and held-out reports
 
 For a completed pilot or production suite, compare CPU/GPU inference entirely
@@ -278,3 +305,11 @@ full-frame export precision and restart-history changes; **8 final checks passed
 for stored-plan integrity and validation/test report labels. `git diff --check`
 also passed. GPU selection/RNG and process behavior are mocked in tests; no H100
 timing or real-data quality claim is made.
+
+2026-09-23 patternless-frame regression fix: `python -m pytest -q` passed
+**1,046 tests**, with the same optional browser test skipped. Coverage includes
+saved uint8 noisy/constant acquisitions, all-blank train and validation sites,
+first-usable affine references, failed-fit seed preservation, native brightness
+fallback, all five training CLI paths after failed-suite restart, shared-cache
+refresh/reuse and checkpoint restoration. Real H100 training remains a remote
+check; no server artifacts were required for this local validation.

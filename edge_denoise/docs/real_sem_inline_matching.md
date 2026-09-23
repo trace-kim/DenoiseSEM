@@ -19,15 +19,19 @@ preparation and training cannot silently apply two different registrations.
   algorithm. Confirm these settings match the earlier translation preparation
   when comparing completed runs. It is not the report's translation ECC fit.
 - **Affine** uses the report's full-frame translation-initialized affine ECC,
-  against the first frame, with 1-pixel fit blur and clipped pixels excluded
-  from fitting. Failed ECC estimates stop startup by default; the explicit
-  `--registration-failure skip` option retains those frames without registration.
+  against the first usable frame, with 1-pixel fit blur and clipped pixels
+  excluded from fitting. Before ECC, apply the same native-frame block-contrast
+  gate as translation, using the prepared manifest's `min_contrast` (default
+  0.005). Blank/noise-only frames stay unregistered. Unmeasurable support or
+  failed ECC estimates retain those frames without registration by default.
 - **None** uses native coordinates without estimating geometry.
 - **Percentile** fits `Q_A(p) = gain * Q_B(p) + offset` at 10,15,...,90%.
   Percentiles come from every pixel of each full raw frame, including clipping
   bounds, before registration or crop selection. The same 17-point OLS as
   the diagnostic is evaluated for each selected B→A pair. It does not compose
   mappings through the first frame and does not fit individual 512-pixel crops.
+  If either frame's central percentiles are all equal, gain is unmeasurable:
+  keep gain 1 and offset 0 for that pair, and record the skipped brightness fit.
 - **Brightness none** leaves gain 1 and offset 0.
 
 Frame transforms and percentile points are measured once when the run starts.
@@ -46,20 +50,28 @@ error instead of supervising padded pixels. Translation crops/sampling retain
 the old training behavior, including its common-overlap bounds.
 
 The run writes `real_matching.json` with the dataset fingerprint, settings,
-per-frame matrices, percentile points and any legacy registration skip records.
+per-frame matrices, percentile points and registration/brightness skip records.
 These measurements are also saved in checkpoints and restored on resume.
 Changing matching settings requires a new run, not `--resume`. The dataset and
 all its arrays are content-verified through the existing cache loader.
 
 ### Frames whose geometry cannot be measured
 
-Add `--registration-failure skip` to an inline `train` command to keep training
-when translation estimates are rejected (implausible shift/nonfinite covariance)
-or affine ECC raises a registration failure. The CLI override is saved in the
-run config. Without it, translation inherits the prepared manifest's failure
-policy and affine retains its original strict error policy. Low-contrast frames
-already identified by the translation estimator remain unmeasured under either
-policy. The estimators and their acceptance thresholds are unchanged.
+Affine matching and the five-model suite skip failed geometry by default; no
+extra flag is needed. `--registration-failure error` explicitly requests strict
+ECC failure handling on frames that pass the contrast gate. Translation still
+inherits the prepared manifest's failure policy; `--registration-failure skip`
+also handles rejected translation estimates (implausible shift/nonfinite
+covariance). Low-contrast frames remain unmeasured under either policy.
+
+Both paths use the standard deviation of nonoverlapping 16-pixel block means
+in fixed dataset-normalized units. This existing heuristic suppresses pixel
+noise; it is not a guarantee that every noisy acquisition has usable structure.
+ECC nonconvergence or invalid numerical results are therefore also skippable.
+An unusable first acquisition never becomes the affine reference; the first
+usable frame does. An entirely blank site keeps all its native frames, with no
+reference and no geometry available. A skipped fit cannot update the next
+frame's translation seed. Successful ECC fitting and target sampling are unchanged.
 
 **Skip means skip the correction, never drop the frame.** If either A or B has
 unavailable registration, B is read at A's native crop coordinates with no
@@ -80,8 +92,17 @@ not a successful zero-motion estimate. The report is fully local, with no
 external resources; data and reports can stay on the training server.
 
 Registration failure is not proof of low contrast: inspect the recorded reason.
-This option does not suppress unrelated I/O, configuration or brightness errors
-(e.g. constant percentile values cannot determine a gain).
+Unrelated I/O, invalid arguments and OpenCV API/dependency errors still surface.
+Brightness remains independent: noisy blank frames with a measurable percentile
+spread still use the full-frame percentile fit. If either frame has flat
+percentiles, both directions of that pair use native brightness, including
+leave-one-out targets and consistency pairs. The report lists
+`skipped_flat_percentiles` alongside registration status.
+
+New measurement caches use format version 2. A matching version-1 shared cache
+is refreshed once, with a log message, so new runs cannot bypass the gate.
+Dataset/settings mismatches still fail validation. Existing checkpoint
+measurements remain resumable without re-estimation.
 
 ## Four independent N2N runs
 

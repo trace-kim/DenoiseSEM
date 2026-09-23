@@ -22,6 +22,8 @@ def write_registration_report(directory: Path, cache: BurstCache, measurements: 
             diagnostics = record.get("diagnostics") or [
                 {"status": "disabled" if method == "none" else "registered"} for _ in source.frames]
             for i, diagnostic in enumerate(diagnostics):
+                brightness = record.get("brightness_diagnostics")
+                brightness = brightness[i] if brightness else {"status": "", "reason": ""}
                 status = diagnostic["status"]
                 unavailable = status.startswith("skipped")
                 reason = diagnostic.get("reason", "")
@@ -30,6 +32,7 @@ def write_registration_report(directory: Path, cache: BurstCache, measurements: 
                 row = {"site": site["name"], "source_index": source.source_index, "split": split,
                        "frame_index": i, "filename": site["frames"][i]["name"], "method": method,
                        "status": status, "reason": reason, "contrast": diagnostic.get("contrast", ""),
+                       "brightness_status": brightness["status"], "brightness_reason": brightness["reason"],
                        "retained_in_split": True, "training_eligible": split == "train",
                        "pair_geometry": "disabled if either frame is unavailable" if unavailable else
                                         ("disabled by configuration" if method == "none" else "enabled when both frames are available"),
@@ -43,7 +46,8 @@ def write_registration_report(directory: Path, cache: BurstCache, measurements: 
         writer.writerows(rows)
     counts = Counter(row["status"] for row in rows)
     failures = [row for row in rows if row["status"].startswith("skipped")]
-    columns = ("site", "split", "frame_index", "filename", "status", "reason", "contrast", "training_eligible")
+    columns = ("site", "split", "frame_index", "filename", "status", "reason", "contrast",
+               "brightness_status", "brightness_reason", "training_eligible")
 
     def table(selected: list[dict]) -> str:
         headers = ''.join(f'<th>{escape(name.replace("_", " "))}</th>' for name in columns)
@@ -54,6 +58,7 @@ def write_registration_report(directory: Path, cache: BurstCache, measurements: 
     body = '<h1>Training registration report</h1>'
     body += f'<p>Method: {escape(method)}. {len(rows)} train/validation frames measured; {len(failures)} have unavailable registration. No frames were removed by registration.</p>'
     body += '<p>A failed or low-contrast frame remains in its original split. If either member of a sampled pair has unavailable geometry, both crops use the same native coordinates: no registration correction is applied. This also covers each leave-one-out target and the consistency pair. Brightness matching is independent.</p>'
+    body += '<p>If either frame has equal 10th–90th percentiles, its pair retains native brightness (gain 1, offset 0). This is an unmeasurable gain, not a successful brightness fit.</p>'
     body += '<p>Frame index is zero-based within the prepared site. Filename is the original path relative to the raw dataset. Validation frames remain validation-only; test frames are not measured here. Reference status denotes a coordinate anchor, not a fitted zero-motion measurement. Stored identity fallback matrices are not successful estimates.</p>'
     body += '<p>Created after startup measurements (or checkpoint restoration), before the first optimizer update, and retained after training. This is registration eligibility, not a log of how often a frame was drawn.</p>'
     body += '<p><a href="registration_frames.csv">Every frame and stored matrix (CSV)</a> | <a href="real_matching.json">Complete measurements (JSON)</a></p>'

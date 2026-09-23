@@ -35,7 +35,7 @@ class RealMatchingConfig(_StrictModel):
 
     registration: Literal["none", "translation", "affine"] = "none"
     brightness: Literal["none", "percentile"] = "none"
-    registration_failure: Literal["error", "skip"] | None = None  # Unset: prepared policy for translation; error for affine.
+    registration_failure: Literal["error", "skip"] | None = None  # Unset: prepared policy for translation; skip for affine.
 
 
 class DataConfig(_StrictModel):

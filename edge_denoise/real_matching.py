@@ -16,11 +16,12 @@ from runctl.run_logging import atomic_write_json
 
 from .config import Config, RealMatchingConfig
 from .data import PairBatch, PairInfo, ValPairBatch
-from .real_data import LOSS_MARGIN, RealPairFactory, estimate_translations, fixed_windows, sample_region
+from .real_data import (LOSS_MARGIN, RealPairFactory, estimate_translations, fixed_windows,
+                        registration_contrast, sample_region)
 
 logger = logging.getLogger(__name__)
 PERCENTILES = np.arange(10, 91, 5)
-MEASUREMENT_VERSION = 1
+MEASUREMENT_VERSION = 2
 
 
 def percentile_mapping(input_quantiles: np.ndarray, target_quantiles: np.ndarray) -> tuple[float, float]:
@@ -120,7 +121,7 @@ class MatchedRealPairFactory(RealPairFactory):
         self.settings = config.data.real_matching
         self.sites = {key: dict(site) for key, site in self.sites.items()}
         self.measurements = {}
-        self.matrices, self.quantiles, self.geometry_available = {}, {}, {}
+        self.matrices, self.quantiles, self.geometry_available, self.brightness_available = {}, {}, {}, {}
         measurement_path = config.data.real_matching_cache
         if measurements is not None:
             self.measurements = measurements
@@ -129,15 +130,18 @@ class MatchedRealPairFactory(RealPairFactory):
             return
         if measurement_path is not None and measurement_path.exists():
             record = json.loads(measurement_path.read_text(encoding="utf-8"))
-            if (record.get("measurement_version") != MEASUREMENT_VERSION
-                    or record.get("dataset_fingerprint") != cache.real_fingerprint
+            if (record.get("dataset_fingerprint") != cache.real_fingerprint
                     or record.get("settings") != self.settings.model_dump()
                     or record.get("percentiles") != PERCENTILES.tolist()):
                 raise ValueError("real matching cache identity differs: use a new cache path for changed data/settings")
-            self.measurements = record["sites"]
-            self._set_measurements()
-            logger.info("reused verified real matching measurements from %s", measurement_path)
-            return
+            if record.get("measurement_version") == MEASUREMENT_VERSION:
+                self.measurements = record["sites"]
+                self._set_measurements()
+                logger.info("reused verified real matching measurements from %s", measurement_path)
+                return
+            if record.get("measurement_version") != 1:
+                raise ValueError("unsupported real matching cache version; use a new cache path")
+            logger.warning("refreshing version-1 matching cache with patternless-frame safeguards: %s", measurement_path)
         for source in cache.train_sources + cache.val_sources:
             site = self.sites[source.source_index]
             logger.info("measuring %s: geometry=%s, brightness=%s on %d full raw frames",
@@ -151,6 +155,10 @@ class MatchedRealPairFactory(RealPairFactory):
             if skipped:
                 logger.warning("%s: %d/%d frames have unmeasured identity geometry; frames remain in training",
                                site["name"], skipped, len(source.frames))
+            flat = sum(row["status"].startswith("skipped") for row in record.get("brightness_diagnostics", []))
+            if flat:
+                logger.warning("%s: %d/%d frames have flat percentiles; pairs involving them retain native brightness",
+                               site["name"], flat, len(source.frames))
         self._set_measurements()
         if measurement_path is not None:
             atomic_write_json(measurement_path, self.measurement_record())
@@ -159,7 +167,7 @@ class MatchedRealPairFactory(RealPairFactory):
         matrices = np.repeat(np.eye(3)[None], len(frames), axis=0)
         failure_policy = self.settings.registration_failure
         if failure_policy is None:
-            failure_policy = prepared.get("failure_policy", "error") if self.settings.registration == "translation" else "error"
+            failure_policy = prepared.get("failure_policy", "error") if self.settings.registration == "translation" else "skip"
         record = {"geometry": "none", "matrices": None, "percentiles_dn": None,
                   "failure_policy": failure_policy}
         if self.settings.registration == "translation":
@@ -172,43 +180,63 @@ class MatchedRealPairFactory(RealPairFactory):
             matrices[:, :2, 2] = shifts[:, ::-1]
             record.update(geometry="legacy translation", diagnostics=diagnostics, settings=prepared)
         elif self.settings.registration == "affine":
-            from sem_noise.pair_matching import estimate_geometry
+            from sem_noise.pair_matching import (GeometryEstimationError, check_geometry_reference,
+                                                 estimate_geometry)
             from sem_noise.registration import clip_mask
 
-            reference = np.asarray(frames[0], dtype=np.float64)
-            bad_reference = clip_mask(reference, (self.black, self.white))
+            min_contrast = prepared.get("min_contrast", 0.005)
+            if not np.isfinite(min_contrast) or min_contrast < 0:
+                raise ValueError("min_contrast must be finite and nonnegative")
+            reference = bad_reference = reference_index = None
             seed = np.eye(2, 3)
-            diagnostics = [{"status": "reference"}]
-            for i in range(1, len(frames)):
-                bad = clip_mask(frames[i], (self.black, self.white))
+            diagnostics = []
+            for i, frame in enumerate(frames):
+                unit = torch.from_numpy(normalize_native(frame, self.black, self.white))[None, None]
+                contrast = registration_contrast(unit)
+                diagnostic = {"status": "registered", "contrast": contrast}
+                diagnostics.append(diagnostic)
+                if min_contrast > 0 and contrast < min_contrast:
+                    diagnostic["status"] = "skipped_low_contrast"
+                    continue
+                bad = clip_mask(frame, (self.black, self.white))
+                if reference is None:
+                    try:
+                        check_geometry_reference(frame, sigma=1, invalid=bad)
+                    except GeometryEstimationError as error:
+                        diagnostic.update(status="skipped_unmeasurable_reference", reason=str(error))
+                        continue
+                    reference, bad_reference, reference_index = frame, bad, i
+                    diagnostic["status"] = "reference"
+                    continue
                 try:
-                    seed, _ = estimate_geometry(reference, frames[i], motion="translation", initial=seed,
-                                                sigma=1, input_invalid=bad_reference, target_invalid=bad)
-                    matrices[i, :2], _ = estimate_geometry(reference, frames[i], motion="affine", initial=seed,
-                                                           sigma=1, input_invalid=bad_reference, target_invalid=bad)
-                except ValueError as error:
+                    candidate_seed, _ = estimate_geometry(reference, frame, motion="translation", initial=seed,
+                                                          sigma=1, input_invalid=bad_reference, target_invalid=bad)
+                    candidate, _ = estimate_geometry(reference, frame, motion="affine", initial=candidate_seed,
+                                                     sigma=1, input_invalid=bad_reference, target_invalid=bad)
+                except GeometryEstimationError as error:
                     if failure_policy == "error":
                         raise ValueError(f"frame {i}: {error}; use --registration-failure skip to retain failed frames "
                                          "with an unmeasured identity transform") from error
-                    diagnostics.append({"status": "skipped_failed_registration", "reason": str(error)})
+                    diagnostic.update(status="skipped_failed_registration", reason=str(error))
                     logger.warning("frame %d: %s; skipped registration (identity transform)", i, error)
                 else:
-                    diagnostics.append({"status": "registered"})
+                    matrices[i, :2] = candidate
+                    seed = candidate_seed  # Only successful fits may seed the next acquisition.
                 if i % 16 == 0:
                     logger.info("affine geometry: %d/%d frames", i, len(frames))
-            record.update(geometry="translation-initialized affine ECC", reference_frame=0, sigma_px=1,
-                          diagnostics=diagnostics)
+            record.update(geometry="translation-initialized affine ECC", reference_frame=reference_index, sigma_px=1,
+                          min_contrast=min_contrast, diagnostics=diagnostics)
         record["matrices"] = matrices.tolist()
         if self.settings.brightness == "percentile":
-            points = []
-            for i, frame in enumerate(frames):
+            points, diagnostics = [], []
+            for frame in frames:
                 q = np.percentile(frame, PERCENTILES)
-                try:
-                    percentile_mapping(q, q)  # Reject an unmeasurable target before training starts.
-                except ValueError as error:
-                    raise ValueError(f"frame {i}: {error}") from error
+                flat = np.ptp(q) == 0
+                diagnostics.append({"status": "skipped_flat_percentiles" if flat else "measured",
+                                    "reason": "10th–90th percentiles are equal; gain is unmeasurable" if flat else ""})
                 points.append(q.tolist())
             record["percentiles_dn"] = points
+            record["brightness_diagnostics"] = diagnostics
         return record
 
     def _set_measurements(self) -> None:
@@ -227,8 +255,7 @@ class MatchedRealPairFactory(RealPairFactory):
                 points = np.asarray(record["percentiles_dn"], dtype=np.float64)
                 if points.shape != (count, len(PERCENTILES)) or not np.isfinite(points).all():
                     raise ValueError("invalid cached percentile measurements")
-                for point in points:
-                    percentile_mapping(point, point)
+                self.brightness_available[index] = np.ptp(points, axis=1) > 0
             self.matrices[index] = matrices
             self.quantiles[index] = np.asarray(record["percentiles_dn"], dtype=np.float64)
             diagnostics = record.get("diagnostics")
@@ -250,6 +277,9 @@ class MatchedRealPairFactory(RealPairFactory):
 
     def _brightness(self, index: int, a: int, b: int) -> tuple[float, float]:
         if self.settings.brightness == "none":
+            return 1.0, 0.0
+        available = self.brightness_available[index]
+        if not (available[a] and available[b]):
             return 1.0, 0.0
         gain, offset_dn = percentile_mapping(self.quantiles[index][a], self.quantiles[index][b])
         # Fixed dataset normalization: g*((B-black)/range) + offset_unit.
@@ -329,6 +359,7 @@ class MatchedRealPairFactory(RealPairFactory):
                   "dataset_fingerprint": self.cache.real_fingerprint, "settings": self.settings.model_dump(),
                   "percentiles": PERCENTILES.tolist(), "sites": self.measurements,
                   "brightness": "full raw frame percentiles; B mapped directly to each sampled A; no output clipping",
+                  "brightness_fallback": "if either frame has flat percentiles, use gain 1 and offset 0; retain frames",
                   "geometry": "matrices map the site reference to each raw frame; pair W = W_B @ inverse(W_A)",
                   "registration_fallback": "if either frame has unavailable geometry, the pair uses identity; "
                                            "all frames remain eligible, including for mean targets and consistency"}

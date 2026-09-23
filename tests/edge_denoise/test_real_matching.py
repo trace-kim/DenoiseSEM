@@ -146,10 +146,12 @@ def test_affine_startup_uses_report_ECC_and_reports_failure(prepared, tmp_path, 
     factory.sample_batch(count=3)
     assert len(calls) == count
     def fail(*args, **kwargs):
-        raise ValueError("test ECC failure")
+        raise pair_matching.GeometryEstimationError("test ECC failure")
     monkeypatch.setattr(pair_matching, "estimate_geometry", fail)
+    cfg = matching_config(prepared, tmp_path / "bad", registration="affine")
+    cfg.data.real_matching.registration_failure = "error"
     with pytest.raises(ValueError, match="site .*frame 1: test ECC failure"):
-        MatchedRealPairFactory(cache, matching_config(prepared, tmp_path / "bad", registration="affine"), seed=1)
+        MatchedRealPairFactory(cache, cfg, seed=1)
 
 
 def test_prediction_mapping_is_differentiable_and_masks_exclude_padding() -> None:
@@ -395,13 +397,14 @@ def test_affine_failure_policy_and_old_checkpoint_settings(prepared, tmp_path, m
     from sem_noise import pair_matching
 
     def failed(*args, **kwargs):
-        raise ValueError("synthetic ECC failure")
+        raise pair_matching.GeometryEstimationError("synthetic ECC failure")
     monkeypatch.setattr(pair_matching, "estimate_geometry", failed)
     cfg = matching_config(prepared, tmp_path / "run", "affine")
     cache = BurstCache(prepared)
+    cfg.data.real_matching.registration_failure = "error"
     with pytest.raises(ValueError, match="registration-failure skip"):
         MatchedRealPairFactory(cache, cfg, seed=0)
-    cfg.data.real_matching.registration_failure = "skip"
+    cfg.data.real_matching.registration_failure = None  # The unattended default skips unmeasurable fits.
     factory = MatchedRealPairFactory(cache, cfg, seed=0)
     assert all(np.count_nonzero(valid) == 1 for valid in factory.geometry_available.values())
     assert torch.isfinite(factory.sample_batch().targets).all()
@@ -409,6 +412,149 @@ def test_affine_failure_policy_and_old_checkpoint_settings(prepared, tmp_path, m
     state = legacy.state_dict()
     del state["matching_settings"]["registration_failure"]  # b091b23 checkpoint compatibility.
     legacy.load_state_dict(state)
+
+
+def native_factory(frames, tmp_path, *, target="noisy", failure=None, prepared=None):
+    source = BurstSource(source_index=0, clean=None, frames=frames)
+    site = {"source_index": 0, "name": "native", "bounds": [4, 4, frames.shape[1] - 4, frames.shape[2] - 4]}
+    if target == "noisy_mean":
+        np.save(tmp_path / "aligned.npy", np.zeros_like(frames, dtype=np.float32))
+        np.save(tmp_path / "sum.npy", np.zeros(frames.shape[1:], dtype=np.float32))
+        site.update(aligned={"path": "aligned.npy"}, sum={"path": "sum.npy"})
+    cache = SimpleNamespace(train_sources=[source], val_sources=[], burst_dir=tmp_path, real_metadata={
+        "registration": {"mode": "none", **(prepared or {})},
+        "normalization": {"black": 0, "white": 255}, "sites": [site]})
+    cfg = matching_config(tmp_path, tmp_path / "run", "affine", "percentile", target=target, consistency=1)
+    cfg.data.real_matching.registration_failure = failure
+    return MatchedRealPairFactory(cache, cfg, seed=0)
+
+
+def test_affine_skips_noisy_blanks_and_uses_first_textured_reference(tmp_path, monkeypatch) -> None:
+    from sem_noise import pair_matching
+
+    rng = np.random.default_rng(42)
+    blank = np.rint(128 + rng.normal(0, 8, (96, 96))).astype(np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    pattern = np.rint(120 + 40 * np.sin(xx / 7) + 30 * np.cos(yy / 9)).astype(np.uint8)
+    frames = np.stack([blank, pattern, pattern + 1, blank, pattern + 2])
+    originals = frames.copy()
+    frames.flags.writeable = False
+    calls = []
+    def fit(reference, moving, **kwargs):
+        np.testing.assert_array_equal(reference, pattern)
+        assert np.std(moving.astype(float)) > 20
+        calls.append(kwargs["motion"])
+        matrix = np.eye(2, 3)
+        matrix[:, 2] = [2, -1]
+        return matrix, 1.0
+    monkeypatch.setattr(pair_matching, "estimate_geometry", fit)
+    factory = native_factory(frames, tmp_path, failure="error")
+    record = factory.measurements["0"]
+    assert record["reference_frame"] == 1
+    assert [row["status"] for row in record["diagnostics"]] == [
+        "skipped_low_contrast", "reference", "registered", "skipped_low_contrast", "registered"]
+    assert calls == ["translation", "affine"] * 2
+    assert record["diagnostics"][0]["contrast"] < .005 < np.std(blank / 255)
+    for a, b in ((0, 2), (2, 0), (2, 3)):
+        np.testing.assert_array_equal(factory._pair_matrix(0, a, b), np.eye(2, 3))
+    assert factory._pair_matrix(0, 1, 2)[0, 2] == 2
+    np.testing.assert_array_equal(frames, originals)
+
+
+@pytest.mark.parametrize("target", ["noisy", "noisy_mean"])
+def test_all_flat_site_keeps_native_targets_and_consistency_without_any_transform(tmp_path, monkeypatch, target) -> None:
+    import cv2
+    from sem_noise import pair_matching
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("flat frames must not reach ECC or affine warping")
+    monkeypatch.setattr(pair_matching, "estimate_geometry", forbidden)
+    monkeypatch.setattr(cv2, "warpAffine", forbidden)
+    frames = np.stack([np.full((64, 64), value, dtype=np.uint8) for value in (0, 100, 160, 255)])
+    factory = native_factory(frames, tmp_path, target=target)
+    assert factory.measurements["0"]["reference_frame"] is None
+    assert not factory.geometry_available[0].any()
+    assert not factory.brightness_available[0].any()
+    source = factory.cache.train_sources[0]
+    for a in range(len(frames)):
+        b, second = (a + 1) % len(frames), (a + 2) % len(frames)
+        sample = factory._pair(source, (8, 8), a, b, second)
+        selected = [b] if target == "noisy" else [j for j in range(len(frames)) if j != a]
+        expected = normalize_native(frames[selected, 8:24, 8:24], 0, 255).mean(axis=0) * 2 - 1
+        np.testing.assert_allclose(sample[1][0], expected, atol=2e-7)
+        np.testing.assert_array_equal(sample[4], np.eye(2, 3))
+        np.testing.assert_array_equal(sample[5], [1, 0])
+    _, infos = factory.sample_batch(count=100, return_info=True)
+    assert {info.input_replica for info in infos} == set(range(len(frames)))
+    json.dumps(factory.measurements, allow_nan=False)
+
+
+def test_flat_percentile_pair_keeps_both_directions_native_but_noisy_blank_still_matches_brightness(tmp_path) -> None:
+    rng = np.random.default_rng(422)
+    blank = np.rint(100 + rng.normal(0, 6, (96, 96))).astype(np.uint8)
+    frames = np.stack([np.full_like(blank, 128), blank, blank + 20])
+    factory = native_factory(frames, tmp_path)
+    assert not factory.geometry_available[0].any()
+    assert factory.brightness_available[0].tolist() == [False, True, True]
+    source = factory.cache.train_sources[0]
+    for a, b in ((0, 1), (1, 0)):
+        sample = factory._pair(source, (8, 8), a, b, 2)
+        np.testing.assert_array_equal(sample[1][0], normalize_native(frames[b, 8:24, 8:24], 0, 255) * 2 - 1)
+        assert factory._brightness(0, a, b) == (1, 0)
+    gain, offset = factory._brightness(0, 1, 2)
+    assert gain == pytest.approx(1) and offset == pytest.approx(-20 / 255)
+
+
+def test_affine_rejects_clipped_reference_then_anchors_on_usable_frame(tmp_path, monkeypatch) -> None:
+    from sem_noise import pair_matching
+
+    yy, xx = np.mgrid[:64, :64]
+    clipped = np.where(xx < 32, 0, 255).astype(np.uint8)
+    pattern = np.rint(120 + 30 * np.sin(xx / 5) + 20 * np.cos(yy / 7)).astype(np.uint8)
+    frames = np.stack([clipped, pattern, pattern])
+    monkeypatch.setattr(pair_matching, "estimate_geometry", lambda *a, **kw: (np.eye(2, 3), 1.0))
+    factory = native_factory(frames, tmp_path)
+    assert factory.measurements["0"]["reference_frame"] == 1
+    assert factory.measurements["0"]["diagnostics"][0]["status"] == "skipped_unmeasurable_reference"
+    assert "too few" in factory.measurements["0"]["diagnostics"][0]["reason"]
+
+
+def test_affine_failure_does_not_poison_next_translation_seed(tmp_path, monkeypatch) -> None:
+    from sem_noise import pair_matching
+
+    yy, xx = np.mgrid[:64, :64]
+    pattern = np.rint(110 + 30 * np.sin(xx / 5) + 20 * np.cos(yy / 7)).astype(np.uint8)
+    frames = np.stack([pattern + i for i in range(4)])
+    guesses = []
+    def fit(reference, moving, **kwargs):
+        index = int(moving[0, 0]) - int(pattern[0, 0])
+        if kwargs["motion"] == "translation":
+            guesses.append(kwargs["initial"].copy())
+            matrix = np.eye(2, 3)
+            matrix[:, 2] = [99, 99] if index == 2 else [index, -index]
+            return matrix, 1.0
+        if index == 2:
+            raise pair_matching.GeometryEstimationError("no convergent affine estimate")
+        return kwargs["initial"].copy(), 1.0
+    monkeypatch.setattr(pair_matching, "estimate_geometry", fit)
+    factory = native_factory(frames, tmp_path)
+    np.testing.assert_array_equal(guesses[1], guesses[2])
+    np.testing.assert_array_equal(factory.matrices[0][2], np.eye(3))
+    assert factory.measurements["0"]["diagnostics"][2]["status"] == "skipped_failed_registration"
+    assert factory.geometry_available[0].tolist() == [True, True, False, True]
+
+
+@pytest.mark.parametrize("failure", [None, "skip"])
+def test_affine_does_not_suppress_invalid_arguments(tmp_path, monkeypatch, failure) -> None:
+    from sem_noise import pair_matching
+
+    yy, xx = np.mgrid[:64, :64]
+    pattern = np.rint(120 + 30 * np.sin(xx / 5) + 20 * np.cos(yy / 7)).astype(np.uint8)
+    def broken(*args, **kwargs):
+        raise ValueError("invalid masks must match the image shape")
+    monkeypatch.setattr(pair_matching, "estimate_geometry", broken)
+    with pytest.raises(ValueError, match="invalid masks"):
+        native_factory(np.stack([pattern] * 3), tmp_path, failure=failure)
 
 
 def test_translation_signs_on_analytic_images_with_nonanchor_input() -> None:

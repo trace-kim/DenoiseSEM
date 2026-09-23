@@ -6,7 +6,8 @@ import pytest
 pytest.importorskip("cv2")
 pytest.importorskip("scipy")
 
-from sem_noise.pair_matching import (estimate_geometry, identity_transform, match_target, measure_quantile_brightness,
+from sem_noise.pair_matching import (GeometryEstimationError, check_geometry_reference,
+                                     estimate_geometry, identity_transform, match_target, measure_quantile_brightness,
                                      measure_brightness, pair_transform, regions_on_input,
                                      select_brightness_regions, warp_target)
 from test_registration import TRUTH, moving_frame, specimen
@@ -176,3 +177,48 @@ def test_quantile_fit_reports_flat_central_distribution_as_unmeasurable() -> Non
     target[0, 0] = 250
     with pytest.raises(ValueError, match="percentiles are equal"):
         measure_quantile_brightness(target, target)
+
+
+def test_unusable_geometry_is_distinct_from_invalid_arguments() -> None:
+    constant = np.full((32, 32), 128, dtype=np.uint8)
+    with pytest.raises(GeometryEstimationError, match="constant image"):
+        estimate_geometry(constant, constant)
+    with pytest.raises(GeometryEstimationError, match="too few"):
+        check_geometry_reference(constant, invalid=np.ones_like(constant, dtype=bool))
+    # A small nominally valid island has no pixels with full blur/gradient support.
+    bad = np.ones_like(constant, dtype=bool)
+    bad[10:18, 10:18] = False
+    with pytest.raises(GeometryEstimationError, match="too few"):
+        check_geometry_reference(constant, invalid=bad)
+    for kwargs in ({"motion": "invalid"}, {"sigma": 0}, {"initial": np.zeros((2, 3))},
+                   {"target_invalid": np.zeros((8, 8))}):
+        with pytest.raises(ValueError) as caught:
+            estimate_geometry(constant, constant, **kwargs)
+        assert not isinstance(caught.value, GeometryEstimationError)
+
+
+@pytest.mark.parametrize("code,expected", [(-7, GeometryEstimationError), (-5, Exception)])
+def test_only_ecc_convergence_errors_are_skippable(monkeypatch, code, expected) -> None:
+    import cv2
+
+    error = cv2.error("synthetic ECC error")
+    error.code, error.err = code, "synthetic ECC error"
+    def fail(*args):
+        raise error
+    monkeypatch.setattr(cv2, "findTransformECCWithMask", fail)
+    with pytest.raises(expected) as caught:
+        estimate_geometry(specimen(64), specimen(64))
+    if code != -7:
+        assert caught.value is error
+
+
+@pytest.mark.parametrize("score,matrix", [
+    (float("nan"), np.eye(2, 3)), (1.0, np.zeros((2, 3))),
+    (1.0, np.full((2, 3), np.nan)),
+])
+def test_unusable_ecc_results_never_become_measured_transforms(monkeypatch, score, matrix) -> None:
+    import cv2
+
+    monkeypatch.setattr(cv2, "findTransformECCWithMask", lambda *a: (score, matrix))
+    with pytest.raises(GeometryEstimationError):
+        estimate_geometry(specimen(64), specimen(64))

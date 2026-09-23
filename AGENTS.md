@@ -88,6 +88,19 @@ stop handling. Any new dataset path must hash content before splitting.
 
 ## Persistent User Preferences: Real SEM Workflows
 
+- **Patternless acquisitions skip transforms, never training.** Blank, constant,
+  noise-only and low-contrast frames are expected real SEM inputs. Check for
+  usable structure before every registration path (including affine ECC), pick
+  the first usable reference, and retain unmeasurable frames/sites in their
+  original splits. If either member lacks geometry, use the same native crop
+  coordinates for both; never compose an identity placeholder with another
+  frame's measured transform. Default affine startup must skip a failed fit,
+  record its reason, and leave the last successful seed unchanged. A flat
+  percentile distribution cannot determine brightness gain: retain native
+  brightness for pairs involving it. Do not require a special skip flag for
+  the normal unattended suite. Keep regression coverage for noisy blanks,
+  entirely blank sites, mixed sites, all five suite entry points, cache reuse
+  and resume. Invalid configuration/dependency errors must still surface.
 - **All image analysis uses the final uint8 images.** Raw inputs are uint8
   RGB with identical channels. Convert model outputs and averages to uint8
   before any noise, brightness, registration, contour, or metrology analysis;

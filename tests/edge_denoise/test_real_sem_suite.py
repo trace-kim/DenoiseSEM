@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -11,8 +13,11 @@ from typer.testing import CliRunner
 
 from edge_denoise import real_suite as suite
 from edge_denoise.cli import app
-from edge_denoise.train import load_checkpoint
-from test_real_sem_next_phase import prepared_uint8, real_teacher
+from edge_denoise.config import Config
+from edge_denoise.real_matching import MatchedRealPairFactory
+from edge_denoise.train import Trainer, load_checkpoint
+from test_real_sem_next_phase import (prepared_uint8, prepared_uint8_with_blanks, real_teacher,
+                                      tiny_config)
 
 
 @pytest.fixture
@@ -71,6 +76,61 @@ def test_suite_actual_training_entry_point_completes_all_methods(suite_plan, mon
     assert comparison["contour_method"] == "otsu"
     calls.clear()
     assert suite.run_suite(suite_plan, resume=True) == 0
+    assert not calls
+
+
+def test_failed_suite_restarts_all_five_on_patternless_sites_and_reuses_skips(
+        prepared_uint8_with_blanks, tmp_path, monkeypatch):
+    dataset = prepared_uint8_with_blanks
+    teacher = Trainer(tiny_config(dataset, tmp_path / "blank_teacher")).run()
+    args = suite.build_parser().parse_args([
+        "--dataset-dir", str(dataset), "--n2n-checkpoint", str(teacher),
+        "--run-root", str(tmp_path / "runs"), "--date", "260923", "--device", "cpu",
+        "--metrology-device", "cpu", "--max-steps", "1", "--batch-size", "1",
+        "--accumulation-steps", "1", "--cpu-threads", "1",
+    ])
+    plan = suite.build_plan(args)
+    def failed_start(command, log_path, run_dir, stop, cpu_threads):
+        log_path.write_text("prior registration startup failure")
+        (run_dir / "config.yml").write_text("previous attempt preserved")
+        return 1
+    monkeypatch.setattr(suite, "_launch", failed_start)
+    assert suite.run_suite(plan) == 1
+    calls, measured = [], []
+    original_measure = MatchedRealPairFactory._measure
+    def measure(self, frames, prepared):
+        measured.append(len(frames))
+        return original_measure(self, frames, prepared)
+    monkeypatch.setattr(MatchedRealPairFactory, "_measure", measure)
+    def invoke(command, log_path, run_dir, stop, cpu_threads):
+        calls.append(command)
+        result = CliRunner().invoke(app, command[command.index("train"):])
+        log_path.write_text(result.output, encoding="utf-8")
+        assert result.exit_code == 0, (result.output, result.exception)
+        return result.exit_code
+    monkeypatch.setattr(suite, "_launch", invoke)
+    assert suite.run_suite(plan, resume=True) == 0
+    assert len(calls) == 5 and measured == [8, 8, 8]  # First arm measures; the other four reuse.
+    assert saved_state(plan)["status"] == "complete"
+    for pipeline in plan["pipelines"]:
+        directory = Path(pipeline["config"]["training"]["run_dir"])
+        assert (directory / "failed_attempts/before_attempt_002/config.yml").exists()
+        with (directory / "registration_frames.csv").open(encoding="utf-8", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 24 and all(row["retained_in_split"] == "True" for row in rows)
+        assert {row["site"] for row in rows} == {"site_0", "site_1", "site_2"}
+        assert sum(row["status"] == "skipped_low_contrast" for row in rows) == 18
+        assert any(row["brightness_status"] == "skipped_flat_percentiles" for row in rows)
+        payload = load_checkpoint(directory / "ckpt_latest.pt")
+        restored = Trainer(Config.model_validate(payload["config"]), resume_from=directory / "ckpt_latest.pt")
+        for key, record in restored.factory.measurements.items():
+            if record["reference_frame"] is None:
+                assert not restored.factory.geometry_available[int(key)].any()
+                np.testing.assert_array_equal(record["matrices"], np.repeat(np.eye(3)[None], 8, axis=0))
+        assert torch.isfinite(restored.factory.sample_batch().targets).all()
+    assert measured == [8, 8, 8]  # Checkpoint restore also preserves unavailable statuses.
+    calls.clear()
+    assert suite.run_suite(plan, resume=True) == 0
     assert not calls
 
 

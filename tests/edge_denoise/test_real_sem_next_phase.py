@@ -48,6 +48,27 @@ def prepared_uint8(tmp_path: Path) -> Path:
     return dataset
 
 
+@pytest.fixture
+def prepared_uint8_with_blanks(prepared_uint8, tmp_path: Path) -> Path:
+    """Mixed and wholly patternless train/val sites, still saved native uint8 RGB."""
+    rng = np.random.default_rng(914)
+    raw = tmp_path / "raw_uint8"
+    for site in range(3):
+        for frame in range(8):
+            if site == 0 and frame not in (0, 3):
+                continue
+            pixels = np.full((56, 64), 40 + site * 50 + frame, dtype=float)
+            if frame % 2 == 0:
+                pixels += rng.normal(0, 6, pixels.shape)
+            pixels = np.rint(pixels).astype(np.uint8)
+            Image.fromarray(np.repeat(pixels[..., None], 3, axis=2)).save(raw / f"site_{site}/frame_{frame}.png")
+    splits = tmp_path / "blank_splits.json"
+    splits.write_text(json.dumps({"site_0": "train", "site_1": "train", "site_2": "val", "site_3": "test"}))
+    dataset = tmp_path / "prepared_with_blanks"
+    prepare_real_dataset(raw, dataset, image_size=16, align="none", split_file=splits)
+    return dataset
+
+
 def tiny_config(dataset: Path, run_dir: Path) -> Config:
     return Config.model_validate({
         "data": {"dataset_dir": dataset, "image_size": 16},
@@ -178,6 +199,32 @@ def test_matching_cache_and_resume_do_not_reestimate_geometry(prepared_uint8, tm
     # A valid checkpoint remains independently resumable even if cache is absent.
     cfg.data.real_matching_cache.unlink()
     Trainer(cfg, resume_from=checkpoint)
+
+
+def test_old_matching_cache_refreshes_once_but_checkpoint_preserves_measurements(prepared_uint8, tmp_path, monkeypatch):
+    cfg = tiny_config(prepared_uint8, tmp_path / "original")
+    cfg.data.real_matching = RealMatchingConfig(registration="affine", brightness="percentile")
+    cfg.data.real_matching_cache = tmp_path / "matching.json"
+    trainer = Trainer(cfg)
+    checkpoint = trainer.run()
+    old = json.loads(cfg.data.real_matching_cache.read_text())
+    old["measurement_version"] = 1
+    cfg.data.real_matching_cache.write_text(json.dumps(old))
+    calls = []
+    measure = MatchedRealPairFactory._measure
+    def counted(self, frames, prepared):
+        calls.append(len(frames))
+        return measure(self, frames, prepared)
+    monkeypatch.setattr(MatchedRealPairFactory, "_measure", counted)
+    restored = Trainer(cfg, resume_from=checkpoint)
+    assert not calls and restored.factory.measurements == trainer.factory.measurements
+    cfg.training.run_dir = tmp_path / "new_run"
+    Trainer(cfg)
+    assert calls == [8, 8, 8]
+    assert json.loads(cfg.data.real_matching_cache.read_text())["measurement_version"] == 2
+    cfg.training.run_dir = tmp_path / "third_run"
+    Trainer(cfg)
+    assert calls == [8, 8, 8]
 
 
 def test_gradient_target_is_sobel_of_matched_image_and_inputs_stay_native(prepared_uint8, tmp_path):

@@ -14,6 +14,10 @@ from scipy import ndimage
 from .registration import prepare_fit_images
 
 
+class GeometryEstimationError(ValueError):
+    """Valid images cannot supply a usable geometry estimate, not bad arguments."""
+
+
 def _image(image: np.ndarray) -> np.ndarray:
     result = np.asarray(image, dtype=np.float64)
     if result.ndim != 2 or min(result.shape) < 8 or not np.isfinite(result).all():
@@ -34,6 +38,31 @@ def identity_transform() -> np.ndarray:
     return np.eye(2, 3, dtype=np.float64)
 
 
+def _check_geometry_support(image: np.ndarray, good: np.ndarray) -> None:
+    if good.sum() < 16:
+        raise GeometryEstimationError("too few unclipped pixels for ECC registration")
+    if np.ptp(image[good]) == 0:
+        raise GeometryEstimationError("constant image: geometry is not measurable")
+
+
+def check_geometry_reference(image: np.ndarray, *, sigma: float = 1.0,
+                             invalid: np.ndarray | None = None) -> None:
+    """Reject an unusable reference before assigning a site's coordinate anchor.
+
+    Use the same Gaussian/gradient mask support as ECC, without running a fit.
+    This numerical check complements the training path's block-contrast gate.
+    """
+    image = _image(image)
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("sigma must be finite and positive")
+    bad = np.zeros(image.shape, dtype=bool) if invalid is None else np.asarray(invalid, dtype=bool)
+    if bad.shape != image.shape:
+        raise ValueError("invalid masks must match the image shape")
+    radius = int(4 * sigma + 0.5) + 1  # Gaussian support plus ECC gradient support.
+    good = ~ndimage.binary_dilation(bad, structure=np.ones((2 * radius + 1,) * 2, dtype=bool))
+    _check_geometry_support(image, good)
+
+
 def estimate_geometry(input_image: np.ndarray, target_image: np.ndarray, *,
                       motion: str = "affine", initial: np.ndarray | None = None,
                       sigma: float = 1.0, input_invalid: np.ndarray | None = None,
@@ -43,24 +72,24 @@ def estimate_geometry(input_image: np.ndarray, target_image: np.ndarray, *,
     ``initial`` may instead be an existing translation estimate. Affine includes
     translation: a later translation warp is never necessary. The returned
     score is normalized correlation, not a parameter error or convergence proof.
+    Unmeasurable data raises GeometryEstimationError; callers can skip correction
+    explicitly without treating invalid arguments or dependency errors as data.
     """
     fixed, moving = _image(input_image), _image(target_image)
     if fixed.shape != moving.shape:
         raise ValueError("input and target images must have the same shape")
     if motion not in ("translation", "affine"):
         raise ValueError("motion must be translation or affine")
+    matrix = identity_transform() if initial is None else _matrix(initial).copy()
+    if motion == "translation" and not np.allclose(matrix[:, :2], np.eye(2)):
+        raise ValueError("translation initial matrix must have an identity linear part")
     fixed, moving, bad_fixed, bad_moving = prepare_fit_images(fixed, moving, sigma, input_invalid, target_invalid)
     # Gradient support in ECC extends one pixel beyond the Gaussian support.
     kernel = np.ones((3, 3), dtype=bool)
     good_fixed = ~ndimage.binary_dilation(bad_fixed, structure=kernel)
     good_moving = ~ndimage.binary_dilation(bad_moving, structure=kernel)
-    if min(good_fixed.sum(), good_moving.sum()) < 16:
-        raise ValueError("too few unclipped pixels for ECC registration")
-    if np.ptp(fixed[good_fixed]) == 0 or np.ptp(moving[good_moving]) == 0:
-        raise ValueError("constant image: geometry is not measurable")
-    matrix = identity_transform() if initial is None else _matrix(initial).copy()
-    if motion == "translation" and not np.allclose(matrix[:, :2], np.eye(2)):
-        raise ValueError("translation initial matrix must have an identity linear part")
+    _check_geometry_support(fixed, good_fixed)
+    _check_geometry_support(moving, good_moving)
     try:
         score, matrix = cv2.findTransformECCWithMask(
             fixed.astype(np.float32), moving.astype(np.float32),
@@ -70,8 +99,16 @@ def estimate_geometry(input_image: np.ndarray, target_image: np.ndarray, *,
             (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-6), 1,
         )
     except cv2.error as error:
-        raise ValueError(f"{motion} ECC failed: {error.err}") from error
-    return _matrix(matrix).copy(), float(score)
+        if error.code != cv2.Error.StsNoConv:
+            raise  # API/type/dependency errors are not unmeasurable acquisitions.
+        raise GeometryEstimationError(f"{motion} ECC failed: {error.err}") from error
+    if not np.isfinite(score):
+        raise GeometryEstimationError(f"{motion} ECC returned a nonfinite correlation")
+    try:
+        matrix = _matrix(matrix).copy()
+    except ValueError as error:
+        raise GeometryEstimationError(f"{motion} ECC returned an invalid transform: {error}") from error
+    return matrix, float(score)
 
 
 def pair_transform(input_transform: np.ndarray, target_transform: np.ndarray) -> np.ndarray:

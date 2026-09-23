@@ -111,6 +111,12 @@ def _assign_splits(
     return [group for group in members if len(group) > 1]
 
 
+def registration_contrast(unit: torch.Tensor) -> float:
+    """Standard deviation of native-frame block means in normalized units."""
+    block = min(16, max(1, min(unit.shape[-2:]) // 2))
+    return float(F.avg_pool2d(unit, block, ceil_mode=True).std(correction=0))
+
+
 def estimate_translations(
     raw: np.ndarray, *, black: float, white: float, sigma: float,
     radius: int, max_shift: float, device: str,
@@ -135,8 +141,7 @@ def estimate_translations(
     with torch.no_grad():
         for index in range(len(raw)):
             unit = torch.from_numpy(normalize_native(raw[index], black, white))[None, None].to(resolved)
-            block = min(16, max(1, min(unit.shape[-2:]) // 2))
-            contrast = float(F.avg_pool2d(unit, block, ceil_mode=True).std(correction=0))
+            contrast = registration_contrast(unit)
             record = {"status": "registered", "contrast": contrast}
             if diagnostics is not None:
                 diagnostics.append(record)
