@@ -94,7 +94,7 @@ The result is the normal `index.html`, CSV/JSON measurements, and TensorBoard
 report. It does not launch a separate preview or require inference. Use
 `--metrology-device cpu` for a CPU installation.
 
-New runs using the shipped `sem_real_compare.yml` select Otsu by default.
+New runs using the shipped `sem_real_compare.yml` select `otsu_refined` by default.
 Rebuilds without a method override preserve the method saved in the input;
 older reports without method metadata retain the existing method. Use
 `--contour-method current` to select the previous segmentation/refinement
@@ -387,6 +387,66 @@ summarized across contributing holes. Missing values are gaps, never zeroes.
 Average128 has one observation and no repeatability estimate. Native temporal
 variation includes motion and charging as well as noise; neither low variation
 nor low ECD SD alone establishes the best denoiser.
+
+## Precision: refined ECD and variation components (WP3/WP4/WP6)
+
+`otsu_refined` retains Otsu region IDs and mask ECD, then refines each outer ring
+along its normals against the **decoded, unsmoothed uint8 crop / 255**. The CPU
+and CUDA Otsu producers retain that crop, so refinement needs no second decode.
+One CUDA refiner is reused per series. Failed refinement is reported with its
+coverage; it never becomes an accepted mask-only refined measurement. Interior
+rings retain their mask geometry, as in the existing metrology implementation.
+
+`--refine-estimator gradient_peak|threshold|erf` records the estimator in the
+report/settings and detector label. `gradient_peak` is the initial default,
+not a validation-selected winner. The existing CuPy refiner accelerates
+`gradient_peak`; `threshold` and `erf` require explicit `--metrology-device cpu`.
+Unsupported CUDA estimators fail rather than silently falling back. Select the
+estimator on a **validation** site using coverage and failure rate, not lowest SD.
+
+From an already completed validation comparison, run all three candidates:
+
+```bash
+VALIDATION_REPORT=output/real_models_validation/comparison.json
+for estimator in gradient_peak threshold erf; do
+  metrology=cpu
+  if [ "$estimator" = gradient_peak ]; then metrology=cuda:0; fi
+  python tools/real_sem_compare.py --from-comparison "$VALIDATION_REPORT" \
+    --output-dir "output/260928_validation_${estimator}" --contours-only \
+    --contour-method otsu_refined --refine-estimator "$estimator" \
+    --metrology-device "$metrology" --no-tensorboard || break
+done
+python tools/benchmark_sem_analysis.py \
+  --from-comparison output/260928_validation_gradient_peak/comparison.json \
+  --device cuda:0 --frames-per-source 16 --contour-method otsu_refined \
+  --output-json output/260928_refined_benchmark.json
+```
+
+The benchmark includes refinement, compares its ECD/coverage as well as masks,
+and reports refinement stage time. H100 speed and real-data agreement remain
+unverified until it runs remotely. Existing `otsu` and `current` methods retain
+their behavior. Rebuilds keep their recorded method/estimator unless overridden.
+
+Per-hole exports now include `cd_std_detrended` (linear acquisition-order trend,
+residual variance with n-2 degrees of freedom), `cd_std_successive` (sample SD
+of consecutive differences / sqrt(2)), and correlations with native frame mean
+and the Otsu threshold. Block averages use block centres. Fewer than three
+usable observations yield unavailable components; differences never bridge a
+failed observation. Constant brightness/threshold makes correlation unavailable.
+The old sample SD is unchanged. Summary exports include medians of all three
+SDs, observations per hole and deterministic 95% percentile bootstrap intervals
+over holes (2,000 resamples; fewer than two holes gives no interval). These
+intervals do not remove temporal dependence or establish dimensional accuracy.
+
+The viewer starts refined reports on refined ECD, offers both boundary toggles,
+and displays the components/intervals. A single pixel-centre-to-raster helper
+places contours, labels and fit boxes consistently; stored geometry and PIL
+overlays are unchanged. `--render-only` refreshes that display on old reports.
+
+WP3/WP4/WP6 verification (2026-09-28): full `python -m pytest -q`:
+**1,058 passed, 1 skipped** in 159.25 s; the optional browser test is skipped.
+An additional 9 viewer checks pass. Synthetic saved disks recover diameter within
+0.05 px for each CPU estimator; mocked CUDA agrees with CPU gradient refinement.
 
 The standalone `sem_noise` acquisition workflow retains its original correction
 diagnostics. This comparison does not invoke it. A legacy `analysis_config` is

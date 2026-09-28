@@ -70,7 +70,7 @@ def summarize_observations(rows: list[dict], series_names: list[str], *,
         groups[row["series"], row["hole"], row["method"]].append(row)
     per_hole = []
     for (series, hole, method), observations in groups.items():
-        valid = [r for r in observations if r["status"] == "valid"]
+        valid = [r for r in observations if r["status"] == "valid" and r.get("cd") is not None and np.isfinite(r["cd"])]
         result = {"series": series, "hole": hole, "method": method,
                   "unit": observations[0].get("unit", "px"),
                   "attempted_count": len(observations), "valid_count": len(valid),
@@ -82,6 +82,7 @@ def summarize_observations(rows: list[dict], series_names: list[str], *,
             sd = float(values.std(ddof=1)) if len(values) >= 2 else None
             result[f"{measure}_std"] = sd
             result[f"{measure}_3sigma"] = 3 * sd if sd is not None else None
+        result.update(precision_components(observations))
         per_hole.append(result)
     summaries = []
     for method in ("coarse", "refined"):
@@ -105,4 +106,54 @@ def summarize_observations(rows: list[dict], series_names: list[str], *,
                               "contributing_observations": sum(r["valid_count"] for r in selected),
                               "valid_count": sum(r["valid_count"] for r in all_holes),
                               "failed_count": sum(r["failed_count"] for r in all_holes)})
+            summary = summaries[-1]
+            summary["observations_per_hole"] = {str(r["hole"]): r["valid_count"] for r in selected}
+            for field in ("cd_std", "cd_std_detrended", "cd_std_successive"):
+                values = [r[field] for r in selected if r[field] is not None]
+                summary[f"median_{field}"] = float(np.median(values)) if values else None
+                summary[f"median_{field}_ci95"] = bootstrap_median(values)
     return per_hole, summaries
+
+
+def precision_components(observations: list[dict]) -> dict:
+    """Separate drift from jitter; gaps never become consecutive observations."""
+    ordered = sorted(enumerate(observations), key=lambda pair: pair[1].get("order", pair[0]))
+    result = {"cd_std_detrended": None, "cd_std_successive": None,
+              "cd_brightness_correlation": None, "cd_threshold_correlation": None}
+    usable = [(i, r) for i, r in ordered if r["status"] == "valid" and r.get("cd") is not None and np.isfinite(r["cd"])]
+    if len(usable) < 3:
+        return result
+    values = np.array([r["cd"] for _, r in usable])
+    order = np.array([r.get("order", i) for i, r in usable], dtype=float)
+    design = np.column_stack((order - order.mean(), np.ones(len(order))))
+    if np.linalg.matrix_rank(design) == 2:
+        residuals = values - design @ np.linalg.lstsq(design, values, rcond=None)[0]
+        # Two fitted parameters; unbiased white-noise variance after detrending.
+        result["cd_std_detrended"] = float(np.sqrt(np.sum(residuals**2) / (len(values) - 2)))
+    adjacent = []
+    for (_, a), (_, b) in zip(ordered, ordered[1:]):
+        if all(r["status"] == "valid" and r.get("cd") is not None and np.isfinite(r["cd"]) for r in (a, b)):
+            adjacent.append(b["cd"] - a["cd"])
+    if len(adjacent) >= 2:
+        result["cd_std_successive"] = float(np.std(adjacent, ddof=1) / np.sqrt(2))
+    for field, output in (("mean_dn", "cd_brightness_correlation"), ("otsu_threshold_dn", "cd_threshold_correlation")):
+        pairs = [(r["cd"], r.get(field)) for _, r in usable if r.get(field) is not None and np.isfinite(r[field])]
+        if len(pairs) >= 3:
+            x, y = np.asarray(pairs).T
+            if np.ptp(x) > 0 and np.ptp(y) > 0:
+                result[output] = float(np.corrcoef(x, y)[0, 1])
+    return result
+
+
+def bootstrap_median(values: list[float], *, samples: int = 2000) -> list[float] | None:
+    """Deterministic percentile interval, resampling holes, never frames."""
+    if len(values) < 2:
+        return None
+    data = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(0)
+    medians = []
+    # Bound bootstrap storage even on sites with many thousands of holes.
+    for start in range(0, samples, 64):
+        draws = rng.choice(data, size=(min(64, samples - start), len(data)))
+        medians.extend(np.median(draws, axis=1))
+    return np.percentile(medians, [2.5, 97.5]).tolist()

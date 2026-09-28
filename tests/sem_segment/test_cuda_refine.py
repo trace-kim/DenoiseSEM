@@ -93,6 +93,26 @@ def test_cpu_never_loads_cupy(monkeypatch):
     assert result.regions
 
 
+def test_otsu_refinement_cpu_and_cuda_use_the_same_decoded_pixels(tmp_path, fake_cuda):
+    from PIL import Image
+    from sem_segment.otsu_baseline import otsu_baseline, OtsuSettings
+    from sem_segment.otsu_measurement import measure_otsu_result
+
+    pixels = np.rint(blurred_disk() * 255).astype(np.uint8)
+    path = tmp_path / "disk.png"
+    Image.fromarray(pixels).save(path)
+    detected = otsu_baseline(path)
+    np.testing.assert_array_equal(detected.pixels, pixels)
+    cpu = measure_otsu_result(detected, OtsuSettings(), refine=RefineConfig())
+    gpu = measure_otsu_result(detected, OtsuSettings(), device="cuda:2", refine=RefineConfig(device="cuda:2"))
+    assert cpu.regions and len(cpu.regions) == len(gpu.regions)
+    for a, b in zip(cpu.refined, gpu.refined):
+        np.testing.assert_allclose(a.polygon, b.polygon, atol=1e-8)
+        np.testing.assert_array_equal(a.valid, b.valid)
+    assert gpu.diagnostics.refinement["device"] == "cuda:2"
+    assert fake_cuda.freed == 1
+
+
 @pytest.mark.parametrize("order", [1, 3])
 def test_batched_gpu_matches_cpu_with_mixed_radii_empty_contours_and_borders(fake_cuda, order):
     image = np.rint(gaussian_blurred_step() * 255) / 255

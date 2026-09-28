@@ -30,8 +30,11 @@
     return node;
   };
   const option = (value, text) => new Option(text, value);
-  const ringPath = points => points.length ? "M" + points.map(p => `${p[1]},${p[0]}`).join("L") + "Z" : "";
-  const openPath = points => points.length ? "M" + points.map(p => `${p[1]},${p[0]}`).join("L") : "";
+  // Stored coordinates name pixel centres. Canvas pixels occupy [k,k+1).
+  const rasterPoint = p => [p[0] + .5, p[1] + .5];
+  const pointPath = p => {const q = rasterPoint(p); return `${q[1]},${q[0]}`;};
+  const ringPath = points => points.length ? "M" + points.map(pointPath).join("L") + "Z" : "";
+  const openPath = points => points.length ? "M" + points.map(pointPath).join("L") : "";
   const time = f => f.timestamp_s ?? f.order;
   const timeTitle = () => site().series.raw.frames[0].timestamp_s == null ? "Acquisition / block center" : "Acquisition time (s)";
   function frameLabel(p) {
@@ -111,7 +114,7 @@
     return entry.promise;
   }
   function surface(root) {
-    const group = svg("g"), raster = svg("foreignObject", {x: -.5, y: -.5});
+    const group = svg("g"), raster = svg("foreignObject", {x: 0, y: 0});
     const canvas = document.createElement("canvas"), overlay = svg("g");
     raster.append(canvas); group.append(raster, overlay); root.append(group);
     return {group, raster, canvas, overlay, path: null};
@@ -159,13 +162,13 @@
         let d = "";
         c.refined.forEach((point, i) => {
           const j = (i + 1) % c.refined.length;
-          if (c.refined_valid[i] && c.refined_valid[j]) d += `M${point[1]},${point[0]}L${c.refined[j][1]},${c.refined[j][0]}`;
+          if (c.refined_valid[i] && c.refined_valid[j]) d += `M${pointPath(point)}L${pointPath(c.refined[j])}`;
         });
         group.append(svg("path", {d, class: "refined-line"}));
       }
       if (isSelected && ring.length) {
-        const x = ring.reduce((sum, q) => sum + q[1], 0) / ring.length;
-        const y = ring.reduce((sum, q) => sum + q[0], 0) / ring.length;
+        const [y, x] = rasterPoint([ring.reduce((sum, q) => sum + q[0], 0) / ring.length,
+                                    ring.reduce((sum, q) => sum + q[1], 0) / ring.length]);
         const size = Math.max(3, state.view[2] / 65);
         group.append(svg("text", {x, y, fill: "#fff", "font-size": size, "text-anchor": "middle", "pointer-events": "none"}, c.hole ? `#${c.hole}` : `R${c.region_id}`));
       }
@@ -218,7 +221,7 @@
     if (!c) return;
     const all = [...c.coarse, ...c.refined, ...c.holes.flat(), ...(c.open_paths || []).flat()];
     if (!all.length) return;
-    const xs = all.map(q => q[1]), ys = all.map(q => q[0]);
+    const xs = all.map(q => rasterPoint(q)[1]), ys = all.map(q => rasterPoint(q)[0]);
     const minX = Math.min(...xs), minY = Math.min(...ys), w = Math.max(...xs) - minX, h = Math.max(...ys) - minY;
     const pad = Math.max(4, Math.max(w, h) * .2);
     state.view = [minX - pad, minY - pad, w + pad * 2, h + pad * 2]; clampView(); drawImages();
@@ -352,6 +355,9 @@
     ["Source", "Usable / total", `Mean (${report.unit})`, `σ, sample SD (${report.unit})`, `3σ (${report.unit})`, `Mean ±3σ (${report.unit})`].forEach(value => {
       const th = document.createElement("th"); th.textContent = value; head.append(th);
     }); table.append(head);
+    for (const title of ["Detrended SD", "Successive SD", "r(ECD, brightness)", "r(ECD, threshold)"]) {
+      const th = document.createElement("th"); th.textContent = title; head.append(th);
+    }
     for (const t of [...tracks].sort((a, b) => (a.stats.sd ?? Infinity) - (b.stats.sd ?? Infinity))) {
       const {n, mean, sd} = t.stats, tr = document.createElement("tr");
       const range = sd == null ? "Unavailable (n < 2)" : `${fmt(mean - 3 * sd)} … ${fmt(mean + 3 * sd)}`;
@@ -359,7 +365,12 @@
         const td = document.createElement("td"); td.textContent = value;
         if (!i) td.style.color = t.color;
         tr.append(td);
-      }); table.append(tr);
+      });
+      const detail = (site().per_hole || []).find(r => r.series === t.name && r.hole === state.selected.hole && r.method === $("measure").value) || {};
+      for (const key of ["cd_std_detrended", "cd_std_successive", "cd_brightness_correlation", "cd_threshold_correlation"]) {
+        const td = document.createElement("td"); td.textContent = fmt(detail[key]); tr.append(td);
+      }
+      table.append(tr);
     }
     root.append(table);
   }
@@ -395,11 +406,19 @@
     const head = document.createElement("tr");
     ["Images", "Boundary", "Contributing holes", "Usable measurements", "Unavailable", `ECD sample SD (${report.unit})`, `ECD 3σ (${report.unit})`].forEach(text => {const th = document.createElement("th"); th.textContent = text; head.append(th);});
     table.append(head);
-    const rows = site().repeatability.filter(r => !maskOnly || r.method === "coarse");
+    for (const title of ["Detrended SD", "Successive SD", "Median SD 95% CI (holes)", "Observations per hole"]) {
+      const th = document.createElement("th"); th.textContent = title; head.append(th);
+    }
+    const rows = site().repeatability.filter(r => r.method === (maskOnly ? "coarse" : $("measure").value));
     for (const r of rows) {
       const tr = document.createElement("tr");
       [label(r.series), r.method === "coarse" ? "Mask" : "Refined", r.common_hole_count, r.valid_count, r.failed_count,
         fmt(r.median_cd_std), fmt(r.median_cd_std == null ? null : 3 * r.median_cd_std)].forEach(text => {const td = document.createElement("td"); td.textContent = text; tr.append(td);});
+      const ci = r.median_cd_std_ci95;
+      for (const value of [fmt(r.median_cd_std_detrended), fmt(r.median_cd_std_successive),
+        ci ? ci.map(v => fmt(v)).join(" to ") : "Unavailable", Object.values(r.observations_per_hole || {}).join(", ")]) {
+        const td = document.createElement("td"); td.textContent = value; tr.append(td);
+      }
       table.append(tr);
     }
     target.append(table);
@@ -567,7 +586,7 @@
   $("contours").onchange = () => drawImages();
   $("linked").onchange = () => {if ($("linked").checked) {wanted.indices[1 - state.active] = atAcquisition(wanted.names[1 - state.active], wanted.acquisition); render();}};
   $("wipe").oninput = () => drawImages(false);
-  $("measure").onchange = () => {drawImages(); drawMeasurements(); drawCharts(); drawBand();};
+  $("measure").onchange = () => {drawImages(); drawMeasurements(); drawCharts(); drawCoverage(); drawBand();};
   $("ecd-hole").onchange = () => {
     if (!state.ready) return;
     const hole = $("ecd-hole").value;
@@ -601,6 +620,10 @@
     const settings = report.otsu_settings;
     $("detector-note").textContent = `Contours: Gaussian + Otsu · ${settings.polarity} foreground · σ ${settings.sigma_px} px · minimum area ${settings.min_area_px} px. Same settings for every source; each image has its own threshold.`;
     $("measurement-note").textContent = "ECD uses the area enclosed by the Otsu mask, subtracting interior rings. These are segmentation boundaries, not subpixel edge measurements. Open border paths are displayed but excluded from area/ECD.";
+  } else if (report.contour_method === "otsu_refined") {
+    $("measure").value = "refined";
+    $("contours").value = "refined";
+    $("detector-note").textContent = `Contours: Gaussian + Otsu regions; ${report.refine_estimator || "gradient_peak"} edge refinement on unsmoothed saved uint8 pixels.`;
   } else {
     $("detector-note").textContent = "Contours: current segmentation and edge-refinement pipeline.";
   }

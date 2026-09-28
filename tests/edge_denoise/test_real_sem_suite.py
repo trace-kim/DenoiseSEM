@@ -73,7 +73,7 @@ def test_suite_actual_training_entry_point_completes_all_methods(suite_plan, mon
     assert all(row["status"] == "complete" for row in state["pipelines"].values())
     comparison = yaml.safe_load((Path(suite_plan["suite_dir"]) / "comparison.yml").read_text())
     assert list(comparison["checkpoints"]) == ["n2n", *suite.PIPELINES]
-    assert comparison["contour_method"] == "otsu"
+    assert comparison["contour_method"] == "otsu_refined"
     calls.clear()
     assert suite.run_suite(suite_plan, resume=True) == 0
     assert not calls

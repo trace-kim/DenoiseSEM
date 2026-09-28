@@ -203,6 +203,7 @@ def render_comparison(root: Path, record: dict) -> Path:
         shutil.copyfile(Path(__file__).parent / "assets" / filename, root / "viewer" / filename)
     view = {"unit": record["unit"], "arms": record["arms"], "sites": [],
             "contour_method": record.get("contour_method", "current"),
+            "refine_estimator": record.get("refine_estimator", "gradient_peak"),
             "otsu_settings": record.get("otsu_settings")}
     frame_keys = ("index", "order", "timestamp_s", "first_acquisition", "last_acquisition", "path", "mean_dn",
                   "brightness_delta_dn", "difference_path", "output_minus_raw_dy_px", "output_minus_raw_dx_px",
@@ -226,7 +227,8 @@ def render_comparison(root: Path, record: dict) -> Path:
             hole[row["method"]].append([row["frame"], row["cd"] if row["status"] == "valid" else None])
         output = {"name": site["name"], "shape": site["image_shape"], "series": {}, "traces": traces,
                   "contour_status": site["contour_status"], "warnings": site["warnings"],
-                  "repeatability": site["repeatability"], "hole_count": len(site["template_centroids"])}
+                  "repeatability": site["repeatability"], "per_hole": site.get("per_hole", []),
+                  "hole_count": len(site["template_centroids"])}
         with Progress(f"{site['name']}: loading temporal variation maps", timings=site.setdefault("timings_s", {}),
                       key="viewer_load_temporal_maps"):
             maps = {name: np.load(root / s["temporal_std"], allow_pickle=False)

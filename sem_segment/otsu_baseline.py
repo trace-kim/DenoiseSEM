@@ -37,6 +37,7 @@ class OtsuResult:
     timings_s: dict[str, float]
     labels: np.ndarray | None = None
     execution: dict = field(default_factory=dict)
+    pixels: np.ndarray | None = None  # Decoded, unsmoothed uint8 measurement crop.
 
 
 def otsu_baseline(
@@ -116,5 +117,5 @@ def otsu_baseline(
         outlines = [outline + offset for outline in outlines]
     timings["outlines"] = time.perf_counter() - stage
     timings["total"] = time.perf_counter() - started
-    return OtsuResult(mask, outlines, threshold, int(count), int(keep.sum()), backend, timings,
+    return OtsuResult(mask, outlines, threshold, int(count), int(keep.sum()), backend, timings, pixels=pixels,
                       labels=labels, execution={"backend": "scipy", "batch_size": 1})

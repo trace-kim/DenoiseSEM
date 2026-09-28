@@ -162,7 +162,7 @@ def test_cli_defaults_and_saved_otsu_config_are_reusable(tmp_path, monkeypatch):
     from sem_noise import comparison_report
 
     default = compare.configure_run(compare.build_parser().parse_args([]))
-    assert default.contour_method == "otsu"
+    assert default.contour_method == "otsu_refined"
     assert default.otsu == OtsuSettings()
     assert compare.configure_run(compare.build_parser().parse_args(["--contour-method", "current"])).contour_method == "current"
     source = saved_record(tmp_path / "source", count=2)

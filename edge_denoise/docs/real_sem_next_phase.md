@@ -363,6 +363,12 @@ WP1/WP2 local full-suite verification (2026-09-28): **1,052 passed, 1 skipped**
 in 205.85 s. This includes 16/512-pixel CPU and local CUDA sampler equivalence;
 the skip is the optional offline browser test. This is not an H100 timing result.
 
+Precision report steps WP3/WP4/WP6 are implemented through `real_sem_compare.py`:
+`otsu_refined`, explicit estimator selection, centre-correct overlays, and the
+drift/jitter/brightness decomposition. See the validation rebuild and refined
+CPU/GPU benchmark commands in [the comparison guide](real_sem_comparison.md#precision-refined-ecd-and-variation-components-wp3wp4wp6).
+The estimator remains an open validation decision.
+
 Local CPU full-suite verification: `python -m pytest -q` passed **1,027 tests**,
 with one optional browser test skipped because no browser executable was set.
 An additional **93 focused regression tests passed** after GPU-RNG isolation,

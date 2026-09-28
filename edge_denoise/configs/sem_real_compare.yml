@@ -53,7 +53,8 @@ ema: true
 # Gaussian + ordinary Otsu on each saved uint8 image; no watershed, hole filling,
 # contour refinement, or contrast stretching. Closed masks use existing area/ECD
 # measurements. Border paths remain open and are excluded from measurements.
-contour_method: otsu
+contour_method: otsu_refined
+refine_estimator: gradient_peak
 otsu:
   polarity: dark
   sigma_px: 1.0

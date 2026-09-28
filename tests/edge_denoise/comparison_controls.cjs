@@ -96,6 +96,17 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
 (async () => {
   await settle();
   const a = canvas("image-a"), b = canvas("image-b");
+  assert.equal(a.parentNode.getAttribute("x"), "0");
+  assert.equal(a.parentNode.getAttribute("y"), "0");
+  const firstContour = context.window.SEM_CONTOURS[report.sites[0].series.raw.frames[0].overlay_key][0];
+  const originalRing = firstContour.coarse;
+  // Marching-squares boundary of a 3x3 foreground mask at rows 10:13, cols 20:23.
+  firstContour.coarse = [[9.5,20],[9.5,22],[10,22.5],[12,22.5],[12.5,22],[12.5,20],[12,19.5],[10,19.5]];
+  event("contours", "change", "coarse");
+  const drawn = descendants(get("image-a")).find(e => e.dataset.region).getAttribute("d");
+  assert.equal(drawn, "M20.5,10L22.5,10L23,10.5L23,12.5L22.5,13L20.5,13L20,12.5L20,10.5Z");
+  firstContour.coarse = originalRing;
+  event("contours", "change", "coarse");
   assert.match(a.pixels, /raw\/frame_001/); assert.match(b.pixels, /model\/frame_001/);
   const region = descendants(get("image-a")).find(e => e.dataset.region);
   get("image-a").events.pointerdown({button: 0, clientX: 10, clientY: 10, target: region});

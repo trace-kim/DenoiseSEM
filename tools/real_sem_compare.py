@@ -62,7 +62,8 @@ class ComparisonSettings(BaseModel):
     segmentation_config: Path | None = None
     # Older programmatic callers retain the current method. The shipped real
     # comparison recipe explicitly selects the Gaussian + Otsu method.
-    contour_method: Literal["current", "otsu"] = "current"
+    contour_method: Literal["current", "otsu", "otsu_refined"] = "current"
+    refine_estimator: Literal["gradient_peak", "threshold", "erf"] | None = None
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
@@ -285,21 +286,23 @@ def measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                    contour_method: str = "current", otsu: OtsuSettings | None = None,
                    analysis_batch: int = 16, analysis_memory_mb: int = 8192,
                    io_workers: int = 2) -> tuple[list[dict], list[dict]]:
-    if contour_method == "otsu":
+    if contour_method in {"otsu", "otsu_refined"}:
         from sem_segment.otsu_measurement import iter_measure_saved_otsu
 
         settings = otsu or OtsuSettings()
         results = iter_measure_saved_otsu([root / f["path"] for f in series["frames"]], settings,
             crop=segment_config.input.crop, device=segment_config.refine.device, metrology=segment_config.metrology,
-            batch_size=analysis_batch, memory_mb=analysis_memory_mb, io_workers=io_workers)
+            batch_size=analysis_batch, memory_mb=analysis_memory_mb, io_workers=io_workers,
+            refine=segment_config.refine if contour_method == "otsu_refined" else None, contours=segment_config.contours)
         try:
-            return _measure_series(root, name, series, template, gate, segment_config, otsu=settings, results=results)
+            return _measure_series(root, name, series, template, gate, segment_config, otsu=settings, results=results,
+                                   mask_only=contour_method == "otsu")
         finally:
             label = Path(series["frames"][0]["path"]).parent.as_posix() if series["frames"] else name
             with Progress(f"{label}: closing Otsu workers", timings=series.setdefault("timings_s", {}), key="contour_cleanup"):
                 results.close()
     if contour_method != "current":
-        raise ValueError("contour_method must be current or otsu")
+        raise ValueError("contour_method must be current, otsu or otsu_refined")
     if segment_config.refine.enabled and segment_config.refine.device != "cpu":
         from sem_segment.cuda import CudaRefiner
 
@@ -325,7 +328,7 @@ def _measurement_status(region, method: str, config: SegmentConfig, *, mask_only
 
 def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                     gate: float, segment_config: SegmentConfig, *, refiner=None,
-                    otsu: OtsuSettings | None = None, results=None) -> tuple[list[dict], list[dict]]:
+                    otsu: OtsuSettings | None = None, results=None, mask_only: bool = False) -> tuple[list[dict], list[dict]]:
     from sem_segment.backends import build_segmenter
     from sem_segment.pipeline import segment_image
     from sem_segment.repeatability import match_centroids
@@ -333,7 +336,8 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
     started = last_progress = time.perf_counter()
     count = len(series["frames"])
     label = "/".join(Path(series["frames"][0]["path"]).parts[:-1]) if count else name
-    detector = f"Gaussian + Otsu on {segment_config.refine.device}; no refinement" if otsu is not None else f"refinement {segment_config.refine.device}"
+    detector = (f"Gaussian + Otsu on {segment_config.refine.device}; "
+                + ("no refinement" if mask_only else f"{segment_config.refine.estimator} refinement")) if otsu is not None else f"refinement {segment_config.refine.device}"
     print(f"{label}: contours/CD starting ({count} saved uint8 images; {detector})", flush=True)
     segmenter = build_segmenter(segment_config) if otsu is None else None
     rows, contours = [], []
@@ -375,11 +379,11 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         for match in matches:
             index = match["region_index"]
             region = result.regions[index] if index is not None else None
-            for method in (("coarse",) if otsu is not None else ("coarse", "refined")):
+            for method in (("coarse",) if mask_only else ("coarse", "refined")):
                 shape = getattr(region, method) if region is not None else None
                 status = match["match_status"]
                 if status == "matched":
-                    status = _measurement_status(region, method, segment_config, mask_only=otsu is not None)
+                    status = _measurement_status(region, method, segment_config, mask_only=mask_only)
                 rows.append({"series": name, "frame": frame["index"], "order": frame["order"],
                              "timestamp_s": frame["timestamp_s"], "filename": frame["path"],
                              "hole": match["hole"], "method": method, "status": status,
@@ -387,14 +391,15 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                              "clipped": frame.get("clipped", False), "cd": shape.equivalent_diameter_px * factor if shape else None,
                              "major_axis": shape.major_axis_px * factor if shape else None,
                              "minor_axis": shape.minor_axis_px * factor if shape else None,
-                             "valid_fraction": region.valid_fraction if region else None})
+                             "valid_fraction": region.valid_fraction if region else None,
+                             "mean_dn": frame.get("mean_dn"), "otsu_threshold_dn": frame.get("otsu_threshold_dn")})
         # Every local detection remains inspectable even without correspondence.
         matched = {m["region_index"]: m["hole"] for m in matches if m["region_index"] is not None}
         offset = np.array([crop[0], crop[2]]) if crop else np.zeros(2)
         strengths = {r["region_id"]: r for r in result.diagnostics.edge_strength_change.get("regions", [])}
         counts = {"detected": len(result.regions), "complete": 0, "refined": 0, "border": 0, "review": 0}
         for index, region in enumerate(result.regions):
-            statuses = {method: _measurement_status(region, method, segment_config, mask_only=otsu is not None)
+            statuses = {method: _measurement_status(region, method, segment_config, mask_only=mask_only)
                         for method in ("coarse", "refined")}
             counts["complete"] += statuses["coarse"] == "valid"
             counts["refined"] += statuses["refined"] == "valid"
@@ -491,9 +496,10 @@ def resolve_segmentation_settings(config: ComparisonSettings) -> SegmentConfig:
 
     segment = load_segment(config.segmentation_config) if config.segmentation_config else SegmentConfig(
         segmentation={"backend": "classical", "polarity": "dark"})
-    if config.metrology_device is not None:
+    if config.metrology_device is not None or config.refine_estimator is not None:
         segment.refine = type(segment.refine).model_validate(
-            {**segment.refine.model_dump(), "device": config.metrology_device})
+            {**segment.refine.model_dump(), "device": config.metrology_device or segment.refine.device,
+             "estimator": config.refine_estimator or segment.refine.estimator})
     if segment.refine.device != "cpu":
         index = int(segment.refine.device.split(":")[1]) if ":" in segment.refine.device else 0
         device = f"cuda:{index}"
@@ -531,16 +537,18 @@ def prepare_reference(root: Path, site: dict, segment: SegmentConfig, *,
         raise ValueError("Segmentation crop extends outside the saved image")
     template_image = reference[crop[0]:crop[1], crop[2]:crop[3]] if crop else reference
     print(f"{site['name']}: locating holes on the saved uint8 full average", flush=True)
-    if contour_method == "otsu":
+    if contour_method in {"otsu", "otsu_refined"}:
         from sem_segment.otsu_measurement import measure_saved_otsu
 
         result = measure_saved_otsu(root / site["full_average"], otsu, crop=crop,
                                     device=segment.refine.device, metrology=segment.metrology,
-                                    memory_mb=analysis_memory_mb, io_workers=io_workers)
+                                    memory_mb=analysis_memory_mb, io_workers=io_workers,
+                                    refine=segment.refine if contour_method == "otsu_refined" else None,
+                                    contours=segment.contours)
     elif contour_method == "current":
         result = segment_image(template_image.astype(float) / 255, segment)
     else:
-        raise ValueError("contour_method must be current or otsu")
+        raise ValueError("contour_method must be current, otsu or otsu_refined")
     template = np.array([(r.coarse.centroid_y, r.coarse.centroid_x) for r in result.regions
                          if r.coarse and not r.touches_border]).reshape(-1, 2)
     site["template_centroids"] = template.tolist()
@@ -650,7 +658,7 @@ def run(config: ComparisonSettings) -> dict:
     noise = load_noise(config.analysis_config) if config.analysis_config else AnalysisConfig()
     noise = replace(noise, registration="none", compare_direct_registration="none")
     segment = resolve_segmentation_settings(config)
-    if config.contour_method == "current" and segment.refine.enabled and segment.refine.device != "cpu":
+    if config.contour_method != "otsu" and segment.refine.enabled and segment.refine.device != "cpu":
         from sem_segment.cuda import CudaRefiner
 
         print(f"Checking CUDA contour refinement on {segment.refine.device}", flush=True)
@@ -666,12 +674,15 @@ def run(config: ComparisonSettings) -> dict:
               "segmentation_settings": segment.model_dump(mode="json"), "noise_settings": asdict(noise),
               "unit": "nm" if segment.input.pixel_size_nm else "px", "range_warning": RANGE_WARNING,
               "models": {}, "sites": [], "prediction_ranges": [], "artifacts": [], "warnings": []}
-    record.update(contour_method=config.contour_method, otsu_settings=config.otsu.model_dump())
+    record.update(contour_method=config.contour_method, otsu_settings=config.otsu.model_dump(),
+                  refine_estimator=segment.refine.estimator)
+    record["settings"]["refine_estimator"] = segment.refine.estimator
     record["timings_s"] = {"validate_inputs": validation.elapsed_s}
-    contour_options = {"contour_method": "otsu", "otsu": config.otsu} if config.contour_method == "otsu" else {}
+    is_otsu = config.contour_method in {"otsu", "otsu_refined"}
+    contour_options = {"contour_method": config.contour_method, "otsu": config.otsu} if is_otsu else {}
     execution_options = ({key: getattr(config, key) for key in ("analysis_batch", "analysis_memory_mb", "io_workers")}
-                         if config.contour_method == "otsu" else {})
-    native_options = {"device": segment.refine.device} if config.contour_method == "otsu" else {}
+                         if is_otsu else {})
+    native_options = {"device": segment.refine.device} if is_otsu else {}
 
     def save() -> None:
         save_record(root, record)
@@ -836,7 +847,8 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
             segmentation_config: Path | None = None, contour_method: str | None = None,
             otsu_config: Path | None = None, render_only: bool = False, contours_only: bool = False,
             analysis_batch: int | None = None, analysis_memory_mb: int | None = None,
-            io_workers: int | None = None, tensorboard: bool | None = None) -> dict:
+            io_workers: int | None = None, tensorboard: bool | None = None,
+            refine_estimator: str | None = None) -> dict:
     """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
     from sem_noise.config import AnalysisConfig
     from sem_noise.comparison_storage import load_contours
@@ -861,17 +873,18 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
     if render_only and record.get("schema_version", 0) < 3:
         raise ValueError("This older report needs contour remeasurement; omit --render-only")
     if render_only and any(value is not None for value in (
-            metrology_device, segmentation_config, contour_method, otsu_config,
+            metrology_device, segmentation_config, contour_method, otsu_config, refine_estimator,
             analysis_batch, analysis_memory_mb, io_workers)):
         raise ValueError("--render-only reuses measurements; omit segmentation/device overrides")
     method = contour_method or record.get("contour_method", record.get("settings", {}).get("contour_method", "current"))
-    if method not in {"current", "otsu"}:
-        raise ValueError("contour_method must be current or otsu")
-    if otsu_config is not None and method != "otsu":
-        raise ValueError("--otsu-config requires --contour-method otsu")
+    if method not in {"current", "otsu", "otsu_refined"}:
+        raise ValueError("contour_method must be current, otsu or otsu_refined")
+    is_otsu = method in {"otsu", "otsu_refined"}
+    if otsu_config is not None and not is_otsu:
+        raise ValueError("--otsu-config requires --contour-method otsu or otsu_refined")
     otsu = (load_otsu_settings(otsu_config) if otsu_config is not None else
             OtsuSettings.model_validate(record.get("otsu_settings", record.get("settings", {}).get("otsu", {}))))
-    contour_options = {"contour_method": "otsu", "otsu": otsu} if method == "otsu" else {}
+    contour_options = {"contour_method": method, "otsu": otsu} if is_otsu else {}
     if root == source_root and not render_only:
         raise ValueError("Use a new --output-dir for remeasurement; saved images are preserved")
     if root != source_root:
@@ -934,8 +947,10 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         record["settings"].update(contour_method=method, otsu=otsu.model_dump())
         record["settings"].update(execution_options)
         segment = load_segment(segmentation_config) if segmentation_config else SegmentConfig.model_validate(record["segmentation_settings"])
-        if metrology_device is not None:
-            segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(), "device": metrology_device})
+        if metrology_device is not None or refine_estimator is not None:
+            segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(),
+                "device": metrology_device or segment.refine.device, "estimator": refine_estimator or segment.refine.estimator})
+        record["refine_estimator"] = record["settings"]["refine_estimator"] = segment.refine.estimator
         segment.input.black_level, segment.input.white_level = 0., 255.
         segment.segmentation.contrast_stretch = None
         segment.masks.include_border_regions = False
@@ -946,7 +961,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         noise = AnalysisConfig(registration="none", registration_sigma=record.get("noise_settings", {}).get("registration_sigma", 1.0))
         if not contours_only:
             record["noise_settings"] = asdict(noise)
-        native_options = {"device": segment.refine.device} if method == "otsu" else {}
+        native_options = {"device": segment.refine.device} if is_otsu else {}
         for site in record["sites"]:
             site.update(observations=[], contours=[])
             site.setdefault("requested_match_gate_px", record["settings"].get("match_gate_px"))
@@ -1047,13 +1062,13 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
         if value is not None:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
     for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
-                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split"):
+                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split", "refine_estimator"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
     if args.otsu_config is not None:
-        if config.contour_method != "otsu":
-            raise ValueError("--otsu-config requires --contour-method otsu")
+        if config.contour_method not in {"otsu", "otsu_refined"}:
+            raise ValueError("--otsu-config requires --contour-method otsu or otsu_refined")
         config.otsu = load_otsu_settings(args.otsu_config)
     return ComparisonSettings.model_validate(config.model_dump())
 
@@ -1078,10 +1093,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only-checkpoints", action="store_true", help="Compare only the named --checkpoint entries, omitting other base-config arms")
     parser.add_argument("--prepared-manifest", action="append", metavar="NAME=PATH")
     parser.add_argument("--segmentation-config", type=Path)
-    parser.add_argument("--contour-method", choices=("otsu", "current"),
+    parser.add_argument("--contour-method", choices=("otsu", "current", "otsu_refined"),
                         help="Use Gaussian + Otsu masks, or the existing segmentation/refinement method")
     parser.add_argument("--otsu-config", type=Path,
                         help="Override Otsu polarity, sigma_px and min_area_px with a detector YAML")
+    parser.add_argument("--refine-estimator", choices=("gradient_peak", "threshold", "erf"),
+                        help="Edge estimator; defaults to gradient_peak. threshold/erf require --metrology-device cpu")
     parser.add_argument("--metrology-device", help="Otsu/native analysis or current-method refinement device: cpu, cuda, or cuda:N")
     parser.add_argument("--device", help="Denoiser device")
     parser.add_argument("--tile-batch", type=int)
@@ -1109,7 +1126,7 @@ def main() -> int:
                              segmentation_config=args.segmentation_config, contour_method=args.contour_method,
                              otsu_config=args.otsu_config, render_only=args.render_only, contours_only=args.contours_only,
                              analysis_batch=args.analysis_batch, analysis_memory_mb=args.analysis_memory_mb,
-                             io_workers=args.io_workers, tensorboard=args.tensorboard)
+                             io_workers=args.io_workers, tensorboard=args.tensorboard, refine_estimator=args.refine_estimator)
             output = args.output_dir
         else:
             if args.render_only or args.contours_only:

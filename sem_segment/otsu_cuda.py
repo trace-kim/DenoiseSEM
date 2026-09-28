@@ -170,12 +170,12 @@ def iter_saved_otsu(paths: Sequence[Path], settings: OtsuSettings, *,
                 result = cuda_masks(np.stack([p for p, _ in decoded]), settings, device)
             except MemoryError as error:
                 raise RuntimeError("CUDA Otsu batch allocation failed; reduce --analysis-batch or --analysis-memory-mb") from error
-            return result, [seconds for _, seconds in decoded]
+            return result, decoded
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sem-otsu") as producer:
             future = producer.submit(produce, chunks[0], first)
             for batch_index, chunk in enumerate(chunks):
-                (labels, thresholds, counts, retained, batch_times), decode_times = future.result()
+                (labels, thresholds, counts, retained, batch_times), decoded = future.result()
                 if batch_index + 1 < len(chunks):
                     future = producer.submit(produce, chunks[batch_index + 1])
                 for i, label_map in enumerate(labels):
@@ -185,10 +185,10 @@ def iter_saved_otsu(paths: Sequence[Path], settings: OtsuSettings, *,
                     if crop:
                         outlines = [p + [crop[0], crop[2]] for p in outlines]
                     timings = {key: seconds / len(chunk) for key, seconds in batch_times.items()}
-                    timings.update(decode=decode_times[i], outlines=time.perf_counter() - started)
+                    timings.update(decode=decoded[i][1], outlines=time.perf_counter() - started)
                     timings["total"] = timings["decode"] + timings["batch_compute"] + timings["outlines"]
                     yield OtsuResult(mask, outlines, float(thresholds[i]), counts[i], int(retained[i]),
-                                     "cupy" if settings.sigma_px else "disabled", timings, labels=label_map,
+                                     "cupy" if settings.sigma_px else "disabled", timings, labels=label_map, pixels=decoded[i][0],
                                      execution={"backend": "cupy", "batch_size": len(chunk),
                                                 "batch_capacity": capacity, "memory_budget_mb": memory_mb,
                                                 "io_workers": io_workers, "timing_basis": "amortized batch cost"})
