@@ -186,7 +186,8 @@ def test_leave_one_out_corrects_each_other_frame_to_A_before_averaging(prepared,
             continue
         fit = measure_quantile_brightness(source.frames[a], source.frames[b])
         expected.append((fit["gain"] * source.frames[b, 8:24, 8:24].astype(float) + fit["offset_dn"]) / 4095 * 2 - 1)
-    np.testing.assert_allclose(sample[1][0], np.mean(expected, axis=0), atol=2e-7)
+    batch, _ = factory._batch([sample])
+    np.testing.assert_allclose(batch.targets[0, 0], np.mean(expected, axis=0), atol=2e-7)
     fit = measure_quantile_brightness(source.frames[a], source.frames[second])
     np.testing.assert_allclose(sample[5], [fit["gain"], 2 * fit["offset_dn"] / 4095 + fit["gain"] - 1])
     assert sample[-1].target_replica is None and sample[-1].input_replica != sample[-1].second_replica
@@ -342,7 +343,8 @@ def test_mean_target_keeps_failed_frames_and_uses_native_coordinates(prepared, t
             continue
         dy, dx = (0, 0) if a in (2, 4) or j in (2, 4) else shifts[j] - shifts[a]
         images.append(normalize_native(source.frames[j, y + dy:y + dy + 16, x + dx:x + dx + 16], 0, 4095))
-    np.testing.assert_allclose(sample[1][0], np.mean(images, axis=0) * 2 - 1, atol=3e-7)
+    batch, _ = factory._batch([sample])
+    np.testing.assert_allclose(batch.targets[0, 0], np.mean(images, axis=0) * 2 - 1, atol=3e-7)
 
 
 def test_failed_frames_remain_sampled_and_reported_on_resume(prepared, tmp_path, monkeypatch) -> None:
@@ -481,7 +483,8 @@ def test_all_flat_site_keeps_native_targets_and_consistency_without_any_transfor
         sample = factory._pair(source, (8, 8), a, b, second)
         selected = [b] if target == "noisy" else [j for j in range(len(frames)) if j != a]
         expected = normalize_native(frames[selected, 8:24, 8:24], 0, 255).mean(axis=0) * 2 - 1
-        np.testing.assert_allclose(sample[1][0], expected, atol=2e-7)
+        batch, _ = factory._batch([sample])
+        np.testing.assert_allclose(batch.targets[0, 0], expected, atol=2e-7)
         np.testing.assert_array_equal(sample[4], np.eye(2, 3))
         np.testing.assert_array_equal(sample[5], [1, 0])
     _, infos = factory.sample_batch(count=100, return_info=True)
@@ -503,6 +506,98 @@ def test_flat_percentile_pair_keeps_both_directions_native_but_noisy_blank_still
         assert factory._brightness(0, a, b) == (1, 0)
     gain, offset = factory._brightness(0, 1, 2)
     assert gain == pytest.approx(1) and offset == pytest.approx(-20 / 255)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda:0", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA unavailable"))])
+@pytest.mark.parametrize("size", [16, 512])
+def test_batched_native_sampler_matches_both_original_samplers(device, size):
+    from edge_denoise.device_sampling import sample_native_crops
+
+    rng = np.random.default_rng(817)
+    frames = rng.integers(0, 256, (6, size + 35, size + 41), dtype=np.uint8)
+    matrices = np.array([[[1.01, .012, 2.33], [-.007, .99, 3.11]],
+                         [[1.01, .012, -2.2], [-.007, .99, -1.11]],
+                         [[1, 0, 7.253], [0, 1, 6.716]],
+                         [[1, 0, -.36], [0, 1, -1.21]],
+                         [[1, 0, 0], [0, 1, 0]],
+                         [[1, 0, 8], [0, 1, 4]]], dtype=float)
+    seen = set()
+    for indices, crops, valid in sample_native_crops(frames, matrices, size, 9, 240, device):
+        for k, index in enumerate(indices):
+            expected, support = sample_target(frames[index], matrices[index], size, 9, 240)
+            np.testing.assert_allclose(crops[k, 0].cpu(), expected, atol=1e-5, rtol=0)
+            np.testing.assert_array_equal(valid[k, 0].cpu(), support)
+            seen.add(index)
+    assert seen == set(range(len(frames)))
+
+
+def test_mean_specs_preserve_rng_pairs_consistency_and_resume(prepared, tmp_path, monkeypatch):
+    from edge_denoise.real_matching import build_mean_targets
+
+    monkeypatch.setattr(MatchedRealPairFactory, "_measure", lambda self, frames, _: mixed_geometry(frames, registration="affine"))
+    cfg = matching_config(prepared, tmp_path / "run", "affine", "percentile", target="noisy_mean", consistency=1)
+    cache = BurstCache(prepared)
+    factory = MatchedRealPairFactory(cache, cfg, seed=88)
+    original_pair = factory._pair
+    recorded = []
+    def record(*args):
+        sample = original_pair(*args)
+        recorded.append(sample)
+        return sample
+    monkeypatch.setattr(factory, "_pair", record)
+    for _ in range(3):
+        state = factory.state_dict()
+        recorded.clear()
+        batch, infos = factory.sample_batch(count=3, return_info=True)
+        for i, sample in enumerate(recorded):
+            spec = sample[1]
+            frames = factory.frames_by_site[spec.source_index]
+            expected = np.zeros((spec.size, spec.size), dtype=np.float64)
+            support = np.ones_like(expected, dtype=bool)
+            for j, matrix, (gain, offset) in zip(spec.indices, spec.matrices, spec.brightness):
+                pixels, valid = sample_target(frames[j], matrix, spec.size, factory.black, factory.white)
+                expected += float(gain) * pixels + float(offset)
+                support &= valid
+            expected = (expected / len(spec.indices)).astype(np.float32) * 2 - 1
+            np.testing.assert_allclose(batch.targets[i, 0], expected, atol=1e-5, rtol=0)
+            np.testing.assert_array_equal(batch.target_valid[i, 0], support)
+            np.testing.assert_array_equal(batch.second[i], sample[2])
+            assert infos[i] == sample[-1] and spec.input_frame not in spec.indices
+        restored = MatchedRealPairFactory(cache, cfg, seed=2, measurements=factory.measurements)
+        restored.load_state_dict(state)
+        actual, actual_infos = restored.sample_batch(count=3, return_info=True)
+        assert actual_infos == infos and restored.state_dict() == factory.state_dict()
+        assert torch.equal(actual.targets, batch.targets) and torch.equal(actual.second, batch.second)
+
+
+def test_cache_and_resume_compare_applied_failure_policy(prepared, tmp_path, monkeypatch):
+    monkeypatch.setattr(MatchedRealPairFactory, "_measure", lambda self, frames, _: {
+        **mixed_geometry(frames, registration="affine"), "failure_policy": "skip"})
+    cache = BurstCache(prepared)
+    cfg = matching_config(prepared, tmp_path / "run", "affine", "percentile")
+    cfg.data.real_matching_cache = tmp_path / "matching.json"
+    first = MatchedRealPairFactory(cache, cfg, seed=3)
+    record = first.measurement_record()
+    assert record["settings"]["registration_failure"] == "skip"
+    record["settings"]["registration_failure"] = None  # old written cache
+    cfg.data.real_matching_cache.write_text(json.dumps(record))
+    cfg.data.real_matching.registration_failure = "skip"
+    reused = MatchedRealPairFactory(cache, cfg, seed=3)
+    reused.load_state_dict(first.state_dict())
+    assert reused.measurements == first.measurements
+    for r in record["sites"].values():
+        r["failure_policy"] = "error"
+    cfg.data.real_matching_cache.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="cache identity differs"):
+        MatchedRealPairFactory(cache, cfg, seed=3)
+    with pytest.raises(ValueError, match="different real pair matching"):
+        reused.load_state_dict({**first.state_dict(), "matching_measurements": record["sites"]})
+    record = first.measurement_record()
+    record["settings"]["registration"] = "translation"
+    cfg.data.real_matching_cache.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="cache identity differs"):
+        MatchedRealPairFactory(cache, cfg, seed=3)
 
 
 def test_affine_rejects_clipped_reference_then_anchors_on_usable_frame(tmp_path, monkeypatch) -> None:

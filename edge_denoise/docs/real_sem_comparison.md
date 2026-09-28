@@ -4,6 +4,9 @@ Run on the remote server containing the data and checkpoints. The base config is
 `edge_denoise/configs/sem_real_compare.yml`. Directory changes belong in CLI flags;
 the default test site is `/data/260904_raw_data/test/260904_0947-13`.
 
+The B1 leave-one-out target GPU equivalence check, timing pilot and both resumable
+training commands are in [the next-phase handoff](real_sem_next_phase.md#b1-leave-one-out-targets-precision-wp1wp2).
+
 All brightness, noise/temporal variation, registration, contour and metrology
 measurements use **decoded saved uint8 images**. Raw RGB channels must be
 identical. Predictions are restored to the checkpoint's intensity units,

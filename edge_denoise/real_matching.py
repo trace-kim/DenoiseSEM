@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -16,12 +18,68 @@ from runctl.run_logging import atomic_write_json
 
 from .config import Config, RealMatchingConfig
 from .data import PairBatch, PairInfo, ValPairBatch
+from .device_sampling import sample_native_crops
+from .timing import TrainingTimings
 from .real_data import (LOSS_MARGIN, RealPairFactory, estimate_translations, fixed_windows,
                         registration_contrast, sample_region)
 
 logger = logging.getLogger(__name__)
 PERCENTILES = np.arange(10, 91, 5)
 MEASUREMENT_VERSION = 2
+
+
+def resolved_matching_settings(settings: RealMatchingConfig, prepared: dict) -> dict:
+    result = settings.model_dump()
+    if result["registration_failure"] is None:
+        result["registration_failure"] = (prepared.get("failure_policy", "error")
+                                           if settings.registration == "translation" else "skip")
+    return result
+
+
+def matching_settings_equal(stored: dict, settings: RealMatchingConfig, prepared: dict,
+                            measurements: dict | None = None) -> bool:
+    """Compare applied policies, including caches/checkpoints predating resolution."""
+    old = RealMatchingConfig.model_validate(stored)
+    previous = resolved_matching_settings(old, prepared)
+    policies = {r["failure_policy"] for r in (measurements or {}).values() if "failure_policy" in r}
+    if old.registration_failure is None and policies:
+        if len(policies) != 1:
+            return False
+        previous["registration_failure"] = next(iter(policies))
+    current = resolved_matching_settings(settings, prepared)
+    return previous == current and (not policies or policies == {current["registration_failure"]})
+
+
+@dataclass(frozen=True)
+class MeanTargetSpec:
+    source_index: int
+    input_frame: int
+    origin: tuple[int, int]
+    size: int
+    indices: tuple[int, ...]
+    matrices: np.ndarray
+    brightness: np.ndarray
+
+
+@torch.no_grad()
+def build_mean_targets(frames_by_site: dict[int, np.ndarray], specs: list[MeanTargetSpec],
+                       black: float, white: float, device: str | torch.device
+                       ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build leave-one-out targets on the training device without consuming RNG."""
+    targets, masks = [], []
+    for spec in specs:
+        frames = frames_by_site[spec.source_index]
+        total = torch.zeros((1, spec.size, spec.size), device=device, dtype=torch.float64)
+        valid = torch.ones_like(total, dtype=torch.bool)
+        for indices, crops, support in sample_native_crops(
+                [frames[j] for j in spec.indices], spec.matrices, spec.size, black, white, device):
+            coefficients = torch.as_tensor(spec.brightness[indices], device=device, dtype=torch.float32)
+            corrected = crops * coefficients[:, 0, None, None, None] + coefficients[:, 1, None, None, None]
+            total += corrected.sum(dim=0, dtype=torch.float64)
+            valid &= support.all(dim=0)
+        targets.append((total / len(spec.indices)).float() * 2 - 1)
+        masks.append(valid)
+    return torch.stack(targets), torch.stack(masks)
 
 
 def percentile_mapping(input_quantiles: np.ndarray, target_quantiles: np.ndarray) -> tuple[float, float]:
@@ -105,12 +163,13 @@ class MatchedRealPairFactory(RealPairFactory):
 
     No prepared pixels or site assignments change. The old RealPairFactory
     remains the default when data.real_matching is absent. The leave-one-out
-    path deliberately starts simply: sample/correct each other frame, then
-    average on their common valid pixels; it never includes A in its target.
+    path samples/corrects every other frame in bounded device batches, then
+    averages on their common valid pixels; it never includes A in its target.
     """
 
     def __init__(self, cache: BurstCache, config: Config, *, seed: int,
-                 measurements: dict | None = None) -> None:
+                 measurements: dict | None = None, device: str | torch.device = "cpu",
+                 timings: TrainingTimings | None = None) -> None:
         if cache.real_metadata is None or config.data.real_matching is None:
             raise ValueError("inline real matching requires a prepared real dataset and data.real_matching settings")
         if cache.real_metadata["registration"]["mode"] != "none":
@@ -119,6 +178,8 @@ class MatchedRealPairFactory(RealPairFactory):
         if self.image_size <= 2 * (LOSS_MARGIN + 2):
             raise ValueError("inline real matching needs crops larger than 10 pixels for valid consistency support")
         self.settings = config.data.real_matching
+        self.device, self.timings = torch.device(device), timings
+        self.frames_by_site = {s.source_index: s.frames for s in cache.train_sources + cache.val_sources}
         self.sites = {key: dict(site) for key, site in self.sites.items()}
         self.measurements = {}
         self.matrices, self.quantiles, self.geometry_available, self.brightness_available = {}, {}, {}, {}
@@ -131,7 +192,8 @@ class MatchedRealPairFactory(RealPairFactory):
         if measurement_path is not None and measurement_path.exists():
             record = json.loads(measurement_path.read_text(encoding="utf-8"))
             if (record.get("dataset_fingerprint") != cache.real_fingerprint
-                    or record.get("settings") != self.settings.model_dump()
+                    or not matching_settings_equal(record.get("settings", {}), self.settings,
+                                                   cache.real_metadata["registration"], record.get("sites"))
                     or record.get("percentiles") != PERCENTILES.tolist()):
                 raise ValueError("real matching cache identity differs: use a new cache path for changed data/settings")
             if record.get("measurement_version") == MEASUREMENT_VERSION:
@@ -165,9 +227,7 @@ class MatchedRealPairFactory(RealPairFactory):
 
     def _measure(self, frames: np.ndarray, prepared: dict) -> dict:
         matrices = np.repeat(np.eye(3)[None], len(frames), axis=0)
-        failure_policy = self.settings.registration_failure
-        if failure_policy is None:
-            failure_policy = prepared.get("failure_policy", "error") if self.settings.registration == "translation" else "skip"
+        failure_policy = resolved_matching_settings(self.settings, prepared)["registration_failure"]
         record = {"geometry": "none", "matrices": None, "percentiles_dn": None,
                   "failure_policy": failure_policy}
         if self.settings.registration == "translation":
@@ -300,16 +360,17 @@ class MatchedRealPairFactory(RealPairFactory):
         origin = np.clip(origin, 0, np.array(source.frames.shape[1:]) - size)
         inputs = normalize_native(source.frames[a, origin[0]:origin[0] + size, origin[1]:origin[1] + size],
                                   self.black, self.white)
-        targets = np.zeros((size, size), dtype=np.float64)
-        target_valid = np.ones((size, size), dtype=bool)
         selected = [b] if self.target == "noisy" else [j for j in range(len(source.frames)) if j != a]
-        for j in selected:
-            matrix = crop_matrix(self._pair_matrix(index, a, j), origin)
-            sampled, valid = sample_target(source.frames[j], matrix, size, self.black, self.white)
-            gain, offset = self._brightness(index, a, j)
-            targets += gain * sampled + offset
-            target_valid &= valid
-        targets /= len(selected)
+        if self.target == "noisy_mean":
+            targets = MeanTargetSpec(index, a, tuple(origin.tolist()), size, tuple(selected),
+                                     np.stack([crop_matrix(self._pair_matrix(index, a, j), origin) for j in selected]),
+                                     np.array([self._brightness(index, a, j) for j in selected]))
+            target_valid = None
+        else:
+            matrix = crop_matrix(self._pair_matrix(index, a, b), origin)
+            sampled, target_valid = sample_target(source.frames[b], matrix, size, self.black, self.white)
+            gain, offset = self._brightness(index, a, b)
+            targets = (gain * sampled + offset).astype(np.float64)
         second_input = second_matrix = second_brightness = second_valid = None
         if second is not None:
             matrix = crop_matrix(self._pair_matrix(index, a, second), origin)
@@ -328,15 +389,22 @@ class MatchedRealPairFactory(RealPairFactory):
             second_brightness = np.array([gain, 2 * offset + gain - 1], dtype=np.float32)
         info = PairInfo(index, tuple(origin.tolist()), a, b if self.target == "noisy" else None, second)
         convert = lambda image: (np.asarray(image, dtype=np.float32) * 2 - 1)[None]
-        return (convert(inputs), convert(targets), None if second_input is None else convert(second_input),
+        return (convert(inputs), targets if self.target == "noisy_mean" else convert(targets),
+                None if second_input is None else convert(second_input),
                 target_valid, second_matrix, second_brightness, second_valid, info)
 
     def _batch(self, samples: list[tuple], *, validation: bool = False):
         inputs, targets, seconds, valid, matrices, brightness, second_valid, infos = zip(*samples)
         tensor = lambda arrays: torch.from_numpy(np.stack(arrays).astype(np.float32))
-        values = dict(inputs=tensor(inputs), targets=tensor(targets),
+        if self.target == "noisy_mean":
+            with self.timings.measure("mean_target") if self.timings is not None else nullcontext():
+                target_tensor, target_valid = build_mean_targets(self.frames_by_site, list(targets),
+                                                                self.black, self.white, self.device)
+        else:
+            target_tensor, target_valid = tensor(targets), torch.from_numpy(np.stack(valid))[:, None]
+        values = dict(inputs=tensor(inputs), targets=target_tensor,
                       second=None if seconds[0] is None else tensor(seconds), loss_margin=LOSS_MARGIN,
-                      target_valid=torch.from_numpy(np.stack(valid))[:, None],
+                      target_valid=target_valid,
                       second_matrices=None if matrices[0] is None else tensor(matrices),
                       second_brightness=None if brightness[0] is None else tensor(brightness),
                       second_valid=None if second_valid[0] is None else torch.from_numpy(np.stack(second_valid))[:, None])
@@ -347,7 +415,8 @@ class MatchedRealPairFactory(RealPairFactory):
                 "matching_measurements": self.measurements}
 
     def load_state_dict(self, state: dict) -> None:
-        if RealMatchingConfig.model_validate(state.get("matching_settings", self.settings.model_dump())) != self.settings:
+        if not matching_settings_equal(state.get("matching_settings", self.settings.model_dump()), self.settings,
+                                       self.cache.real_metadata["registration"], state.get("matching_measurements")):
             raise ValueError("cannot resume with different real pair matching settings")
         if "matching_measurements" in state:
             self.measurements = state["matching_measurements"]
@@ -356,7 +425,8 @@ class MatchedRealPairFactory(RealPairFactory):
 
     def measurement_record(self) -> dict:
         return {"measurement_version": MEASUREMENT_VERSION,
-                  "dataset_fingerprint": self.cache.real_fingerprint, "settings": self.settings.model_dump(),
+                  "dataset_fingerprint": self.cache.real_fingerprint,
+                  "settings": resolved_matching_settings(self.settings, self.cache.real_metadata["registration"]),
                   "percentiles": PERCENTILES.tolist(), "sites": self.measurements,
                   "brightness": "full raw frame percentiles; B mapped directly to each sampled A; no output clipping",
                   "brightness_fallback": "if either frame has flat percentiles, use gain 1 and offset 0; retain frames",

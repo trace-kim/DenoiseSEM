@@ -123,10 +123,9 @@ times overlap. Full-frame inference and saved-image analysis/I/O timings are
 in the comparison report's `timings.json`. Choose production budgets after
 checking the complete workflow, including validation and reconstruction.
 
-Registration defaults to strict failure reporting. If an explicit skip policy
-is appropriate, pass `--registration-failure skip` to the pilot and production
-commands. This retains failed frames with unmeasured geometry under the existing
-pair fallback rules; it never hides brightness, I/O or training failures.
+Affine registration skips unmeasurable/failed fits by default and records the
+reason. No extra skip flag is needed. An explicit `--registration-failure error`
+requests strict fit failures; invalid configuration/dependency errors always surface.
 
 ## Unattended training and restart
 
@@ -297,6 +296,72 @@ interruptions, unrelated directories and altered completed checkpoints.
 
 Hardware performance, CUDA numerical equivalence and real-acquisition model
 quality remain to be measured with the remote commands above.
+
+## B1 leave-one-out targets (precision WP1/WP2)
+
+`noisy_mean` now batches native source rectangles onto the training device,
+normalizes there, applies cubic sampling and percentile coefficients, and reduces
+in float64. Scratch batches have a conservative 256 MiB budget. Single-frame
+targets, RNG order, consistency inputs and checkpoint sampler states are unchanged.
+Affine sampling reproduces OpenCV's 1/32-pixel coordinate table and zero border;
+translations retain the original edge padding and exact integer crops. Translation
+interpolation uses double precision to preserve the original CPU grid coordinates
+across CUDA implementations. The `mean_target` stage is nested in `sample_batch`.
+The OpenCV rounding convention is documented in
+[imgwarp.cpp](https://github.com/opencv/opencv/blob/4.x/modules/imgproc/src/imgwarp.cpp).
+
+Matching cache identity and resume compare the **applied** failure policy. Old
+caches with an unset field are accepted only when their recorded per-site policy
+agrees. Changed geometry, brightness, applied policy or dataset still fails.
+
+Inside the existing GPU allocation, verify targets and run a timing pilot:
+
+```bash
+DATASET=data/SEM-real-none
+N2N=runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt
+SUITE=runs/edge_denoise/260922_real_suite
+RUN_DATE=260928
+python tools/check_real_sem_mean_targets.py --dataset-dir "$DATASET" \
+  --real-matching-cache "$SUITE/real_matching.json" --targets 32 \
+  --device cuda:0 --cpu-threads 2
+python -m edge_denoise train --config edge_denoise/configs/sem_real_ft_loomean.yml \
+  --dataset-dir "$DATASET" --init-checkpoint "$N2N" \
+  --real-matching-cache "$SUITE/real_matching.json" \
+  --run-dir "runs/edge_denoise/pilots/${RUN_DATE}_real_ft_loomean_gpu" \
+  --max-steps 100 --device cuda:0 --cpu-threads 2 --profile
+```
+
+Relaunch both B1 runs with logs and checkpoint restart. Set `RUN_DATE` to their
+original date to resume existing runs. With two visible allocated GPUs:
+
+```bash
+run_b1() (
+  set -o pipefail
+  arm="$1"; gpu="$2"
+  run="runs/edge_denoise/${RUN_DATE}_real_${arm}_affine_percentile"
+  mkdir -p "$run"
+  resume=()
+  if [ -f "$run/ckpt_latest.pt" ]; then resume=(--resume); fi
+  python -m edge_denoise train --config "edge_denoise/configs/sem_real_${arm}.yml" \
+    --dataset-dir "$DATASET" --init-checkpoint "$N2N" \
+    --real-matching-cache "$SUITE/real_matching.json" --run-dir "$run" \
+    --device "$gpu" --cpu-threads 2 "${resume[@]}" \
+    2>&1 | tee -a "$run/b1_training.log"
+)
+run_b1 ft_loomean cuda:0 & b1_pid=$!
+run_b1 ft_loomean_consist cuda:1 & b1c_pid=$!
+wait "$b1_pid"; b1_status=$?
+wait "$b1c_pid"; b1c_status=$?
+printf 'B1 exit codes: %s %s\n' "$b1_status" "$b1c_status"
+```
+
+Repeat after interruption; `--resume` restores each existing checkpoint. Inspect
+`training_status.json` for completion and `timings.json` for stage costs. A target
+of throughput within about 1.5x of `ft_noisy` remains **unverified on H100**.
+
+WP1/WP2 local full-suite verification (2026-09-28): **1,052 passed, 1 skipped**
+in 205.85 s. This includes 16/512-pixel CPU and local CUDA sampler equivalence;
+the skip is the optional offline browser test. This is not an H100 timing result.
 
 Local CPU full-suite verification: `python -m pytest -q` passed **1,027 tests**,
 with one optional browser test skipped because no browser executable was set.

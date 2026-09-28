@@ -278,7 +278,7 @@ class Trainer:
 
                 measurements = None if resume_payload is None else resume_payload["factory"].get("matching_measurements")
                 self.factory = MatchedRealPairFactory(self.cache, config, seed=factory_seed,
-                                                      measurements=measurements)
+                                                      measurements=measurements, device=self.device, timings=self.timings)
         elif objective.fusion is not None:
             self.factory = FusionFactory(
                 self.cache,
@@ -390,7 +390,13 @@ class Trainer:
             raise ValueError("resume dataset differs from the checkpoint; use init_checkpoint for a new dataset")
         stored_config = Config.model_validate(payload["config"])
         if stored_config.data.real_matching != self.config.data.real_matching:
-            raise ValueError("resume real pair matching differs from checkpoint; use init_checkpoint for a new arm")
+            from .real_matching import matching_settings_equal
+
+            old, new = stored_config.data.real_matching, self.config.data.real_matching
+            if old is None or new is None or not matching_settings_equal(
+                    old.model_dump(), new, self.cache.real_metadata["registration"],
+                    payload["factory"].get("matching_measurements")):
+                raise ValueError("resume real pair matching differs from checkpoint; use init_checkpoint for a new arm")
 
     def _restore(self, checkpoint_path: Path, *, payload: dict | None = None) -> None:
         payload = load_checkpoint(checkpoint_path, map_location=self.device) if payload is None else payload
