@@ -228,6 +228,7 @@ def render_comparison(root: Path, record: dict) -> Path:
         output = {"name": site["name"], "shape": site["image_shape"], "series": {}, "traces": traces,
                   "contour_status": site["contour_status"], "warnings": site["warnings"],
                   "repeatability": site["repeatability"], "per_hole": site.get("per_hole", []),
+                  "frames_vs_precision": site.get("frames_vs_precision", []),
                   "hole_count": len(site["template_centroids"])}
         with Progress(f"{site['name']}: loading temporal variation maps", timings=site.setdefault("timings_s", {}),
                       key="viewer_load_temporal_maps"):
@@ -247,6 +248,9 @@ def render_comparison(root: Path, record: dict) -> Path:
                     frames.append({**{k: frame.get(k) for k in frame_keys}, "overlay": relative, "overlay_key": key})
                     progress.update(number, relative)
             item = {"frames": frames, "step": series["step"],
+                    "frames_per_output": series.get("frames_per_output"),
+                    "source_series": series.get("source_series"), "family": series.get("family"),
+                    "registered": series.get("registered", False),
                     "difference_limit_dn": series.get("difference_limit_dn"),
                     "temporal_rms_dn": series.get("native", {}).get("temporal_rms_dn")}
             item["contour_bands"] = {}

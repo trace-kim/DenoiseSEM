@@ -228,10 +228,10 @@ def test_mocked_six_model_workflow_saved_pixels_and_exports(tmp_path, monkeypatc
     result = compare.run(config)
     assert result["status"] == "complete"
     assert not list(config.output_dir.glob("site/noise_*"))
-    assert len(measured) == 1 + 128 + 16 + 1 + 6 * 128  # Template plus each saved uint8 image.
+    assert len(measured) == 1 + 128 + 16 + 16 + 1 + 6 * 128  # Includes registered average8.
     assert used_backends[0] is None  # Template; each measurement series shares one backend.
     start = 1
-    for count in (128, 16, 1, *([128] * 6)):
+    for count in (128, 16, 16, 1, *([128] * 6)):
         group = used_backends[start:start + count]
         assert group[0] is not None and all(backend is group[0] for backend in group)
         start += count

@@ -48,7 +48,7 @@ def test_rebuild_uses_otsu_in_main_report_without_inference(tmp_path, monkeypatc
     assert {p.relative_to(source.parent): p.read_bytes() for p in source.parent.rglob("*") if p.is_file()} == before
     site = record["sites"][0]
     assert len(site["template_centroids"]) == 1
-    assert len(site["contours"]) == 18  # 8 raw, 8 model, average8, average128.
+    assert len(site["contours"]) == 19  # Also includes registered average8.
     for series in site["series"].values():
         assert series["segmentation_backend"]["backend"] == "otsu"
         assert series["segmentation_backend"]["settings"] == OtsuSettings().model_dump()
@@ -59,7 +59,8 @@ def test_rebuild_uses_otsu_in_main_report_without_inference(tmp_path, monkeypatc
             assert frame["gaussian_backend"] == "scipy"
             assert "mask_metrology" in frame["segmentation_timings_s"]
             assert "otsu_threshold_dn" in frame
-            assert (output / frame["path"]).read_bytes() == before[Path(frame["path"])]
+            if Path(frame["path"]) in before:
+                assert (output / frame["path"]).read_bytes() == before[Path(frame["path"])]
     for raw, model in zip(site["series"]["raw"]["frames"], site["series"]["model"]["frames"]):
         assert model["brightness_delta_dn"] == 5
         assert model["otsu_threshold_dn"] - raw["otsu_threshold_dn"] == pytest.approx(5)
@@ -110,9 +111,9 @@ def test_new_comparison_runs_otsu_on_reference_raw_averages_and_quantized_model(
         contour_method="otsu", metrology_device=device, otsu={"polarity": "dark", "sigma_px": 1., "min_area_px": 25})
     record = compare.run(settings)
     assert record["status"] == "complete" and record["contour_method"] == "otsu"
-    assert len(calls) == (1 + 128 + 16 + 1 + 128 if device == "cpu" else 1)
+    assert len(calls) == (1 + 128 + 16 + 16 + 1 + 128 if device == "cpu" else 1)
     if device != "cpu":
-        assert len(fake_cupy.labels) == 1 + 128 + 16 + 1 + 128
+        assert len(fake_cupy.labels) == 1 + 128 + 16 + 16 + 1 + 128
         assert any(shape[0] == 16 for shape, _ in fake_cupy.filters)
     assert all(config == settings.otsu for _, config in calls)
     assert all(frame["brightness_delta_dn"] == 5 for frame in record["sites"][0]["series"]["model"]["frames"])

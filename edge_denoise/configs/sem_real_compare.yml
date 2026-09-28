@@ -55,6 +55,8 @@ ema: true
 # measurements. Border paths remain open and are excluded from measurements.
 contour_method: otsu_refined
 refine_estimator: gradient_peak
+average_frames: [8]
+# Name a validation-selected model through --average-model to add AI averages.
 otsu:
   polarity: dark
   sigma_px: 1.0

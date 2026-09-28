@@ -15,7 +15,9 @@ PNGs, and decoded before analysis. Pre-export range flags describe image
 production; intermediate floating-point predictions never supply measurements.
 
 No brightness matching, gain/offset fitting, autocontrast, or geometric warping
-is applied to the comparison images. Segmentation receives a fixed 0–255 scale
+is applied to single-frame comparison images. Explicit registered multi-frame
+series are newly produced images with recorded transforms; the source PNGs stay
+unchanged. Segmentation receives a fixed 0–255 scale
 with contrast stretching disabled. Floating arithmetic and subpixel contour
 coordinates are derived from the delivered uint8 pixels only.
 
@@ -447,6 +449,66 @@ WP3/WP4/WP6 verification (2026-09-28): full `python -m pytest -q`:
 **1,058 passed, 1 skipped** in 159.25 s; the optional browser test is skipped.
 An additional 9 viewer checks pass. Synthetic saved disks recover diameter within
 0.05 px for each CPU estimator; mocked CUDA agrees with CPU gradient refinement.
+
+## Registered baselines and frames versus precision (WP5/WP8)
+
+Every new comparison adds `average8_registered` beside the unchanged raw
+`average8`. `--average-frames 2,4,8` requests raw and registered averages for
+each K; the default remains 8. Counts must be unique integers from 2 through 64.
+Groups are consecutive and nonoverlapping. Incomplete trailing groups are
+omitted from that average series, logged, and counted in `remainder_frames`;
+the original single-frame series retains every acquisition. Rebuilds preserve
+previously saved average series even when new counts are requested.
+
+Registration uses training's translation-seeded affine ECC at sigma 1, with
+the first usable frame in each block as anchor (normally frame 1). Patternless
+or failed frames stay in the average at native coordinates, with a recorded
+reason. A failed fit never changes the next translation seed. Source rectangles
+are warped in bounded batches on `metrology_device`; float64 sums are rounded
+once to saved uint8 PNGs. Saved support masks mark the common cubic footprint.
+Outside it the PNG retains the ordinary native mean for display, and regions
+touching unsupported pixels are excluded from ECD. Matrices, statuses, anchor,
+CPU geometry time and device warp/average time are stored per block.
+
+`--average-model NAME` explicitly names the model selected on validation data.
+It builds `NAME_average2`, `NAME_average4`, etc. by registering the **saved
+denoised** frames and averaging them. No raw-derived transform or brightness
+correction is applied to these model averages. This is deployable averaging of
+single-frame predictions; it does not implement learned burst fusion.
+
+```bash
+REPORT=output/real_models_comparison/comparison.json
+python tools/real_sem_compare.py --from-comparison "$REPORT" \
+  --output-dir output/260928_real_frames_precision --contours-only \
+  --contour-method otsu_refined --refine-estimator gradient_peak \
+  --average-frames 2,4,8 --average-model n2n \
+  --metrology-device cuda:0 --no-tensorboard
+python tools/check_real_sem_averages.py --from-comparison "$REPORT" \
+  --output-dir output/260928_average_equivalence --average-frames 8 \
+  --source raw --device cuda:0 --cpu-threads 2
+```
+
+Use the validation-selected estimator and model name in these examples. The
+same averaging flags work on fresh comparisons. Full and contour-only rebuilds
+can add missing averages using only saved PNGs. Contour-only mode logs additions
+and analyzes those new images while reusing existing brightness/noise/drift.
+Render-only mode never creates or measures new averages.
+
+The viewer gives each series a toggle/color and links blocks to their original
+acquisitions. `frames_vs_precision.csv` in each site and the curve in the viewer
+report K, group count, common holes, observations per hole, median ECD 3σ and
+bootstrap 95% intervals. Each family uses the intersection of measurable holes
+across its K values. Raw topology failures can therefore make a raw curve
+unavailable rather than fabricate its K=1 precision. Original per-series
+coverage remains in `repeatability.csv`. Neither K nor learned fusion is chosen
+automatically. GPU throughput and CPU/GPU agreement on the remote acquisitions
+remain hardware checks, including the CPU ECC stage and image I/O.
+
+WP5/WP8 verification (2026-09-28): full `python -m pytest -q`:
+**1,062 passed, 1 skipped** in 221.99 s. Synthetic drifting bursts become sharper;
+blank acquisitions remain included, saved source PNGs stay byte-identical, and
+raw-average refined ECD variation decreases over K=1,2,4,8. Rebuild, reuse,
+remainder handling and linked registered-block navigation are covered.
 
 The standalone `sem_noise` acquisition workflow retains its original correction
 diagnostics. This comparison does not invoke it. A legacy `analysis_config` is

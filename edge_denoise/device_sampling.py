@@ -12,7 +12,8 @@ import torch.nn.functional as F
 @torch.no_grad()
 def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size: int,
                         black: float, white: float, device: str | torch.device,
-                        *, memory_bytes: int = 256 * 1024**2
+                        *, memory_bytes: int = 256 * 1024**2, normalize: bool = True,
+                        require_overlap: bool = True
                         ) -> Iterator[tuple[np.ndarray, torch.Tensor, torch.Tensor]]:
     """Yield indices, normalized crops and cubic-support masks on ``device``.
 
@@ -44,7 +45,9 @@ def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size
             x0, y0 = np.maximum(0, np.floor(corners.min(axis=1)).astype(int) - 2)
             x1, y1 = np.minimum([w, h], np.ceil(corners.max(axis=1)).astype(int) + 3)
             if x1 <= x0 or y1 <= y0:
-                raise ValueError("target has no valid overlap with this input crop")
+                if require_overlap:
+                    raise ValueError("target has no valid overlap with this input crop")
+                y0, x0, y1, x1 = 0, 0, 1, 1  # Only zero-support pixels can sample this placeholder.
             groups["affine"].append((i, y0, x0, y1 - y0, x1 - x0))
     for kind, rows in groups.items():
         if not rows:
@@ -73,7 +76,8 @@ def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size
                 else:
                     destination[k, 0, :height, :width] = frame[y0:y0 + height, x0:x0 + width]
             patches = host.to(device, non_blocking=device.type == "cuda").float()
-            patches.sub_(black).div_(white - black).clamp_(0, 1)
+            if normalize:
+                patches.sub_(black).div_(white - black).clamp_(0, 1)
             matrix = torch.as_tensor(matrices[indices], device=device, dtype=torch.float64)
             base = torch.arange(size, device=device, dtype=torch.float64)
             xx, yy = base[None, None, :], base[None, :, None]
@@ -81,7 +85,7 @@ def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size
             ys = matrix[:, 1, 0, None, None] * xx + matrix[:, 1, 1, None, None] * yy + matrix[:, 1, 2, None, None]
             shapes = torch.tensor([frames[i].shape for i in indices], device=device)
             valid = (ys >= 2) & (ys <= shapes[:, 0, None, None] - 3) & (xs >= 2) & (xs <= shapes[:, 1, None, None] - 3)
-            if not valid.flatten(1).any(1).all():
+            if require_overlap and not valid.flatten(1).any(1).all():
                 raise ValueError("target has no valid overlap with this input crop")
             if kind == "integer":
                 sampled = patches

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +64,8 @@ class ComparisonSettings(BaseModel):
     # comparison recipe explicitly selects the Gaussian + Otsu method.
     contour_method: Literal["current", "otsu", "otsu_refined"] = "current"
     refine_estimator: Literal["gradient_peak", "threshold", "erf"] | None = None
+    average_frames: list[int] = Field(default_factory=lambda: [8])
+    average_model: str | None = None
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
@@ -77,6 +79,13 @@ class ComparisonSettings(BaseModel):
     frame_interval_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     pixel_size_nm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     match_gate_px: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @field_validator("average_frames")
+    @classmethod
+    def _average_counts(cls, values: list[int]) -> list[int]:
+        if not values or any(v < 2 or v > 64 for v in values) or len(set(values)) != len(values):
+            raise ValueError("average_frames requires unique counts from 2 through 64")
+        return sorted(values)
 
 
 def read_uint8(path: Path) -> np.ndarray:
@@ -124,8 +133,11 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
         for name in names:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
                 raise ValueError(f"Use letters, digits, underscores or hyphens for names: {name}")
-    if {name.casefold() for name in config.checkpoints} & {"raw", "average8", "average128"}:
+    if any(name.casefold() == "raw" or re.fullmatch(r"average\d+(?:_registered)?|.*_average\d+", name.casefold())
+           for name in config.checkpoints):
         raise ValueError("raw, average8 and average128 are reserved series names")
+    if config.average_model is not None and config.average_model not in config.checkpoints:
+        raise ValueError("--average-model must name an included validation-selected model")
     if config.output_dir.exists():
         raise ValueError(f"Output already exists: {config.output_dir}")
     for arm in config.checkpoints.values():
@@ -366,6 +378,15 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
             frame.pop("segmentation_execution", None)
             series["segmentation_backend"] = result.diagnostics.backend
         series["refinement_backend"] = result.diagnostics.refinement
+        unsupported = set()
+        if frame.get("common_support_path"):
+            support = read_uint8(root / frame["common_support_path"]) > 0
+            if crop:
+                support = support[crop[0]:crop[1], crop[2]:crop[3]]
+            for index, instance in enumerate(result.instances):
+                y0, y1, x0, x1 = instance.bbox
+                if not support[y0:y1, x0:x1].all():
+                    unsupported.add(index)
         frame["segmentation_timings_s"] = result.diagnostics.timings_s
         for stage, seconds in result.diagnostics.timings_s.items():
             stage_totals[stage] = stage_totals.get(stage, 0.0) + seconds
@@ -384,6 +405,8 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
                 status = match["match_status"]
                 if status == "matched":
                     status = _measurement_status(region, method, segment_config, mask_only=mask_only)
+                    if index in unsupported:
+                        status = "outside_common_support"
                 rows.append({"series": name, "frame": frame["index"], "order": frame["order"],
                              "timestamp_s": frame["timestamp_s"], "filename": frame["path"],
                              "hole": match["hole"], "method": method, "status": status,
@@ -401,6 +424,8 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
         for index, region in enumerate(result.regions):
             statuses = {method: _measurement_status(region, method, segment_config, mask_only=mask_only)
                         for method in ("coarse", "refined")}
+            if index in unsupported:
+                statuses = {method: "outside_common_support" for method in statuses}
             counts["complete"] += statuses["coarse"] == "valid"
             counts["refined"] += statuses["refined"] == "valid"
             counts["border"] += region.touches_border
@@ -613,6 +638,10 @@ def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False)
                       timings=timings, key="repeatability_summary"):
             holes, summaries = summarize_observations(site["observations"], names, comparison_series=models)
         site.update(per_hole=holes, repeatability=summaries)
+        from tools.real_sem_averages import frames_vs_precision
+
+        site["frames_vs_precision"] = frames_vs_precision(site, record["models"])
+        write_csv(root / site["name"] / "frames_vs_precision.csv", site["frames_vs_precision"])
         for filename, rows in (("observations", site["observations"]), ("per_hole", holes), ("repeatability", summaries)):
             with Progress(f"{site['name']}/{filename}.csv: serialize/write ({len(rows):,} rows)",
                           timings=timings, key=f"export_{filename}_csv"):
@@ -696,7 +725,7 @@ def run(config: ComparisonSettings) -> dict:
             timestamps = config.sites[name].timestamps_s
             if timestamps is None and noise.frame_interval_s is not None:
                 timestamps = (np.arange(128) * noise.frame_interval_s).tolist()
-            raw_frames, blocks, total = [], [], None
+            raw_frames, total = [], None
             with Progress(f"{name}: saving raw images and averages", total=len(files),
                           timings=site.setdefault("timings_s", {}), key="prepare_saved_images") as progress:
                 for i, source in enumerate(files):
@@ -709,22 +738,14 @@ def run(config: ComparisonSettings) -> dict:
                     raw_frames.append({"index": i + 1, "order": i + 1, "timestamp_s": timestamps[i] if timestamps else None,
                                        "path": path.as_posix(), "source": str(source), "source_sha256": file_hash(source),
                                        "pixel_sha256": pixel_hash(pixels), "content_sha256": content_key(pixels), "clipped": False})
-                    blocks.append(pixels)
-                    if len(blocks) == 8:
-                        block = i // 8 + 1
-                        average_path = Path(name) / "average8" / f"block_{block:02d}_{i - 6:03d}-{i + 1:03d}.png"
-                        save_rgb(root / average_path, average_uint8(np.stack(blocks)))
-                        series = site["series"].setdefault("average8", {"frames": [], "step": 0})
-                        series["frames"].append({"index": block, "order": i - 2.5, "first_acquisition": i - 6,
-                                                 "last_acquisition": i + 1, "path": average_path.as_posix(),
-                                                 "timestamp_s": float(np.mean(timestamps[i-7:i+1])) if timestamps else None,
-                                                 "clipped": False})
-                        blocks.clear()
                     progress.update(i + 1, source.name)
             full = Path(name) / "visual_reference_only" / "full_average.png"
             save_rgb(root / full, np.rint(total / 128).astype(np.uint8))
             site["full_average"] = full.as_posix()
             site["series"] = {"raw": {"frames": raw_frames, "step": 0}, **site["series"]}
+            from tools.real_sem_averages import add_average_series
+
+            add_average_series(root, site, config.average_frames, device=segment.refine.device)
             site["requested_match_gate_px"] = config.match_gate_px
             reference, template = prepare_reference(root, site, segment, **contour_options,
                 **{key: value for key, value in execution_options.items() if key != "analysis_batch"})
@@ -809,6 +830,21 @@ def run(config: ComparisonSettings) -> dict:
                 save()
             with Progress(f"{model_name}: releasing denoiser"):
                 del denoiser
+        if config.average_model is not None:
+            for site in record["sites"]:
+                added = add_average_series(root, site, config.average_frames, device=segment.refine.device,
+                                           model=config.average_model)
+                reference = read_uint8(root / site["full_average"])
+                for name in added:
+                    series = site["series"][name]
+                    for frame, track in zip(series["frames"], registration_tracks(reference,
+                            [root / f["path"] for f in series["frames"]], noise.registration_sigma)):
+                        frame.update(track)
+                    analyze_series(root, name, series, noise, **native_options)
+                    observations, contours = measure_series(root, name, series, np.array(site["template_centroids"]),
+                        site["match_gate_px"], segment, **contour_options, **execution_options)
+                    site["observations"].extend(observations)
+                    site["contours"].extend(contours)
         finish_comparison(root, record)
     except Exception as error:
         record.update(status="failed", error=str(error))
@@ -848,7 +884,8 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
             otsu_config: Path | None = None, render_only: bool = False, contours_only: bool = False,
             analysis_batch: int | None = None, analysis_memory_mb: int | None = None,
             io_workers: int | None = None, tensorboard: bool | None = None,
-            refine_estimator: str | None = None) -> dict:
+            refine_estimator: str | None = None, average_frames: list[int] | None = None,
+            average_model: str | None = None) -> dict:
     """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
     from sem_noise.config import AnalysisConfig
     from sem_noise.comparison_storage import load_contours
@@ -873,13 +910,17 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
     if render_only and record.get("schema_version", 0) < 3:
         raise ValueError("This older report needs contour remeasurement; omit --render-only")
     if render_only and any(value is not None for value in (
-            metrology_device, segmentation_config, contour_method, otsu_config, refine_estimator,
+            metrology_device, segmentation_config, contour_method, otsu_config, refine_estimator, average_frames, average_model,
             analysis_batch, analysis_memory_mb, io_workers)):
         raise ValueError("--render-only reuses measurements; omit segmentation/device overrides")
     method = contour_method or record.get("contour_method", record.get("settings", {}).get("contour_method", "current"))
     if method not in {"current", "otsu", "otsu_refined"}:
         raise ValueError("contour_method must be current, otsu or otsu_refined")
     is_otsu = method in {"otsu", "otsu_refined"}
+    counts = ComparisonSettings._average_counts(average_frames or record["settings"].get("average_frames", [8]))
+    selected_model = average_model if average_model is not None else record["settings"].get("average_model")
+    if selected_model is not None and selected_model not in record["models"]:
+        raise ValueError("--average-model must name an included validation-selected model")
     if otsu_config is not None and not is_otsu:
         raise ValueError("--otsu-config requires --contour-method otsu or otsu_refined")
     otsu = (load_otsu_settings(otsu_config) if otsu_config is not None else
@@ -918,6 +959,8 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 raise ValueError("Invalid saved series name")
             for frame in series["frames"]:
                 paths.add(frame["path"])
+                if frame.get("common_support_path"):
+                    paths.add(frame["common_support_path"])
                 if (render_only or contours_only) and frame.get("difference_path"):
                     paths.add(frame["difference_path"])
             if (render_only or contours_only) and series.get("temporal_std"):
@@ -946,6 +989,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         record.update(contour_method=method, otsu_settings=otsu.model_dump())
         record["settings"].update(contour_method=method, otsu=otsu.model_dump())
         record["settings"].update(execution_options)
+        record["settings"].update(average_frames=counts, average_model=selected_model)
         segment = load_segment(segmentation_config) if segmentation_config else SegmentConfig.model_validate(record["segmentation_settings"])
         if metrology_device is not None or refine_estimator is not None:
             segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(),
@@ -970,6 +1014,11 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 **{key: value for key, value in execution_options.items() if key != "analysis_batch"})
             if contours_only:
                 site["series"]["average128"] = previous_average
+            from tools.real_sem_averages import add_average_series
+
+            added = add_average_series(root, site, counts, device=segment.refine.device, model=selected_model)
+            if contours_only and added:
+                print(f"{site['name']}: contours-only adds missing averages; measuring new series only: {', '.join(added)}", flush=True)
             # Model correspondence reuses freshly measured raw drift, regardless
             # of the key order in the saved JSON.
             names = ["raw", *(name for name in site["series"] if name != "raw")]
@@ -977,7 +1026,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                 series = site["series"][name]
                 series["timings_s"] = {}
                 raw = site["series"]["raw"]["frames"] if name in record["models"] else None
-                if contours_only:
+                if contours_only and name not in added:
                     series["analysis_reused_from"] = str(record_path)
                     print(f"{site['name']}/{name}: reusing saved brightness, variation and translation diagnostics", flush=True)
                 elif raw is not None:
@@ -990,7 +1039,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                     for frame, track in zip(series["frames"], registration_tracks(reference, [root / f["path"] for f in series["frames"]], noise.registration_sigma)):
                         frame.update(track)
                     series["timings_s"]["translation_diagnostics"] = time.perf_counter() - started_registration
-                if not contours_only:
+                if not contours_only or name in added:
                     series.pop("analysis_reused_from", None)
                     analyze_series(root, name, series, noise, raw_frames=raw,
                                    difference_limit=record["settings"].get("difference_limit_dn", 32.0), **native_options)
@@ -1062,7 +1111,8 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
         if value is not None:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
     for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
-                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split", "refine_estimator"):
+                  "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split", "refine_estimator",
+                  "average_frames", "average_model"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
@@ -1099,6 +1149,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override Otsu polarity, sigma_px and min_area_px with a detector YAML")
     parser.add_argument("--refine-estimator", choices=("gradient_peak", "threshold", "erf"),
                         help="Edge estimator; defaults to gradient_peak. threshold/erf require --metrology-device cpu")
+    parser.add_argument("--average-frames", type=lambda value: [int(v) for v in value.split(",")],
+                        help="Nonoverlapping average counts, e.g. 2,4,8 (default 8); incomplete trailing groups are omitted")
+    parser.add_argument("--average-model", help="Validation-selected model name for registered AI averages; never selected using test SD")
     parser.add_argument("--metrology-device", help="Otsu/native analysis or current-method refinement device: cpu, cuda, or cuda:N")
     parser.add_argument("--device", help="Denoiser device")
     parser.add_argument("--tile-batch", type=int)
@@ -1126,7 +1179,8 @@ def main() -> int:
                              segmentation_config=args.segmentation_config, contour_method=args.contour_method,
                              otsu_config=args.otsu_config, render_only=args.render_only, contours_only=args.contours_only,
                              analysis_batch=args.analysis_batch, analysis_memory_mb=args.analysis_memory_mb,
-                             io_workers=args.io_workers, tensorboard=args.tensorboard, refine_estimator=args.refine_estimator)
+                             io_workers=args.io_workers, tensorboard=args.tensorboard, refine_estimator=args.refine_estimator,
+                             average_frames=args.average_frames, average_model=args.average_model)
             output = args.output_dir
         else:
             if args.render_only or args.contours_only:

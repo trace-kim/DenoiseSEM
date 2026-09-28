@@ -369,6 +369,13 @@ drift/jitter/brightness decomposition. See the validation rebuild and refined
 CPU/GPU benchmark commands in [the comparison guide](real_sem_comparison.md#precision-refined-ecd-and-variation-components-wp3wp4wp6).
 The estimator remains an open validation decision.
 
+WP5/WP8 add registered raw averages and explicit `--average-model` inference
+averages through fresh comparisons and saved-report rebuilds. Use
+`--average-frames 2,4,8` to produce the frame-count curve; the default is still 8.
+The [comparison guide](real_sem_comparison.md#registered-baselines-and-frames-versus-precision-wp5wp8)
+includes the rebuild and saved-uint8 CPU/GPU averaging check. The acceptable
+frame count and any learned real-data fusion remain open user decisions.
+
 Local CPU full-suite verification: `python -m pytest -q` passed **1,027 tests**,
 with one optional browser test skipped because no browser executable was set.
 An additional **93 focused regression tests passed** after GPU-RNG isolation,

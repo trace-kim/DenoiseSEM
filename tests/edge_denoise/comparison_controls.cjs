@@ -193,6 +193,11 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
   event("band-source", "change", "average128");
   assert.match(get("band-label").textContent, /Single reference/);
   event("source-b", "change", "average128"); await settle();
+  event("source-b", "change", "average8_registered"); await settle();
+  event("frame-a", "input", "5"); await settle();
+  assert.match(b.pixels, /average8_registered\/block_001/);
+  assert.match(get("label-b").textContent, /acquisitions 1–8/);
+  event("source-b", "change", "average128"); await settle();
   assert(get("frame-b").disabled); assert.match(text(get("scale-b")), /Saved intensity/);
   assert(get("scale-variation-b").hidden);
   event("source-b", "change", "average8"); await settle();

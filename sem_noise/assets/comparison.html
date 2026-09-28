@@ -43,6 +43,9 @@
 <div id="ecd-sources" class="ecd-sources" role="group" aria-label="ECD sources"></div>
 <h3 id="ecd-title">Diameter across acquisitions</h3><svg id="ecd-chart" role="img" aria-label="All selected models ECD across acquisitions"></svg>
 <div id="ecd-statistics"></div><p class="muted">Table sorted by increasing 3σ. Solid horizontal lines: mean. Optional dashed lines and shaded bands: mean ±3σ, where σ is the sample SD of usable measurements for this hole (n−1 denominator). Compare coverage as well as variation: missing measurements leave gaps; fewer than two have no SD. This is repeatability, not accuracy. Click any model's point to inspect its saved image in pane B.</p></div>
+<section class="chart"><h2>Acquisitions versus precision</h2>
+<p class="muted">Median within-hole ECD 3σ versus acquisitions per delivered image. Bars show the 95% bootstrap interval over common holes within each family. Nonoverlapping blocks give fewer observations at larger K. No frame count or model is selected automatically.</p>
+<svg id="precision-curve" role="img" aria-label="Acquisitions per image versus ECD three sigma"></svg><div id="precision-values"></div></section>
 <details id="band-section"><summary>All-acquisition contour band</summary>
 <div class="band-controls"><label>Source<select id="band-source" aria-label="Contour band source"></select></label><a id="band-file" target="_blank" rel="noopener">Open vector plot</a></div>
 <p id="band-label" class="muted"></p><img id="contour-band" class="contour-band" alt="All detected contours across acquisitions, colored by acquisition" loading="lazy">

@@ -8,7 +8,7 @@
   const ns = "http://www.w3.org/2000/svg";
   const letters = ["a", "b"], colors = ["#14778d", "#d47732"];
   const modelColors = ["#14778d", "#d47732", "#7254a1", "#258049", "#bb406b", "#376ec0", "#99751b", "#745548"];
-  const baselineColors = {raw: "#76818d", average8: "#323e49", average128: "#9a8f7c"};
+  const baselineColors = {raw: "#76818d", raw_registered: "#26775c", average8: "#323e49", average8_registered: "#26775c", average128: "#9a8f7c"};
   const state = {site: 0, names: ["raw", ""], indices: [0, 0], acquisition: 1,
     active: 1, view: [], contours: [[], []], selected: null, revision: 0, playing: null, ready: false, ecdSources: new Set()};
   // Requested controls are separate from the fully decoded pair on screen.
@@ -40,13 +40,14 @@
   function frameLabel(p) {
     const f = frame(p), name = state.names[p];
     if (name === "average128") return "Reference · acquisitions 1–128";
-    if (name === "average8") return `Block ${f.index}/16 · acquisitions ${f.first_acquisition}–${f.last_acquisition}`;
+    if (f.first_acquisition != null) return `Block ${f.index}/${series(p).frames.length} · acquisitions ${f.first_acquisition}–${f.last_acquisition}`;
     return `Acquisition ${f.index}/${series(p).frames.length}`;
   }
   function atAcquisition(name, acquisition) {
     if (name === "average128") return 0;
-    return Math.max(0, Math.min(report.sites[wanted.site].series[name].frames.length - 1,
-      name === "average8" ? Math.floor((acquisition - 1) / 8) : acquisition - 1));
+    const frames = report.sites[wanted.site].series[name].frames;
+    const block = frames.findIndex(f => f.first_acquisition <= acquisition && acquisition <= f.last_acquisition);
+    return block >= 0 ? block : Math.max(0, Math.min(frames.length - 1, acquisition - 1));
   }
   function setFrame(p, index) {
     state.active = p;
@@ -315,7 +316,7 @@
   }
   function points(name, key) {
     return site().series[name].frames.map((f, index) => ({x: time(f), y: f[key], index,
-      description: name === "average8" ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.index}`}));
+      description: f.first_acquisition != null ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.index}`}));
   }
   function statistics(points) {
     const values = points.map(p => p.y).filter(Number.isFinite), n = values.length;
@@ -324,17 +325,17 @@
     return {n, mean, sd};
   }
   function ecdNames() {
-    return [...report.arms.map(a => a.arm), ...Object.keys(baselineColors)].filter(n => site().series[n]);
+    return [...new Set([...report.arms.map(a => a.arm), ...Object.keys(site().series)])].filter(n => site().series[n]);
   }
   function ecdColor(name) {
     if (name in baselineColors) return baselineColors[name];
-    const index = report.arms.findIndex(a => a.arm === name);
+    const index = ecdNames().indexOf(name);
     return modelColors[index] || `hsl(${(index * 137.5) % 360} 55% 38%)`;
   }
   function ecdControls() {
     $("ecd-hole").replaceChildren(option("", "Select a matched hole"),
       ...Array.from({length: site().hole_count}, (_, i) => option(String(i + 1), `Hole ${i + 1}`)));
-    state.ecdSources = new Set(ecdNames().filter(n => !(n in baselineColors)));
+    state.ecdSources = new Set(report.arms.map(a => a.arm).filter(n => site().series[n]));
     const root = $("ecd-sources"); root.replaceChildren();
     for (const name of ecdNames()) {
       const control = document.createElement("label"), input = document.createElement("input"), swatch = document.createElement("span");
@@ -390,7 +391,7 @@
       const values = new Map(site().traces[name]?.[hole]?.[method] || []);
       return {name, label: label(name), color: ecdColor(name), dashed: name in baselineColors,
         points: site().series[name].frames.map((f, index) => ({x: time(f), y: values.get(f.index), index,
-          description: name === "average8" ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.order}`}))};
+          description: f.first_acquisition != null ? `block ${f.index} (${f.first_acquisition}–${f.last_acquisition})` : `acquisition ${f.order}`}))};
     });
     for (const track of ecd) track.stats = statistics(track.points);
     $("ecd-hole").value = hole == null ? "" : String(hole);
@@ -399,6 +400,36 @@
     chart("ecd-chart", ecd, {selectedX: time(frame(state.active)), bands: $("ecd-bands").checked,
       message: hole == null ? "Select a matched hole to compare every model." : !ecd.length ? "Select at least one ECD source." : "No usable ECD measurements for this hole and these sources."});
     drawStatistics(ecd);
+    drawPrecisionCurve();
+  }
+  function drawPrecisionCurve() {
+    const root = $("precision-curve"); root.replaceChildren();
+    const rows = (site().frames_vs_precision || []).filter(r => r.method === $("measure").value);
+    const usable = rows.filter(r => Number.isFinite(r.median_cd_3sigma));
+    const xmax = Math.max(8, ...rows.map(r => r.frames_per_output)), ymax = Math.max(.01, ...usable.map(r => r.ci95_high ?? r.median_cd_3sigma));
+    root.setAttribute("viewBox", "0 0 1100 185");
+    const x = k => 65 + (k - 1) / (xmax - 1) * 1015, y = v => 147 - v / ymax * 130;
+    for (const k of [...new Set([1, ...rows.map(r => r.frames_per_output)])]) root.append(svg("text", {x: x(k), y: 176}, String(k)));
+    root.append(svg("text", {x: 5, y: 20}, fmt(ymax)), svg("text", {x: 5, y: 147}, "0"));
+    for (const family of [...new Set(rows.map(r => r.family))]) {
+      const points = rows.filter(r => r.family === family), color = ecdColor(family);
+      let d = "", connected = false;
+      for (const r of points) {
+        if (!Number.isFinite(r.median_cd_3sigma)) {connected = false; continue;}
+        d += `${connected ? "L" : "M"}${x(r.frames_per_output)},${y(r.median_cd_3sigma)}`; connected = true;
+        if (Number.isFinite(r.ci95_low) && Number.isFinite(r.ci95_high)) root.append(svg("line", {
+          x1: x(r.frames_per_output), x2: x(r.frames_per_output), y1: y(r.ci95_low), y2: y(r.ci95_high), stroke: color}));
+        const dot = svg("circle", {cx: x(r.frames_per_output), cy: y(r.median_cd_3sigma), r: 4, fill: color});
+        dot.append(svg("title", {}, `${label(family)}: K=${r.frames_per_output}; 3σ=${fmt(r.median_cd_3sigma)}; ${r.group_count} groups; ${r.common_hole_count} common holes`)); root.append(dot);
+      }
+      root.append(svg("path", {d, fill: "none", stroke: color, "stroke-width": 2, "data-family": family}));
+    }
+    const table = $("precision-values"); table.replaceChildren();
+    for (const r of rows) {
+      const p = document.createElement("p"); p.style.color = ecdColor(r.family);
+      p.textContent = `${label(r.family)} · K=${r.frames_per_output} · 3σ ${fmt(r.median_cd_3sigma)} ${report.unit} · 95% CI ${fmt(r.ci95_low)} to ${fmt(r.ci95_high)} · ${r.group_count} groups · ${r.common_hole_count} common holes`;
+      table.append(p);
+    }
   }
   function drawCoverage() {
     const target = $("coverage"); target.replaceChildren();
@@ -531,7 +562,7 @@
       letters.map((_, p) => series(p).difference_limit_dn ? `${letters[p].toUpperCase()}: ±${series(p).difference_limit_dn} DN; larger differences saturate for display.` : "").join(" ");
     $("site-status").textContent = `Report generated · contour availability: ${site().contour_status} · ${site().hole_count} reference hole IDs. ${site().warnings.join(" ")}`;
     $("site-exports").replaceChildren();
-    ["observations.csv", "per_hole.csv", "repeatability.csv", "frames.csv", "contours.json"].forEach(file => {const a = document.createElement("a"); a.href = `${site().name}/${file}`; a.textContent = file; $("site-exports").append(a, " · ");});
+    ["observations.csv", "per_hole.csv", "repeatability.csv", "frames_vs_precision.csv", "frames.csv", "contours.json"].forEach(file => {const a = document.createElement("a"); a.href = `${site().name}/${file}`; a.textContent = file; $("site-exports").append(a, " · ");});
     drawImages(); drawMeasurements(); drawCharts(); drawCoverage(); drawBand();
   }
   function changeSite() {
@@ -597,7 +628,7 @@
   $("ecd-bands").onchange = drawCharts;
   $("ecd-all").onclick = () => {
     if (!state.ready) return;
-    state.ecdSources = new Set(ecdNames().filter(n => !(n in baselineColors)));
+    state.ecdSources = new Set(report.arms.map(a => a.arm).filter(n => site().series[n]));
     for (const control of $("ecd-sources").children) {
       const input = control.children[0]; input.checked = state.ecdSources.has(input.getAttribute("data-series"));
     }
