@@ -376,6 +376,20 @@ The [comparison guide](real_sem_comparison.md#registered-baselines-and-frames-ve
 includes the rebuild and saved-uint8 CPU/GPU averaging check. The acceptable
 frame count and any learned real-data fusion remain open user decisions.
 
+WP7 adds the opt-in `--template-limit` diagnostic to that same comparison
+workflow. It fits the saved full-average hole template to each saved raw frame,
+reports conditional Gauss–Newton scale uncertainty and the WP6 components, and
+labels the result as non-deployable. The
+[comparison guide](real_sem_comparison.md#single-frame-template-precision-diagnostic-wp7)
+includes the rebuild and CPU/GPU timing/equivalence commands. Synthetic Gaussian
+and Poisson/Gaussian calibration passes; no real-data precision floor or H100
+performance conclusion is claimed.
+
+Final precision-plan full-suite verification (2026-09-28): **1,071 passed,
+1 skipped**, 7 existing warnings, in 156.26 s. The skip is the optional offline
+browser executable check. All eight work packages are implemented; run the
+documented H100 pilots and saved-image equivalence checks remotely.
+
 Local CPU full-suite verification: `python -m pytest -q` passed **1,027 tests**,
 with one optional browser test skipped because no browser executable was set.
 An additional **93 focused regression tests passed** after GPU-RNG isolation,

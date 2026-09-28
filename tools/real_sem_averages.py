@@ -158,15 +158,17 @@ def frames_vs_precision(site: dict, models: dict) -> list[dict]:
         for family, members in families.items():
             selected = {name: {r["hole"]: r for r in site["per_hole"] if r["series"] == name
                                and r["method"] == method and r["cd_std"] is not None} for name, _ in members}
-            common = set.intersection(*(set(holes) for holes in selected.values())) if selected else set()
+            measurable = [set(holes) for holes in selected.values() if holes]
+            common = set.intersection(*measurable) if measurable else set()
             for name, count in sorted(members, key=lambda pair: pair[1]):
-                holes = [selected[name][h] for h in sorted(common)]
+                holes = [selected[name][h] for h in sorted(common) if h in selected[name]]
                 values = [r["cd_std"] for r in holes]
                 median = float(np.median(values)) if values else None
                 interval = bootstrap_median(values)
                 rows.append({"family": family, "series": name, "frames_per_output": count, "method": method,
-                    "unit": holes[0]["unit"] if holes else None, "common_holes": sorted(common),
-                    "common_hole_count": len(common), "group_count": len(site["series"][name]["frames"]),
+                    "unit": holes[0]["unit"] if holes else None, "common_holes": [h["hole"] for h in holes],
+                    "common_hole_count": len(holes), "comparison_series": [n for n in selected if selected[n]],
+                    "group_count": len(site["series"][name]["frames"]),
                     "observations_per_hole": {str(r["hole"]): r["valid_count"] for r in holes},
                     "median_cd_3sigma": None if median is None else median * 3,
                     "ci95_low": None if interval is None else interval[0] * 3,

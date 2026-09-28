@@ -50,9 +50,9 @@ tensorboard: true
 ema: true
 # Only registration_sigma / frame_interval_s from a legacy analysis config
 # affect the comparison. Acquisition correction diagnostics are never run.
-# Gaussian + ordinary Otsu on each saved uint8 image; no watershed, hole filling,
-# contour refinement, or contrast stretching. Closed masks use existing area/ECD
-# measurements. Border paths remain open and are excluded from measurements.
+# Gaussian + ordinary Otsu finds regions; refine outer edges on the unsmoothed
+# saved uint8 pixels. No watershed, hole filling, or contrast stretching.
+# Border paths remain open and are excluded from measurements.
 contour_method: otsu_refined
 refine_estimator: gradient_peak
 average_frames: [8]

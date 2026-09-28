@@ -90,3 +90,46 @@ def test_raw_average_repeatability_decreases_with_acquisitions(tmp_path):
             values.append(result.regions[0].refined.equivalent_diameter_px)
         deviations.append(np.std(values, ddof=1))
     assert all(b < a for a, b in zip(deviations, deviations[1:]))
+
+
+def test_precision_curve_keeps_estimable_averages_when_raw_topology_fails():
+    site = {"series": {"raw": {"frames": [None] * 128},
+                      "average2": {"frames": [None] * 64, "family": "raw", "frames_per_output": 2},
+                      "average8": {"frames": [None] * 16}}, "per_hole": [
+        {"series": name, "hole": hole, "method": "refined", "cd_std": deviation,
+         "valid_count": count, "unit": "px"}
+        for name, hole, deviation, count in (("raw", 1, None, 0), ("average2", 1, .2, 64),
+                                            ("average2", 2, .3, 64), ("average8", 2, .15, 16))]}
+    rows = {r["series"]: r for r in averages.frames_vs_precision(site, {})
+            if r["method"] == "refined" and r["family"] == "raw"}
+    assert rows["raw"]["median_cd_3sigma"] is None and rows["raw"]["common_hole_count"] == 0
+    assert rows["average2"]["common_holes"] == rows["average8"]["common_holes"] == [2]
+    assert rows["average2"]["median_cd_3sigma"] == pytest.approx(.9)
+    assert rows["average8"]["median_cd_3sigma"] == pytest.approx(.45)
+    assert rows["average8"]["comparison_series"] == ["average2", "average8"]
+
+
+def test_refined_contour_must_remain_inside_registered_common_support(tmp_path):
+    from sem_segment.config import Config, RefineConfig
+    from sem_segment.otsu_baseline import OtsuSettings
+    from sem_segment.otsu_measurement import measure_saved_otsu
+
+    yy, xx = np.mgrid[:64, :64]
+    pixels = np.where(np.hypot(yy - 32, xx - 32) < 12, 40, 180).astype(np.uint8)
+    compare.save_rgb(tmp_path / "disk.png", pixels)
+    result = measure_saved_otsu(tmp_path / "disk.png", refine=RefineConfig())
+    # Simulate refinement extending beyond the Otsu bounding box into a warp border.
+    result.refined[0].base_points[:, 1] -= 3
+    support = np.full_like(pixels, 255)
+    support[:, result.instances[0].bbox[2] - 1] = 0
+    compare.save_rgb(tmp_path / "support.png", support)
+    frame = {"index": 1, "order": 1, "timestamp_s": None, "path": "disk.png",
+             "dy_px": 0, "dx_px": 0, "common_support_path": "support.png"}
+    rows, contours = compare._measure_series(tmp_path, "average8_registered", {"frames": [frame]},
+        np.array([[32, 32]]), 10, Config(), otsu=OtsuSettings(), results=iter([result]))
+    assert all(r["status"] == "outside_common_support" for r in rows)
+    assert contours[0]["status"]["refined"] == "outside_common_support"
+    compare.save_rgb(tmp_path / "support.png", support[:-1])
+    with pytest.raises(ValueError, match="support dimensions"):
+        compare._measure_series(tmp_path, "average8_registered", {"frames": [frame]},
+            np.array([[32, 32]]), 10, Config(), otsu=OtsuSettings(), results=iter([result]))

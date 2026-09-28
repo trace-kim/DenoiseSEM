@@ -66,6 +66,7 @@ class ComparisonSettings(BaseModel):
     refine_estimator: Literal["gradient_peak", "threshold", "erf"] | None = None
     average_frames: list[int] = Field(default_factory=lambda: [8])
     average_model: str | None = None
+    template_limit: bool = False
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
     device: str = "auto"
@@ -138,6 +139,8 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
         raise ValueError("raw, average8 and average128 are reserved series names")
     if config.average_model is not None and config.average_model not in config.checkpoints:
         raise ValueError("--average-model must name an included validation-selected model")
+    if config.template_limit and config.contour_method == "otsu":
+        raise ValueError("--template-limit requires refined template ECD; select otsu_refined")
     if config.output_dir.exists():
         raise ValueError(f"Output already exists: {config.output_dir}")
     for arm in config.checkpoints.values():
@@ -383,8 +386,18 @@ def _measure_series(root: Path, name: str, series: dict, template: np.ndarray,
             support = read_uint8(root / frame["common_support_path"]) > 0
             if crop:
                 support = support[crop[0]:crop[1], crop[2]:crop[3]]
+            if support.shape != result.shape:
+                raise ValueError("registered-average support dimensions differ from the measurement crop")
             for index, instance in enumerate(result.instances):
                 y0, y1, x0, x1 = instance.bbox
+                if index < len(result.refined) and len(result.refined[index].polygon):
+                    points = result.refined[index].polygon
+                    low, high = np.floor(points.min(0)).astype(int), np.ceil(points.max(0)).astype(int) + 1
+                    if (low < 0).any() or (high > support.shape).any():
+                        unsupported.add(index)
+                        continue
+                    y0, x0 = min(y0, low[0]), min(x0, low[1])
+                    y1, x1 = max(y1, high[0]), max(x1, high[1])
                 if not support[y0:y1, x0:x1].all():
                     unsupported.add(index)
         frame["segmentation_timings_s"] = result.diagnostics.timings_s
@@ -633,6 +646,9 @@ def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False)
     for site in record["sites"]:
         timings = site.setdefault("timings_s", {})
         names = [name for name in site["series"] if name != "average128"]
+        if site.get("template_precision"):
+            names.append(site["template_precision"]["series"])
+            write_csv(root / site["name"] / "template_fits.csv", site["template_precision"]["fits"])
         models = [name for name in record["models"] if name in names]
         with Progress(f"{site['name']}: repeatability summary ({len(site['observations']):,} observations)",
                       timings=timings, key="repeatability_summary"):
@@ -655,7 +671,7 @@ def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False)
         with Progress(f"{site['name']}/frames.csv: serialize/write", timings=timings, key="export_frames_csv"):
             write_csv(root / site["name"] / "frames.csv", [dict(series=name, **frame)
                       for name, series in site["series"].items() for frame in series["frames"]])
-        frames = [f for name in names for f in site["series"][name]["frames"]]
+        frames = [f for name in names if name in site["series"] for f in site["series"][name]["frames"]]
         available = sum(f.get("contour_status") == "available" for f in frames)
         site["contour_status"] = "available" if available == len(frames) else "partial" if available else "unavailable"
     record.update(schema_version=3, status="complete", measurement_source="saved uint8 RGB, identical channels")
@@ -845,6 +861,11 @@ def run(config: ComparisonSettings) -> dict:
                         site["match_gate_px"], segment, **contour_options, **execution_options)
                     site["observations"].extend(observations)
                     site["contours"].extend(contours)
+        if config.template_limit:
+            from tools.real_sem_template import measure_template_limit
+
+            for site in record["sites"]:
+                measure_template_limit(root, site, device=segment.refine.device)
         finish_comparison(root, record)
     except Exception as error:
         record.update(status="failed", error=str(error))
@@ -885,7 +906,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
             analysis_batch: int | None = None, analysis_memory_mb: int | None = None,
             io_workers: int | None = None, tensorboard: bool | None = None,
             refine_estimator: str | None = None, average_frames: list[int] | None = None,
-            average_model: str | None = None) -> dict:
+            average_model: str | None = None, template_limit: bool | None = None) -> dict:
     """Rebuild from saved uint8 images. Never load a denoiser or the raw dataset."""
     from sem_noise.config import AnalysisConfig
     from sem_noise.comparison_storage import load_contours
@@ -910,7 +931,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
     if render_only and record.get("schema_version", 0) < 3:
         raise ValueError("This older report needs contour remeasurement; omit --render-only")
     if render_only and any(value is not None for value in (
-            metrology_device, segmentation_config, contour_method, otsu_config, refine_estimator, average_frames, average_model,
+            metrology_device, segmentation_config, contour_method, otsu_config, refine_estimator, average_frames, average_model, template_limit,
             analysis_batch, analysis_memory_mb, io_workers)):
         raise ValueError("--render-only reuses measurements; omit segmentation/device overrides")
     method = contour_method or record.get("contour_method", record.get("settings", {}).get("contour_method", "current"))
@@ -919,6 +940,9 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
     is_otsu = method in {"otsu", "otsu_refined"}
     counts = ComparisonSettings._average_counts(average_frames or record["settings"].get("average_frames", [8]))
     selected_model = average_model if average_model is not None else record["settings"].get("average_model")
+    diagnostic = template_limit if template_limit is not None else record["settings"].get("template_limit", False)
+    if diagnostic and method == "otsu":
+        raise ValueError("--template-limit requires refined template ECD; select otsu_refined")
     if selected_model is not None and selected_model not in record["models"]:
         raise ValueError("--average-model must name an included validation-selected model")
     if otsu_config is not None and not is_otsu:
@@ -989,7 +1013,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         record.update(contour_method=method, otsu_settings=otsu.model_dump())
         record["settings"].update(contour_method=method, otsu=otsu.model_dump())
         record["settings"].update(execution_options)
-        record["settings"].update(average_frames=counts, average_model=selected_model)
+        record["settings"].update(average_frames=counts, average_model=selected_model, template_limit=diagnostic)
         segment = load_segment(segmentation_config) if segmentation_config else SegmentConfig.model_validate(record["segmentation_settings"])
         if metrology_device is not None or refine_estimator is not None:
             segment.refine = type(segment.refine).model_validate({**segment.refine.model_dump(),
@@ -1008,6 +1032,7 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
         native_options = {"device": segment.refine.device} if is_otsu else {}
         for site in record["sites"]:
             site.update(observations=[], contours=[])
+            site.pop("template_precision", None)
             site.setdefault("requested_match_gate_px", record["settings"].get("match_gate_px"))
             previous_average = site["series"].get("average128")
             reference, template = prepare_reference(root, site, segment, **contour_options,
@@ -1047,6 +1072,10 @@ def rebuild(record_path: Path, output_dir: Path, *, metrology_device: str | None
                                                         **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
+            if diagnostic:
+                from tools.real_sem_template import measure_template_limit
+
+                measure_template_limit(root, site, device=segment.refine.device)
     finish_comparison(root, record, reuse_contours=render_only)
     return record
 
@@ -1112,7 +1141,7 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
     for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
                   "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split", "refine_estimator",
-                  "average_frames", "average_model"):
+                  "average_frames", "average_model", "template_limit"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
@@ -1152,6 +1181,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--average-frames", type=lambda value: [int(v) for v in value.split(",")],
                         help="Nonoverlapping average counts, e.g. 2,4,8 (default 8); incomplete trailing groups are omitted")
     parser.add_argument("--average-model", help="Validation-selected model name for registered AI averages; never selected using test SD")
+    parser.add_argument("--template-limit", action=argparse.BooleanOptionalAction, default=None,
+                        help="Add the model-free single-frame template diagnostic; uses this site's own average, not deployable")
     parser.add_argument("--metrology-device", help="Otsu/native analysis or current-method refinement device: cpu, cuda, or cuda:N")
     parser.add_argument("--device", help="Denoiser device")
     parser.add_argument("--tile-batch", type=int)
@@ -1180,7 +1211,7 @@ def main() -> int:
                              otsu_config=args.otsu_config, render_only=args.render_only, contours_only=args.contours_only,
                              analysis_batch=args.analysis_batch, analysis_memory_mb=args.analysis_memory_mb,
                              io_workers=args.io_workers, tensorboard=args.tensorboard, refine_estimator=args.refine_estimator,
-                             average_frames=args.average_frames, average_model=args.average_model)
+                             average_frames=args.average_frames, average_model=args.average_model, template_limit=args.template_limit)
             output = args.output_dir
         else:
             if args.render_only or args.contours_only:

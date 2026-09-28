@@ -68,3 +68,28 @@ def test_precision_decomposition_recovers_noise_and_records_intervals():
     assert set(summary["observations_per_hole"].values()) == {800}
     short, _ = summarize_observations(rows[:2], ["model"])
     assert short[0]["cd_std_detrended"] is short[0]["cd_std_successive"] is None
+
+
+def test_template_diagnostic_is_integrated_exported_and_preserved_on_render(tmp_path, monkeypatch):
+    source = saved_record(tmp_path / "source")
+    first = compare.rebuild(source, tmp_path / "first", contour_method="otsu_refined", tensorboard=False)
+    monkeypatch.setattr(compare, "analyze_series", lambda *a, **k: pytest.fail("reuse existing image analysis"))
+    result = compare.rebuild(tmp_path / "first/comparison.json", tmp_path / "diagnostic",
+                             contours_only=True, template_limit=True)
+    site = result["sites"][0]
+    diagnostic = site["template_precision"]
+    assert diagnostic["source"] == "decoded saved uint8 raw PNGs and full average"
+    assert "not deployable" in diagnostic["diagnostic"]
+    assert len(diagnostic["fits"]) == 8
+    assert all(f["status"] == "valid" for f in diagnostic["fits"])
+    assert any(r["series"] == "single_frame_template_limit" and r["method"] == "refined" for r in site["per_hole"])
+    assert (tmp_path / "diagnostic/site/template_fits.csv").is_file()
+    from tools.check_real_sem_template import check
+
+    checked = check(tmp_path / "diagnostic/comparison.json", device="cpu", frames=3)
+    assert checked["passed"] and checked["sites"][0]["comparable_valid_fits"] == 3
+    from tools import real_sem_template
+
+    monkeypatch.setattr(real_sem_template, "measure_template_limit", lambda *a, **k: pytest.fail("render-only must not fit"))
+    rendered = compare.rebuild(tmp_path / "diagnostic/comparison.json", tmp_path / "rendered", render_only=True)
+    assert rendered["sites"][0]["template_precision"] == diagnostic

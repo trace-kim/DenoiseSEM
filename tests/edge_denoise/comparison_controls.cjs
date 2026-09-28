@@ -83,6 +83,9 @@ context = vm.createContext({window: {}, document: {getElementById: get, head: ne
   requestAnimationFrame: fn => setImmediate(fn), setInterval, clearInterval});
 vm.runInContext(fs.readFileSync(path.join(root, "viewer/data.js"), "utf8"), context);
 const report = context.window.SEM_REPORT;
+report.sites[0].template_precision = {series: "single_frame_template_limit"};
+report.sites[0].per_hole.push({series: "single_frame_template_limit", hole: 1, method: "refined",
+  cd_3sigma: .12, cd_std_detrended: .03, cd_std_successive: .02, valid_count: 6, attempted_count: 8});
 report.sites[0].traces.raw[1].coarse = [[1, 10], [2, 12], [3, null], [4, 14]];
 report.sites[0].traces.model[1].coarse = [[1, 15]];
 report.sites[0].traces.ft_noisy[1].coarse = [[1, 10], [2, 12], [3, null], [4, 14]];
@@ -95,6 +98,9 @@ const ecdToggle = (name, checked) => {
 vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8"), context);
 (async () => {
   await settle();
+  assert.equal(get("template-section").hidden, false);
+  assert.match(text(get("template-values")), /3σ 0.120 px; detrended SD 0.030; successive SD 0.020; 6\/8 usable fits/);
+  assert.equal(get("template-export").href, "site/template_fits.csv");
   const a = canvas("image-a"), b = canvas("image-b");
   assert.equal(a.parentNode.getAttribute("x"), "0");
   assert.equal(a.parentNode.getAttribute("y"), "0");

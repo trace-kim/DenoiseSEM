@@ -229,6 +229,8 @@ def render_comparison(root: Path, record: dict) -> Path:
                   "contour_status": site["contour_status"], "warnings": site["warnings"],
                   "repeatability": site["repeatability"], "per_hole": site.get("per_hole", []),
                   "frames_vs_precision": site.get("frames_vs_precision", []),
+                  "template_precision": ({k: v for k, v in site["template_precision"].items() if k != "fits"}
+                                         if site.get("template_precision") else None),
                   "hole_count": len(site["template_centroids"])}
         with Progress(f"{site['name']}: loading temporal variation maps", timings=site.setdefault("timings_s", {}),
                       key="viewer_load_temporal_maps"):

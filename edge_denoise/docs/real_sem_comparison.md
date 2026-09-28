@@ -498,8 +498,9 @@ The viewer gives each series a toggle/color and links blocks to their original
 acquisitions. `frames_vs_precision.csv` in each site and the curve in the viewer
 report K, group count, common holes, observations per hole, median ECD 3σ and
 bootstrap 95% intervals. Each family uses the intersection of measurable holes
-across its K values. Raw topology failures can therefore make a raw curve
-unavailable rather than fabricate its K=1 precision. Original per-series
+across its estimable K values. A K with no measurable holes remains an explicit
+gap; raw topology failures do not suppress the measurable average points or
+fabricate K=1 precision. The contributing K series are exported. Original per-series
 coverage remains in `repeatability.csv`. Neither K nor learned fusion is chosen
 automatically. GPU throughput and CPU/GPU agreement on the remote acquisitions
 remain hardware checks, including the CPU ECC stage and image I/O.
@@ -509,6 +510,68 @@ WP5/WP8 verification (2026-09-28): full `python -m pytest -q`:
 blank acquisitions remain included, saved source PNGs stay byte-identical, and
 raw-average refined ECD variation decreases over K=1,2,4,8. Rebuild, reuse,
 remainder handling and linked registered-block navigation are covered.
+
+## Single-frame template precision diagnostic (WP7)
+
+Add `--template-limit` to a fresh comparison or saved-image rebuild. This is
+opt-in and requires a refined detector (`otsu_refined` or `current`). It uses
+each matched hole's refined full-average ECD and a five-pixel annulus around
+that hole in the **decoded saved uint8 full average**. Raw observations also
+come only from decoded saved PNGs. Fits are batched across holes and frames on
+the metrology device, with bounded scratch memory and an explicit CPU path.
+Patternless inputs skip fitting; failed fits remain visible in coverage counts.
+
+The fixed-orientation model is `I(x) = g*T(c + (x-c-d)/s) + o`, with free
+translation `d`, physical diameter scale `s`, gain `g` and offset `o`. Thus
+`ECD = s*ECD_template`. The inverse sampling scale corrects an inconsistency
+in the handoff equation: sampling `T(s*x)` would instead give diameter divided
+by `s`. Gain and offset are nuisance fit parameters, never image corrections.
+No diagnostic image is exported or substituted for a model's native output.
+
+The viewer adds a **single-frame template limit — diagnostic, not deployable**
+summary row and per-hole 3σ, detrended SD, successive SD and usable fit counts.
+The same observations flow through `observations.csv`, `per_hole.csv` and
+`repeatability.csv`. `template_fits.csv` adds scale/shift/gain/offset, fit status,
+scale/ECD standard errors, and the five-parameter covariance. The report records
+the template SHA-256, annulus width, convention, device and elapsed time.
+
+Standard errors use a Gauss–Newton residual sandwich covariance (HC1), allowing
+independent heteroscedastic pixel noise. They are conditional on the template.
+Template blur, inclusion of the raw frame in the average, correlated SEM noise
+and real shape changes can bias this diagnostic; it is not a universal lower
+bound or a deployable single-frame result. Compare coverage and the same holes
+before interpreting a model's distance from it.
+
+```bash
+REFINED_REPORT=output/260928_real_frames_precision/comparison.json
+python tools/real_sem_compare.py --from-comparison "$REFINED_REPORT" \
+  --output-dir output/260928_real_template_precision --contours-only \
+  --template-limit --metrology-device cuda:0 --no-tensorboard
+python tools/check_real_sem_template.py \
+  --from-comparison output/260928_real_template_precision/comparison.json \
+  --frames 32 --device cuda:0 --cpu-threads 2 \
+  --output-json output/260928_template_equivalence.json
+```
+
+These commands preserve the recorded refinement estimator; use explicit CPU
+metrology for `threshold`/`erf`. The check includes image decoding and all holes
+in the first 32 saved frames, checks failure-status agreement and parameter/
+standard-error differences, and fails if there are no comparable valid fits.
+It never changes the source report. A subsequent `--render-only` reuses the
+diagnostic. `--no-template-limit` disables it on a remeasurement.
+
+Synthetic calibration uses 320 realizations each of Gaussian and combined
+Poisson/Gaussian noise on saved-equivalent uint8 disks. Scale bias is within
+three Monte-Carlo standard errors, and mean fitted standard error is within
+10% of empirical SD. Physical scale/sign, nuisance parameters, patternless
+skips, report integration, export and render-only reuse are covered. H100 timing
+and agreement on the real acquisitions remain remote checks.
+
+Final WP7/report audit verification (2026-09-28): full `python -m pytest -q`
+passed **1,071 tests**, with **1 optional offline browser test skipped** and
+7 existing warnings, in 156.26 s. The audit also covers unavailable raw points
+in the K curve, refined contours outside registered common support, and the
+remote mean-target checker using the unchanged factory RNG state.
 
 The standalone `sem_noise` acquisition workflow retains its original correction
 diagnostics. This comparison does not invoke it. A legacy `analysis_config` is

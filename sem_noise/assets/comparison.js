@@ -21,7 +21,8 @@
   const series = p => site().series[state.names[p]];
   const frame = p => series(p).frames[state.indices[p]];
   const fmt = (v, digits = 3) => Number.isFinite(v) ? Number(v).toFixed(digits) : "Unavailable";
-  const label = name => ({raw: "Raw input", average8: "Average of 8", average128: "Average of 128"}[name]
+  const label = name => ({raw: "Raw input", average8: "Average of 8", average128: "Average of 128",
+    single_frame_template_limit: "Single-frame template limit (diagnostic, not deployable)"}[name]
     || name.replaceAll("_", " + "));
   const svg = (tag, attrs = {}, text) => {
     const node = document.createElementNS(ns, tag);
@@ -453,6 +454,16 @@
       table.append(tr);
     }
     target.append(table);
+    $("template-section").hidden = !site().template_precision;
+    const diagnostic = $("template-values"); diagnostic.replaceChildren();
+    if (site().template_precision) {
+      $("template-export").href = `${site().name}/template_fits.csv`;
+      for (const r of site().per_hole.filter(r => r.series === "single_frame_template_limit")) {
+        const p = document.createElement("p");
+        p.textContent = `Hole ${r.hole}: 3σ ${fmt(r.cd_3sigma)} ${report.unit}; detrended SD ${fmt(r.cd_std_detrended)}; successive SD ${fmt(r.cd_std_successive)}; ${r.valid_count}/${r.attempted_count} usable fits`;
+        diagnostic.append(p);
+      }
+    }
   }
   function colorbar(id, title, low, high, difference = false) {
     const root = $(id); root.replaceChildren(); root.className = "colorbar";

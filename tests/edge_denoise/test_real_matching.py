@@ -571,6 +571,17 @@ def test_mean_specs_preserve_rng_pairs_consistency_and_resume(prepared, tmp_path
         assert torch.equal(actual.targets, batch.targets) and torch.equal(actual.second, batch.second)
 
 
+def test_remote_mean_target_checker_exercises_real_factory_without_advancing_rng(prepared, tmp_path):
+    from tools.check_real_sem_mean_targets import SpecFactory, check
+
+    config = matching_config(prepared, tmp_path / "run", target="noisy_mean")
+    factory = SpecFactory(BurstCache(prepared), config, seed=91)
+    before = factory.state_dict()
+    result = check(factory, count=3, device="cpu")
+    assert result["passed"] and result["valid_masks_identical"]["candidate"]
+    assert factory.state_dict() == before
+
+
 def test_cache_and_resume_compare_applied_failure_policy(prepared, tmp_path, monkeypatch):
     monkeypatch.setattr(MatchedRealPairFactory, "_measure", lambda self, frames, _: {
         **mixed_geometry(frames, registration="affine"), "failure_policy": "skip"})

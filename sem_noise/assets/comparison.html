@@ -46,6 +46,9 @@
 <section class="chart"><h2>Acquisitions versus precision</h2>
 <p class="muted">Median within-hole ECD 3σ versus acquisitions per delivered image. Bars show the 95% bootstrap interval over common holes within each family. Nonoverlapping blocks give fewer observations at larger K. No frame count or model is selected automatically.</p>
 <svg id="precision-curve" role="img" aria-label="Acquisitions per image versus ECD three sigma"></svg><div id="precision-values"></div></section>
+<section id="template-section" hidden><h2>Single-frame template limit</h2>
+<p class="muted">Diagnostic, not deployable: fits each raw frame against this site's own saved full average. This is conditional precision with a known template, not a universal lower bound. Template blur, self-inclusion, correlated noise and shape changes can bias it. No image correction is exported.</p>
+<div id="template-values"></div><p><a id="template-export">Per-frame fits and standard errors (CSV)</a></p></section>
 <details id="band-section"><summary>All-acquisition contour band</summary>
 <div class="band-controls"><label>Source<select id="band-source" aria-label="Contour band source"></select></label><a id="band-file" target="_blank" rel="noopener">Open vector plot</a></div>
 <p id="band-label" class="muted"></p><img id="contour-band" class="contour-band" alt="All detected contours across acquisitions, colored by acquisition" loading="lazy">
