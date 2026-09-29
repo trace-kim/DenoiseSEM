@@ -5,6 +5,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 import numpy as np
+from PIL import Image
 import pytest
 
 from edge_denoise.uint8_output import RANGE_WARNING
@@ -135,6 +136,40 @@ def test_comparison_viewer_keeps_decoded_images_contours_and_statistics_in_sync(
     result = subprocess.run([shutil.which("node"), str(Path(__file__).with_name("comparison_controls.cjs")), str(report)],
                             capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    # The browser-side encoder must produce a standard, looping GIF whose pixels
+    # are the rendered frame: grays within one palette step, pure red exact.
+    with Image.open(report / "export.gif") as gif:
+        assert (gif.size, gif.n_frames, gif.info.get("loop"), gif.info.get("duration")) == ((964, 424), 8, 0, 350)
+        source = np.frombuffer((report / "export_source.bin").read_bytes(), np.uint8).reshape(424, 964, 4)[..., :3]
+        gray = np.floor(np.floor(source[..., 0].astype(float) * 191 / 255 + .5) * 255 / 191 + .5)
+        red = (source == [255, 0, 0]).all(axis=2)
+        expected = np.where(red[..., None], [252, 4, 4], gray[..., None]).astype(np.uint8)
+        for index in range(gif.n_frames):
+            gif.seek(index)
+            np.testing.assert_array_equal(np.asarray(gif.convert("RGB")), expected)
+    assert (report / "site" / "placement.csv").is_file()
+
+
+def test_hole_positions_use_saved_contours_units_and_template_shifts():
+    square = [[10, 20], [10, 24], [14, 24], [14, 20]]  # centroid (12, 22), 16 px²
+    ecd_px = 2 * np.sqrt(16 / np.pi)
+
+    def contour(series, frame, hole, status="valid", factor=1.0):
+        return {"series": series, "frame": frame, "hole": hole, "coarse": square, "refined": square,
+                "status": {"coarse": status, "refined": status},
+                "measures": {m: {"ecd": ecd_px * factor, "area_px2": 16.0} for m in ("coarse", "refined")}}
+
+    contours = [contour("model", 1, 1, factor=2.0), contour("model", 2, 1, status="missing"),
+                contour("model", 3, None), contour("average128", 1, 1, factor=2.0)]
+    template = {"series": "single_frame_template_limit",
+                "fits": [{"hole": 1, "frame": 4, "status": "valid", "dy_px": .5, "dx_px": -.25},
+                         {"hole": 1, "frame": 5, "status": "failed", "dy_px": None, "dx_px": None}]}
+    positions = compare.hole_positions(contours, template)
+    model = [p for p in positions if p["series"] == "model"]
+    assert sorted(p["method"] for p in model) == ["coarse", "refined"]
+    assert all(p["frame"] == 1 and p["y"] == pytest.approx(24) and p["x"] == pytest.approx(44) for p in model)
+    fits = [p for p in positions if p["series"] == "single_frame_template_limit"]
+    assert [(p["frame"], p["y"], p["x"]) for p in fits] == [(4, pytest.approx(1.0), pytest.approx(-.5))]
 
 
 @pytest.mark.parametrize("method", ["coarse", "refined"])

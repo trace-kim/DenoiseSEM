@@ -642,11 +642,45 @@ def save_record(root: Path, record: dict) -> None:
                   for site in record["sites"]}})
 
 
+def hole_positions(contours: list[dict], template_precision: dict | None = None) -> list[dict]:
+    """Centroid of every validly measured, matched hole, in the report unit.
+
+    Read from saved contours, so older reports gain the registration metric with
+    --render-only. The unit factor comes from each contour's own ECD / area pair.
+    The template diagnostic has no contour per frame; its fitted shift of the
+    template outline is the hole's displacement.
+    """
+    from sem_segment.contours import polygon_centroid
+
+    positions, factors = [], {}
+    for contour in contours:
+        if contour.get("hole") is None:
+            continue
+        for method in ("coarse", "refined"):
+            measure = contour["measures"].get(method)
+            if contour["status"].get(method) != "valid" or not measure or len(contour[method]) < 3:
+                continue
+            factor = measure["ecd"] / (2 * np.sqrt(measure["area_px2"] / np.pi))
+            y, x = polygon_centroid(np.asarray(contour[method], dtype=float))
+            positions.append({"series": contour["series"], "method": method, "frame": contour["frame"],
+                              "hole": contour["hole"], "y": y * factor, "x": x * factor})
+            if contour["series"] == "average128" and method == "refined":
+                factors[contour["hole"]] = factor
+    if template_precision:
+        for fit in template_precision["fits"]:
+            factor = factors.get(fit["hole"])
+            if fit["status"] == "valid" and factor is not None:
+                positions.append({"series": template_precision["series"], "method": "refined", "frame": fit["frame"],
+                                  "hole": fit["hole"], "y": fit["dy_px"] * factor, "x": fit["dx_px"] * factor})
+    return positions
+
+
 def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False) -> None:
     from sem_noise.pipeline import write_csv
     from sem_noise.comparison_report import render_comparison, write_tensorboard
     from sem_noise.comparison_storage import finish_contours
-    from sem_segment.repeatability import summarize_observations
+    from sem_noise.comparison_storage import load_contours
+    from sem_segment.repeatability import placement_per_hole, placement_residuals, summarize_observations
 
     started_finalization = time.perf_counter()
     print("Finalizing comparison: summaries and exports before report rendering", flush=True)
@@ -659,8 +693,11 @@ def finish_comparison(root: Path, record: dict, *, reuse_contours: bool = False)
         models = [name for name in record["models"] if name in names]
         with Progress(f"{site['name']}: repeatability summary ({len(site['observations']):,} observations)",
                       timings=timings, key="repeatability_summary"):
-            holes, summaries = summarize_observations(site["observations"], names, comparison_series=models)
+            residuals = placement_residuals(hole_positions(load_contours(root, site), site.get("template_precision")))
+            holes, summaries = summarize_observations(site["observations"], names, comparison_series=models,
+                                                      placement=placement_per_hole(residuals))
         site.update(per_hole=holes, repeatability=summaries)
+        write_csv(root / site["name"] / "placement.csv", residuals)
         from tools.real_sem_averages import frames_vs_precision
 
         site["frames_vs_precision"] = frames_vs_precision(site, record["models"])

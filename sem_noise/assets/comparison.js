@@ -39,12 +39,13 @@
   const openPath = points => points.length ? "M" + points.map(pointPath).join("L") : "";
   const time = f => f.timestamp_s ?? f.order;
   const timeTitle = () => site().series.raw.frames[0].timestamp_s == null ? "Acquisition / block center" : "Acquisition time (s)";
-  function frameLabel(p) {
-    const f = frame(p), name = state.names[p];
+  function frameText(name, f) {
+    const count = site().series[name].frames.length;
     if (name === "average128") return `Reference · inputs 1–${site().series.raw.frames.length}`;
-    if (f.first_acquisition != null) return `Block ${f.index}/${series(p).frames.length} · acquisitions ${f.first_acquisition}–${f.last_acquisition}`;
-    return `Acquisition ${f.index}/${series(p).frames.length}`;
+    if (f.first_acquisition != null) return `Block ${f.index}/${count} · acquisitions ${f.first_acquisition}–${f.last_acquisition}`;
+    return `Acquisition ${f.index}/${count}`;
   }
+  const frameLabel = p => frameText(state.names[p], frame(p));
   function atAcquisition(name, acquisition) {
     if (name === "average128") return 0;
     const frames = report.sites[wanted.site].series[name].frames;
@@ -358,7 +359,7 @@
     ["Source", "Usable / total", `Mean (${report.unit})`, `σ, sample SD (${report.unit})`, `3σ (${report.unit})`, `Mean ±3σ (${report.unit})`].forEach(value => {
       const th = document.createElement("th"); th.textContent = value; head.append(th);
     }); table.append(head);
-    for (const title of ["Detrended SD", "Successive SD", "r(ECD, brightness)", "r(ECD, threshold)"]) {
+    for (const title of [`Registration 3σ y (${report.unit})`, `Registration 3σ x (${report.unit})`, "Detrended SD", "Successive SD", "r(ECD, brightness)", "r(ECD, threshold)"]) {
       const th = document.createElement("th"); th.textContent = title; head.append(th);
     }
     for (const t of [...tracks].sort((a, b) => (a.stats.sd ?? Infinity) - (b.stats.sd ?? Infinity))) {
@@ -370,7 +371,7 @@
         tr.append(td);
       });
       const detail = (site().per_hole || []).find(r => r.series === t.name && r.hole === state.selected.hole && r.method === $("measure").value) || {};
-      for (const key of ["cd_std_detrended", "cd_std_successive", "cd_brightness_correlation", "cd_threshold_correlation"]) {
+      for (const key of ["placement_3sigma_y", "placement_3sigma_x", "cd_std_detrended", "cd_std_successive", "cd_brightness_correlation", "cd_threshold_correlation"]) {
         const td = document.createElement("td"); td.textContent = fmt(detail[key]); tr.append(td);
       }
       table.append(tr);
@@ -439,7 +440,7 @@
     const head = document.createElement("tr");
     ["Images", "Boundary", "Contributing holes", "Usable measurements", "Unavailable", `ECD sample SD (${report.unit})`, `ECD 3σ (${report.unit})`].forEach(text => {const th = document.createElement("th"); th.textContent = text; head.append(th);});
     table.append(head);
-    for (const title of ["Detrended SD", "Successive SD", "Median SD 95% CI (holes)", "Observations per hole"]) {
+    for (const title of [`Registration 3σ y (${report.unit})`, `Registration 3σ x (${report.unit})`, "Detrended SD", "Successive SD", "Median SD 95% CI (holes)", "Observations per hole"]) {
       const th = document.createElement("th"); th.textContent = title; head.append(th);
     }
     const rows = site().repeatability.filter(r => r.method === (maskOnly ? "coarse" : $("measure").value));
@@ -448,7 +449,7 @@
       [label(r.series), r.method === "coarse" ? "Mask" : "Refined", r.common_hole_count, r.valid_count, r.failed_count,
         fmt(r.median_cd_std), fmt(r.median_cd_std == null ? null : 3 * r.median_cd_std)].forEach(text => {const td = document.createElement("td"); td.textContent = text; tr.append(td);});
       const ci = r.median_cd_std_ci95;
-      for (const value of [fmt(r.median_cd_std_detrended), fmt(r.median_cd_std_successive),
+      for (const value of [fmt(r.median_placement_3sigma_y), fmt(r.median_placement_3sigma_x), fmt(r.median_cd_std_detrended), fmt(r.median_cd_std_successive),
         ci ? ci.map(v => fmt(v)).join(" to ") : "Unavailable", Object.values(r.observations_per_hole || {}).join(", ")]) {
         const td = document.createElement("td"); td.textContent = value; tr.append(td);
       }
@@ -456,15 +457,7 @@
     }
     target.append(table);
     $("template-section").hidden = !site().template_precision;
-    const diagnostic = $("template-values"); diagnostic.replaceChildren();
-    if (site().template_precision) {
-      $("template-export").href = `${site().name}/template_fits.csv`;
-      for (const r of site().per_hole.filter(r => r.series === "single_frame_template_limit")) {
-        const p = document.createElement("p");
-        p.textContent = `Hole ${r.hole}: 3σ ${fmt(r.cd_3sigma)} ${report.unit}; detrended SD ${fmt(r.cd_std_detrended)}; successive SD ${fmt(r.cd_std_successive)}; ${r.valid_count}/${r.attempted_count} usable fits`;
-        diagnostic.append(p);
-      }
-    }
+    if (site().template_precision) $("template-export").href = `${site().name}/template_fits.csv`;
   }
   function colorbar(id, title, low, high, difference = false) {
     const root = $(id); root.replaceChildren(); root.className = "colorbar";
@@ -491,13 +484,167 @@
     $("band-label").textContent = path ? `${label(name)} · ${method === "coarse" ? "Mask" : "Refined"} boundaries · ${count} detected regions across ${s.frames.length} images.` +
       (s.frames.length === 1 ? " Single reference: no temporal band." : "") + (!count ? " No contours detected." : "") : "Contour band unavailable; regenerate this report with --render-only.";
   }
+  // Save what Play shows as a looping GIF: the current zoom, contour mode and
+  // display, and the linked pane beside it. Pixels come from the same saved PNGs.
+  const gifDelay = 35, gifGrays = 192;  // 350 ms, as Play; gray levels in the palette
+  function tracePath(ctx, points, close) {
+    points.forEach((q, i) => {const [y, x] = rasterPoint(q); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);});
+    if (close && points.length) ctx.closePath();
+  }
+  function paintContours(ctx, contours, scale) {
+    const mode = $("contours").value, measure = $("measure").value, hole = state.selected?.hole;
+    if (mode === "off") return;
+    ctx.lineWidth = 1.5 / scale; ctx.lineJoin = "round";
+    for (const c of contours) {
+      if (hole != null && c.hole === hole) {
+        ctx.beginPath(); tracePath(ctx, measure === "refined" && c.refined.length ? c.refined : c.coarse, true);
+        c.holes.forEach(h => tracePath(ctx, h, true));
+        ctx.fillStyle = "rgba(249,220,109,0.35)"; ctx.fill("evenodd");
+      }
+      if (mode !== "refined" || !c.refined.length) {
+        ctx.beginPath(); tracePath(ctx, c.coarse, true); c.holes.forEach(h => tracePath(ctx, h, true));
+        (c.open_paths || []).forEach(o => tracePath(ctx, o, false));
+        ctx.strokeStyle = c.status.coarse === "border" ? "#d7ad56" : "#43dbe2"; ctx.stroke();
+      }
+      if ((mode === "both" || mode === "refined") && c.refined.length) {
+        ctx.beginPath();
+        c.refined.forEach((q, i) => {
+          const j = (i + 1) % c.refined.length;
+          if (c.refined_valid[i] && c.refined_valid[j]) tracePath(ctx, [q, c.refined[j]], false);
+        });
+        ctx.strokeStyle = "#ff9d50"; ctx.stroke();
+      }
+    }
+  }
+  function gifPalette(samples) {
+    // Grays carry the SEM image; the most frequent other colours carry contours and difference maps.
+    const counts = new Map();
+    for (const data of samples) for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      if (Math.max(r, g, b) - Math.min(r, g, b) <= 2) continue;
+      const key = (r >> 3) << 10 | (g >> 3) << 5 | b >> 3;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const palette = Array.from({length: gifGrays}, (_, i) => {const v = Math.round(i * 255 / (gifGrays - 1)); return [v, v, v];});
+    for (const [key] of [...counts].sort((a, b) => b[1] - a[1]).slice(0, 256 - gifGrays))
+      palette.push([(key >> 10 & 31) * 8 + 4, (key >> 5 & 31) * 8 + 4, (key & 31) * 8 + 4]);
+    while (palette.length < 256) palette.push([0, 0, 0]);
+    return palette;
+  }
+  function quantize(data, palette, cache) {
+    const out = new Uint8Array(data.length / 4);
+    for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const gray = Math.round((r + g + b) / 3 * (gifGrays - 1) / 255);
+      if (Math.max(r, g, b) - Math.min(r, g, b) <= 2) {out[j] = gray; continue;}
+      const key = r << 16 | g << 8 | b;
+      let index = cache.get(key);
+      if (index === undefined) {
+        const distance = q => (q[0] - r) ** 2 + (q[1] - g) ** 2 + (q[2] - b) ** 2;
+        index = gray; let best = distance(palette[gray]);
+        for (let k = gifGrays; k < palette.length; k++) {const d = distance(palette[k]); if (d < best) {best = d; index = k;}}
+        cache.set(key, index);
+      }
+      out[j] = index;
+    }
+    return out;
+  }
+  function lzw(indices) {
+    // GIF variable-length LZW on 8-bit symbols; code-size growth timed as in omggif.
+    const bytes = [], clear = 256, eoi = 257;
+    let size = 9, next = 258, table = new Map(), bits = 0, buffer = 0;
+    const emit = code => {buffer |= code << bits; bits += size; while (bits >= 8) {bytes.push(buffer & 255); buffer >>>= 8; bits -= 8;}};
+    emit(clear);
+    let prefix = indices[0];
+    for (let i = 1; i < indices.length; i++) {
+      const symbol = indices[i], key = prefix << 8 | symbol, code = table.get(key);
+      if (code !== undefined) {prefix = code; continue;}
+      emit(prefix);
+      if (next === 4096) {emit(clear); table = new Map(); size = 9; next = 258;}
+      else {if (next >= 1 << size) size++; table.set(key, next++);}
+      prefix = symbol;
+    }
+    emit(prefix); emit(eoi);
+    if (bits > 0) bytes.push(buffer & 255);
+    return bytes;
+  }
+  function encodeGif(width, height, palette, frames, delay) {
+    const ascii = text => [...text].map(c => c.charCodeAt(0)), le = v => [v & 255, v >> 8 & 255];
+    const parts = [new Uint8Array([...ascii("GIF89a"), ...le(width), ...le(height), 0xf7, 0, 0, ...palette.flat()]),
+      new Uint8Array([0x21, 0xff, 11, ...ascii("NETSCAPE2.0"), 3, 1, 0, 0, 0])];  // loop forever
+    for (const indices of frames) {
+      const data = lzw(indices), blocks = [];
+      for (let i = 0; i < data.length; i += 255) {const chunk = data.slice(i, i + 255); blocks.push(chunk.length, ...chunk);}
+      parts.push(new Uint8Array([0x21, 0xf9, 4, 4, ...le(delay), 0, 0, 0x2c, 0, 0, 0, 0, ...le(width), ...le(height), 0, 8]),
+        new Uint8Array(blocks), new Uint8Array([0]));
+    }
+    parts.push(new Uint8Array([0x3b]));
+    return new Blob(parts, {type: "image/gif"});
+  }
+  async function saveGif(p) {
+    if (!state.ready) return;
+    stop();
+    const names = [...state.names], view = [...state.view], display = state.display;
+    const panes = $("linked").checked && $("layout").value === "side" ? [0, 1] : [p];
+    const count = site().series[names[p]].frames.length;
+    const scale = Math.min(12, (panes.length > 1 ? 480 : 720) / Math.max(view[2], view[3]));
+    const panelW = Math.round(view[2] * scale), panelH = Math.round(view[3] * scale), header = 24, gap = 4;
+    const width = panes.length * panelW + (panes.length - 1) * gap, height = header + panelH;
+    const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d", {willReadFrequently: true});
+    letters.forEach(l => $("gif-" + l).disabled = true);
+    const linkedFrame = (name, acquisition) => {
+      const frames = site().series[name].frames;
+      if (name === "average128") return frames[0];
+      return frames.find(g => (g.first_acquisition ?? g.index) <= acquisition && acquisition <= (g.last_acquisition ?? g.index)) || frames[0];
+    };
+    async function draw(i) {
+      const lead = site().series[names[p]].frames[i], acquisition = lead.first_acquisition ?? lead.index;
+      ctx.fillStyle = "#000"; ctx.fillRect(0, 0, width, height);
+      for (const [slot, q] of panes.entries()) {
+        const f = q === p ? lead : linkedFrame(names[q], acquisition);
+        const path = display === "difference" && f.difference_path ? f.difference_path : f.path;
+        const [image, contours] = await Promise.all([loadImage(path), loadContours(f).catch(() => [])]);
+        const x0 = slot * (panelW + gap);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x0, header, panelW, panelH); ctx.clip();
+        ctx.translate(x0, header); ctx.scale(scale, scale); ctx.translate(-view[0], -view[1]);
+        ctx.imageSmoothingEnabled = false; ctx.drawImage(image, 0, 0);
+        paintContours(ctx, contours, scale);
+        ctx.restore();
+        ctx.fillStyle = "#fff"; ctx.font = "13px sans-serif"; ctx.textBaseline = "middle";
+        ctx.fillText(`${label(names[q])} · ${frameText(names[q], f)}`, x0 + 6, header / 2, panelW - 12);
+      }
+      return ctx.getImageData(0, 0, width, height).data;
+    }
+    try {
+      const samples = [];
+      for (const i of new Set([0, count >> 1, count - 1])) samples.push(await draw(i));
+      const palette = gifPalette(samples), cache = new Map(), frames = [];
+      for (let i = 0; i < count; i++) {
+        $("load-status").textContent = `Encoding GIF: frame ${i + 1}/${count}…`;
+        frames.push(quantize(await draw(i), palette, cache));
+      }
+      const blob = encodeGif(width, height, palette, frames, gifDelay);
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${site().name}_${panes.map(q => names[q]).join("_vs_")}.gif`;
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+      $("load-status").textContent = `Saved ${link.download} (${count} frames, ${width}×${height} px, ${(blob.size / 1024 ** 2).toFixed(1)} MB).`;
+    } catch (error) {
+      $("load-status").textContent = `GIF export failed: ${error.message}`;
+    } finally {
+      letters.forEach((l, q) => $("gif-" + l).disabled = site().series[state.names[q]].frames.length < 2);
+    }
+  }
   async function render() {
     ++state.revision;
     wanted.display = $("display").value;
     letters.forEach((l, p) => {
       const s = report.sites[wanted.site].series[wanted.names[p]];
       $("frame-" + l).max = s.frames.length; $("frame-" + l).value = wanted.indices[p] + 1;
-      ["frame-", "prev-", "next-", "play-"].forEach(prefix => $(prefix + l).disabled = s.frames.length < 2);
+      ["frame-", "prev-", "next-", "play-", "gif-"].forEach(prefix => $(prefix + l).disabled = s.frames.length < 2);
     });
     $("load-status").textContent = "Loading requested images… Displayed labels describe the pair currently on screen.";
     if (rendering) return;
@@ -574,7 +721,7 @@
       letters.map((_, p) => series(p).difference_limit_dn ? `${letters[p].toUpperCase()}: ±${series(p).difference_limit_dn} DN; larger differences saturate for display.` : "").join(" ");
     $("site-status").textContent = `Report generated · contour availability: ${site().contour_status} · ${site().hole_count} reference hole IDs. ${site().warnings.join(" ")}`;
     $("site-exports").replaceChildren();
-    ["observations.csv", "per_hole.csv", "repeatability.csv", "frames_vs_precision.csv", "frames.csv", "contours.json"].forEach(file => {const a = document.createElement("a"); a.href = `${site().name}/${file}`; a.textContent = file; $("site-exports").append(a, " · ");});
+    ["observations.csv", "per_hole.csv", "repeatability.csv", "placement.csv", "frames_vs_precision.csv", "frames.csv", "contours.json"].forEach(file => {const a = document.createElement("a"); a.href = `${site().name}/${file}`; a.textContent = file; $("site-exports").append(a, " · ");});
     drawImages(); drawMeasurements(); drawCharts(); drawCoverage(); drawBand();
   }
   function changeSite() {
@@ -595,6 +742,7 @@
       state.active = p; $("play-" + l).textContent = "Pause";
       state.playing = setInterval(() => {if (!rendering) setFrame(p, (wanted.indices[p] + 1) % series(p).frames.length);}, 350);
     };
+    $("gif-" + l).onclick = () => saveGif(p);
     const root = $("image-" + l);
     let down = null;
     root.addEventListener("wheel", e => {

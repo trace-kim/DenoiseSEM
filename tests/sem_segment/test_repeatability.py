@@ -72,3 +72,65 @@ def test_native_saved_holes_known_diameter_variation_and_translation(tmp_path):
     assert tracks[0]["registration_status"] == "registered"
     assert tracks[0]["dy_px"] == pytest.approx(2, abs=.1)
     assert tracks[0]["dx_px"] == pytest.approx(-1, abs=.1)
+
+
+def _positions(shifts, offsets, noise, rng, *, series="model", method="refined"):
+    rows = []
+    for frame, shift in enumerate(shifts, 1):
+        for hole, offset in enumerate(offsets, 1):
+            y, x = offset + shift + noise[hole - 1] * rng.standard_normal(2)
+            rows.append({"series": series, "method": method, "frame": frame, "hole": hole, "y": y, "x": x})
+    return rows
+
+
+def test_placement_removes_common_image_shift_exactly_even_with_missing_holes():
+    from sem_segment.repeatability import placement_per_hole, placement_residuals
+
+    rng = np.random.default_rng(0)
+    shifts = rng.uniform(-6, 6, size=(12, 2)) + np.linspace(0, 4, 12)[:, None]  # jitter + drift
+    offsets = np.array([[20 * i, 30 * j] for i in range(3) for j in range(3)], dtype=float)
+    rows = _positions(shifts, offsets, np.zeros(9), rng)
+    rows = [r for r in rows if not (r["hole"] == 4 and r["frame"] % 3 == 0)]  # a hole sometimes missing
+    residuals = placement_residuals(rows)
+    assert len(residuals) == len(rows)
+    assert np.allclose([[r["residual_y"], r["residual_x"]] for r in residuals], 0, atol=1e-7)
+    stats = placement_per_hole(residuals)
+    assert stats["model", 4, "refined"]["placement_count"] == 8
+    assert stats["model", 1, "refined"]["placement_3sigma_y"] == pytest.approx(0, abs=1e-6)
+
+
+def test_placement_measures_relative_hole_motion_without_shrinkage():
+    from sem_segment.repeatability import placement_per_hole, placement_residuals
+
+    rng = np.random.default_rng(1)
+    shifts = rng.uniform(-5, 5, size=(400, 2))
+    offsets = np.array([[25 * i, 25 * j] for i in range(2) for j in range(2)], dtype=float)
+    stats = placement_per_hole(placement_residuals(_positions(shifts, offsets, np.full(4, .1), rng)))
+    # Four holes: without the sqrt(N/(N-1)) correction a 0.1 px hole would read 0.087 px.
+    for hole in range(1, 5):
+        assert stats["model", hole, "refined"]["placement_std_y"] == pytest.approx(.1, rel=.12)
+    # A wandering hole stands out; it also moves the common shift by 1/N, as a
+    # whole-image registration would.
+    noise = np.array([.1, .1, .1, .4])
+    stats = placement_per_hole(placement_residuals(_positions(shifts, offsets, noise, rng)))
+    assert stats["model", 4, "refined"]["placement_std_x"] > 2 * stats["model", 1, "refined"]["placement_std_x"]
+
+
+def test_placement_skips_frames_with_too_few_holes_and_joins_the_summary():
+    from sem_segment.repeatability import placement_per_hole, placement_residuals
+
+    rng = np.random.default_rng(2)
+    offsets = np.array([[0, 0], [0, 30], [30, 0]], dtype=float)
+    rows = _positions(np.zeros((5, 2)), offsets, np.full(3, .2), rng)
+    rows = [r for r in rows if not (r["frame"] == 5 and r["hole"] == 3)]
+    residuals = placement_residuals(rows)
+    assert {r["frame"] for r in residuals} == {1, 2, 3, 4}
+    observations = [{"series": "model", "hole": h, "method": "refined", "status": "valid", "cd": 10 + .1 * f,
+                     "major_axis": 10, "minor_axis": 10, "order": f} for h in (1, 2, 3) for f in range(1, 6)]
+    per_hole, summaries = summarize_observations(observations, ["model"], placement=placement_per_hole(residuals))
+    assert all(r["placement_count"] == 4 and r["placement_3sigma_y"] > 0 for r in per_hole)
+    summary = next(s for s in summaries if s["method"] == "refined")
+    assert summary["median_placement_3sigma_x"] == pytest.approx(
+        np.median([r["placement_3sigma_x"] for r in per_hole]))
+    coarse = next(s for s in summaries if s["method"] == "coarse")
+    assert coarse["median_placement_3sigma_y"] is None

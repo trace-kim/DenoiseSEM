@@ -75,6 +75,29 @@ saved acquisition in pane B. The all-hole summary uses the common holes across
 all models and matches the exported statistics, regardless of chart visibility.
 Compare measurement failures and mean ECD changes as well as precision.
 
+**Registration 3σ** sits beside ECD 3σ in both tables, per axis (y, x). A
+global image shift is not an error that matters, because it is corrected; what
+must stay fixed are the distances between contours. For each series and
+boundary method, every matched hole's centroid is modelled as
+`position = hole mean + frame shift + residual`, fitted by alternating means so
+missing holes are allowed; frames with fewer than three holes are skipped. The
+frame shift is the average over that image's holes, as a whole-image
+registration would estimate it. Residuals are scaled by `sqrt(N/(N-1))`, since
+each hole contributes to its own frame's shift estimate. Registration 3σ is
+three times the residual sample SD per hole; the summary is the median over the
+same holes as the ECD summary. A single wandering hole also moves the frame
+shift by 1/N, so it raises the others slightly. Centroids are read from the
+saved contours (template diagnostic: the fitted template shift), so
+`--render-only` adds the metric to existing reports. Per-frame residuals and
+frame shifts are in `<site>/placement.csv`.
+
+**Save GIF** next to each Play button writes the sequence Play would show as a
+looping GIF (350 ms per frame) for slides: the current zoom, image display and
+contour mode, a label per frame, and the selected hole's highlight. With *Link
+acquisitions* on in side-by-side view, both panes appear together. Encoding
+runs in the browser from the saved PNGs; grays use 192 levels (at most 0.7 DN
+error), other colours the most frequent ones in the sequence.
+
 Existing completed reports get these chart changes with the `--render-only`
 command below; it reuses their saved measurements without inference or analysis.
 This shows all models already in that report. To add other checkpoints, produce
@@ -533,7 +556,7 @@ by `s`. Gain and offset are nuisance fit parameters, never image corrections.
 No diagnostic image is exported or substituted for a model's native output.
 
 The viewer adds a **single-frame template limit — diagnostic, not deployable**
-summary row and per-hole 3σ, detrended SD, successive SD and usable fit counts.
+row in the all-model repeatability table; per-hole values are in `per_hole.csv`.
 The same observations flow through `observations.csv`, `per_hole.csv` and
 `repeatability.csv`. `template_fits.csv` adds scale/shift/gain/offset, fit status,
 scale/ECD standard errors, and the five-parameter covariance. The report records

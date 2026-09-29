@@ -56,8 +56,79 @@ def match_centroids(template: np.ndarray, observed: np.ndarray, shift_yx: np.nda
     return result
 
 
+def placement_residuals(positions: list[dict], *, min_holes: int = 3,
+                        iterations: int = 50) -> list[dict]:
+    """Hole position relative to the other holes in the same image.
+
+    Each position row names series, method, frame, hole and a centroid (y, x).
+    Per series and method, fit position = hole mean + frame shift by
+    alternating means (missing holes allowed), then return the residuals. A
+    common image shift is removed because it will be corrected; what remains
+    is how the distances between contours change. Frames with fewer than
+    ``min_holes`` holes are skipped. Residuals are scaled by sqrt(N/(N-1)): the
+    shift estimate includes the hole itself, which otherwise shrinks it.
+    """
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for row in positions:
+        if np.isfinite([row["y"], row["x"]]).all():
+            groups[row["series"], row["method"]].append(row)
+    result = []
+    for (series, method), rows in groups.items():
+        frames = sorted({r["frame"] for r in rows})
+        holes = sorted({r["hole"] for r in rows})
+        f_index = {f: i for i, f in enumerate(frames)}
+        h_index = {h: i for i, h in enumerate(holes)}
+        grid = np.full((len(frames), len(holes), 2), np.nan)
+        for r in rows:
+            grid[f_index[r["frame"]], h_index[r["hole"]]] = r["y"], r["x"]
+        counts = np.isfinite(grid[..., 0]).sum(axis=1)
+        grid[counts < min_holes] = np.nan
+        present = np.isfinite(grid[..., 0])
+        if not present.any():
+            continue
+        shift = np.zeros((len(frames), 1, 2))
+        for _ in range(iterations):
+            mean = np.nanmean(np.where(present[..., None], grid - shift, np.nan), axis=0, keepdims=True)
+            updated = np.nanmean(np.where(present[..., None], grid - mean, np.nan), axis=1, keepdims=True)
+            updated = np.nan_to_num(updated)
+            converged = np.allclose(updated, shift, atol=1e-9, rtol=0)
+            shift = updated
+            if converged:
+                break
+        counts = present.sum(axis=1)
+        scale = np.sqrt(counts / np.maximum(counts - 1, 1))[:, None, None]
+        residual = (grid - mean - shift) * scale
+        for i, frame in enumerate(frames):
+            for j, hole in enumerate(holes):
+                if present[i, j]:
+                    result.append({"series": series, "method": method, "frame": frame, "hole": hole,
+                                   "residual_y": float(residual[i, j, 0]), "residual_x": float(residual[i, j, 1]),
+                                   "frame_shift_y": float(shift[i, 0, 0]), "frame_shift_x": float(shift[i, 0, 1]),
+                                   "holes_in_frame": int(counts[i])})
+    return result
+
+
+def placement_per_hole(residuals: list[dict]) -> dict[tuple, dict]:
+    """Sample SD of the relative position per hole, per axis."""
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for row in residuals:
+        groups[row["series"], row["hole"], row["method"]].append(row)
+    result = {}
+    for key, rows in groups.items():
+        values = {}
+        for axis in ("y", "x"):
+            data = np.asarray([r[f"residual_{axis}"] for r in rows], dtype=float)
+            sd = float(data.std(ddof=1)) if len(data) >= 2 else None
+            values[f"placement_std_{axis}"] = sd
+            values[f"placement_3sigma_{axis}"] = 3 * sd if sd is not None else None
+        values["placement_count"] = len(rows)
+        result[key] = values
+    return result
+
+
 def summarize_observations(rows: list[dict], series_names: list[str], *,
-                           comparison_series: list[str] | None = None) -> tuple[list[dict], list[dict]]:
+                           comparison_series: list[str] | None = None,
+                           placement: dict[tuple, dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Sample SD per hole, then median SD over common comparison holes.
 
     Never pool dimensions across different holes. A hole needs two finite valid
@@ -83,6 +154,9 @@ def summarize_observations(rows: list[dict], series_names: list[str], *,
             result[f"{measure}_std"] = sd
             result[f"{measure}_3sigma"] = 3 * sd if sd is not None else None
         result.update(precision_components(observations))
+        result.update((placement or {}).get((series, hole, method), {
+            "placement_std_y": None, "placement_3sigma_y": None,
+            "placement_std_x": None, "placement_3sigma_x": None, "placement_count": 0}))
         per_hole.append(result)
     summaries = []
     for method in ("coarse", "refined"):
@@ -112,6 +186,11 @@ def summarize_observations(rows: list[dict], series_names: list[str], *,
                 values = [r[field] for r in selected if r[field] is not None]
                 summary[f"median_{field}"] = float(np.median(values)) if values else None
                 summary[f"median_{field}_ci95"] = bootstrap_median(values)
+            # Same holes as the CD summary, so both precisions describe one population.
+            for axis in ("y", "x"):
+                values = [r[f"placement_std_{axis}"] for r in selected if r[f"placement_std_{axis}"] is not None]
+                sd = float(np.median(values)) if values else None
+                summary[f"median_placement_3sigma_{axis}"] = 3 * sd if sd is not None else None
     return per_hole, summaries
 
 

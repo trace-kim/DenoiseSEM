@@ -45,10 +45,27 @@ class Element {
   set src(value) {this.attributes.src = value;}
   get src() {return this.attributes.src;}
   getContext() {
+    const noop = () => {};
     return {drawImage: image => {assert(image.decoded, "undecoded image displayed"); this.draws = (this.draws || 0) + 1; this.pixels = image.src;},
-      clearRect() {throw Error("visible pixels erased");}};
+      clearRect() {throw Error("visible pixels erased");},
+      ...Object.fromEntries(["fillRect", "save", "restore", "beginPath", "rect", "clip", "translate", "scale", "moveTo",
+        "lineTo", "closePath", "stroke", "fill", "fillText"].map(name => [name, noop])),
+      getImageData: (x, y, w, h) => ({data: gifSource(w, h)})};
   }
+  click() {this.clicked = true;}
 }
+// Deterministic noisy grays plus pure red, enough to force LZW table resets.
+const gifSource = (w, h) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  let seed = 12345;
+  for (let i = 0; i < w * h; i++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    const v = seed >>> 24, red = i % 97 === 0;
+    data.set(red ? [255, 0, 0, 255] : [v, v, v, 255], i * 4);
+  }
+  return data;
+};
+let savedGif = null;
 const descendants = e => e.children.flatMap(c => [c, ...descendants(c)]);
 const get = id => {
   if (!elements.has(id)) elements.set(id, new Element(["site", "source-a", "source-b", "band-source", "ecd-hole"].includes(id) ? "select" : "div"));
@@ -78,7 +95,9 @@ get("measure").value = "coarse"; get("linked").checked = true; get("wipe").value
 get("ecd-bands").checked = false;
 get("contours").append(...["both", "refined", "coarse", "off"].map(value => Object.assign(new Element("option"), {value})));
 context = vm.createContext({window: {}, document: {getElementById: get, head: new Element("head"),
-  createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag), addEventListener() {}},
+  createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag), addEventListener() {}, body: new Element("body")},
+  Blob, URL: {createObjectURL: blob => {savedGif = blob; return "blob:gif";}, revokeObjectURL() {}},
+  setTimeout: (fn, ms) => setTimeout(fn, ms).unref(),
   Image: FakeImage, Option: function(text, value) {return Object.assign(new Element("option"), {textContent: text, value});},
   requestAnimationFrame: fn => setImmediate(fn), setInterval, clearInterval});
 vm.runInContext(fs.readFileSync(path.join(root, "viewer/data.js"), "utf8"), context);
@@ -99,7 +118,7 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
 (async () => {
   await settle();
   assert.equal(get("template-section").hidden, false);
-  assert.match(text(get("template-values")), /3σ 0.120 px; detrended SD 0.030; successive SD 0.020; 6\/8 usable fits/);
+  assert.doesNotMatch(text(get("template-section")), /Hole 1/, "no per-hole template text");
   assert.equal(get("template-export").href, "site/template_fits.csv");
   const a = canvas("image-a"), b = canvas("image-b");
   assert.equal(a.parentNode.getAttribute("x"), "0");
@@ -118,6 +137,8 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
   get("image-a").events.pointerdown({button: 0, clientX: 10, clientY: 10, target: region});
   get("image-a").events.pointerup({});
   assert.match(text(get("ecd-statistics")), /3 \/ 8\|12.000\|2.000\|6.000\|6.000 … 18.000/);
+  assert.match(text(get("ecd-statistics")), /Registration 3σ y \(px\)\|Registration 3σ x \(px\)/);
+  assert.match(text(get("coverage")), /Registration 3σ y \(px\)/);
   assert.match(text(get("ecd-statistics")), /3 \/ 8\|12.000\|1.000\|3.000\|9.000 … 15.000/);
   assert.match(text(get("ecd-statistics")), /1 \/ 8\|15.000\|Unavailable\|Unavailable/);
   assert.deepEqual(ecdSources(), ["model", "ft_noisy", "ft_consist"]);
@@ -219,5 +240,13 @@ vm.runInContext(fs.readFileSync(path.join(root, "viewer/comparison.js"), "utf8")
   assert.match(text(get("ecd-chart")), /No usable ECD/);
   for (const name of ["model", "ft_noisy", "ft_consist", "raw"]) ecdToggle(name, false);
   assert.match(text(get("ecd-chart")), /Select at least one/);
+  // GIF export: every frame of the played sequence, both linked panes.
+  event("source-b", "change", "model"); await settle();
+  get("gif-a").onclick();
+  for (let i = 0; i < 400 && !/Saved|failed/.test(get("load-status").textContent); i++) await settle();
+  assert.match(get("load-status").textContent, /Saved site_raw_vs_model\.gif \(8 frames, 964×424 px/);
+  assert.equal(get("gif-a").disabled, false);
+  fs.writeFileSync(path.join(root, "export.gif"), Buffer.from(await savedGif.arrayBuffer()));
+  fs.writeFileSync(path.join(root, "export_source.bin"), gifSource(964, 424));
   console.log("Atomic image swaps, stale requests, image failures, wipe, all-model ECD statistics, bands and colorbars passed.");
 })().catch(error => {console.error(error); process.exitCode = 1;});

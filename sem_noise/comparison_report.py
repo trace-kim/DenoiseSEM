@@ -33,6 +33,8 @@ def comparison_metrics(record: dict) -> list[dict]:
                 if summary["series"] == name:
                     values[f"{summary['method']}/ecd_sd"] = summary["median_cd_std"]
                     values[f"{summary['method']}/holes"] = summary["common_hole_count"]
+                    for axis in ("y", "x"):
+                        values[f"{summary['method']}/registration_3sigma_{axis}"] = summary.get(f"median_placement_3sigma_{axis}")
             arm = record["models"].get(name, {}).get("arm", {})
             rows.append({"site": site["name"], "series": name, "step": series["step"],
                          "refinement_device": series.get("refinement_backend", {}).get("device", "cpu"),
