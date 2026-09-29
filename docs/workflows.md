@@ -5,6 +5,10 @@ For average2/average4 datasets with or without affine registration, see
 One command mirrors the raw `all/train/test` tree and builds compatible training
 caches with the existing site splits; training and comparison use directory overrides.
 
+To run burst diffusion's training objective on real repeats (T = 16; one model for single frames and
+registered m-frame means, compared against registered raw averages), see
+[burst diffusion on real repeats](../edge_denoise/docs/real_sem_next_phase.md#burst-diffusion-on-real-repeats-t--16-single-frame-and-m-frame-inputs).
+
 For a visual audit of the six real-N2N registration/brightness treatments, see
 [the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md): full-image
 frame sliders, overlapping wipe, inspectable contours, and direct output/raw

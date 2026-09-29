@@ -12,10 +12,10 @@ import torch
 from PIL import Image
 
 from edge_denoise.device_sampling import sample_native_crops
-from edge_denoise.real_data import registration_contrast
+# Shared with fused-model inference so both use one block estimator.
+from edge_denoise.real_fusion import block_geometry
 from edge_denoise.uint8_output import average_uint8
-from sem_noise.pair_matching import GeometryEstimationError, check_geometry_reference, estimate_geometry
-from sem_noise.registration import clip_mask
+from sem_noise.pair_matching import GeometryEstimationError  # noqa: F401 -- re-exported for callers
 
 
 BLOCK_MANIFEST = "block_average.json"
@@ -51,40 +51,6 @@ def load_block_manifest(folder: Path, files: list[Path]) -> dict | None:
             if support.parent != folder.resolve() or file_digest(support) != frame["support_sha256"]:
                 raise ValueError(f"block support changed or escapes site: {support}")
     return record
-
-
-def block_geometry(frames: np.ndarray) -> tuple[np.ndarray, list[dict], int | None]:
-    """Training's translation-seeded affine estimator, with first usable anchor."""
-    matrices = np.repeat(np.eye(2, 3)[None], len(frames), axis=0)
-    diagnostics, reference = [], None
-    seed = np.eye(2, 3)
-    for index, frame in enumerate(frames):
-        row = {"frame": index + 1, "status": "registered", "reason": ""}
-        diagnostics.append(row)
-        contrast = registration_contrast(torch.from_numpy(frame.astype(np.float32) / 255)[None, None])
-        row["contrast"] = contrast
-        if contrast < .005:
-            row.update(status="skipped_low_contrast", reason="insufficient structured contrast; retained in native coordinates")
-            continue
-        invalid = clip_mask(frame, (0, 255))
-        try:
-            check_geometry_reference(frame, sigma=1, invalid=invalid)
-            if reference is None:
-                reference = index
-                row["status"] = "reference"
-                continue
-            translation, _ = estimate_geometry(frames[reference], frame, motion="translation", initial=seed,
-                sigma=1, input_invalid=clip_mask(frames[reference], (0, 255)), target_invalid=invalid)
-            matrix, score = estimate_geometry(frames[reference], frame, motion="affine", initial=translation,
-                sigma=1, input_invalid=clip_mask(frames[reference], (0, 255)), target_invalid=invalid)
-        except GeometryEstimationError as error:
-            row.update(status="skipped_failed_registration", reason=str(error))
-            continue
-        matrices[index], seed = matrix, translation
-        row["score"] = score
-    for row, matrix in zip(diagnostics, matrices):
-        row["matrix"] = matrix.tolist()
-    return matrices, diagnostics, reference
 
 
 @torch.no_grad()
@@ -206,6 +172,69 @@ def add_average_series(root: Path, site: dict, counts: list[int], *, device: str
                     save_rgb(root / relative, values)
                     series["frames"].append(row)
                 created.append(name)
+    return created
+
+
+def add_fused_series(root: Path, site: dict, model: str, denoiser, counts: list[int], *, stride: int,
+                     tile_batch: int, prediction_ranges: list[dict]) -> list[str]:
+    """One burst-fusion output per consecutive raw block, beside ``average{m}``.
+
+    Blocks are exactly those of :func:`add_average_series` (trailing
+    incomplete groups omitted). Each output is the model's denoised m-frame
+    mean in the block anchor's coordinates, exported once to uint8; pixels
+    some member does not support are saved as a support mask and excluded from
+    contours. The series joins the model's single-frame series in one family.
+    """
+    from tools.real_sem_compare import read_uint8, save_rgb
+    from edge_denoise.uint8_output import prediction_uint8
+
+    raw = site["series"]["raw"]
+    if any(frame.get("common_support_path") for frame in raw["frames"]):
+        raise ValueError("fused series need raw acquisitions, not derived block images with support masks")
+    black, white = denoiser.config.data.black_level, denoiser.config.data.white_level
+    created = []
+    for count in counts:
+        name = f"{model}_fuse{count}"
+        if name in site["series"]:
+            continue
+        blocks, remainder = divmod(len(raw["frames"]), count)
+        if not blocks:
+            print(f"{site['name']}/{name}: no complete {count}-frame block", flush=True)
+            continue
+        if remainder:
+            print(f"{site['name']}/{name}: omits {remainder} trailing acquisitions", flush=True)
+        series = {"step": denoiser.checkpoint_step, "frames": [], "frames_per_output": count, "source_series": "raw",
+                  "registered": True, "remainder_frames": remainder, "family": model, "fusion_model": model}
+        site["series"][name] = series
+        started = time.perf_counter()
+        for block in range(blocks):
+            inputs = raw["frames"][block * count:(block + 1) * count]
+            pixels = np.stack([read_uint8(root / f["path"]) for f in inputs])
+            first, last = inputs[0]["index"], inputs[-1]["index"]
+            relative = Path(site["name"]) / name / f"block_{block + 1:03d}_{first:03d}-{last:03d}.png"
+            audit = {"site": site["name"], "model": name, "filename": relative.as_posix(), "status": "pending"}
+            prediction_ranges.append(audit)
+            try:
+                prediction, valid, fusion = denoiser.denoise_frames(pixels, stride=stride, tile_batch=tile_batch,
+                                                                    clip_output=False)
+                quantized, stats = prediction_uint8(prediction, black, white)
+            except Exception as error:
+                audit.update(status="failed", error=str(error))
+                raise
+            audit.update(stats, status="complete")
+            save_rgb(root / relative, quantized)
+            row = {"index": block + 1, "order": float(np.mean([f["order"] for f in inputs])),
+                   "first_acquisition": first, "last_acquisition": last, "path": relative.as_posix(),
+                   "timestamp_s": (float(np.mean([f["timestamp_s"] for f in inputs]))
+                                   if all(f["timestamp_s"] is not None for f in inputs) else None),
+                   **stats, "fusion_input": fusion}
+            if not valid.all():
+                support_path = relative.with_name(relative.stem + "_support.png")
+                Image.fromarray(valid.astype(np.uint8) * 255).save(root / support_path)
+                row["common_support_path"] = support_path.as_posix()
+            series["frames"].append(row)
+        series.setdefault("timings_s", {})["fusion_inference_and_pngs"] = time.perf_counter() - started
+        created.append(name)
     return created
 
 

@@ -50,13 +50,39 @@ def checkpoints_from_suite(path: Path) -> dict[str, Path]:
 
 def check_checkpoint(checkpoint: Path, paths: list[Path], output_dir: Path, *, device: str,
                      full_frame: bool = False, max_dn: int = 1,
-                     max_changed_fraction: float = .01) -> dict:
+                     max_changed_fraction: float = .01, fuse_frames: int = 1) -> dict:
+    """``fuse_frames > 1``: ONE full-frame burst-fusion output from the first
+    ``fuse_frames`` acquisitions, built (registered mean and network) on each backend."""
     outputs, rows, timings, audits = {}, [], {}, {}
+    if fuse_frames > 1 and len(paths) < fuse_frames:
+        raise ValueError("fused equivalence needs --frames >= --fuse-frames")
     for label, backend in (("cpu", "cpu"), ("candidate", device)):
         started = time.perf_counter()
         denoiser = Denoiser.from_checkpoint(checkpoint, device=backend)
         timings[f"{label}_load_s"] = time.perf_counter() - started
         saved = []
+        if fuse_frames > 1:
+            if not denoiser.is_fusion:
+                raise ValueError("--fuse-frames requires a real burst-fusion checkpoint")
+            raws = np.stack([read_native(source) for source in paths[:fuse_frames]])
+            if raws.dtype != np.uint8:
+                raise ValueError("equivalence inputs must be native uint8")
+            if backend.startswith("cuda"):
+                torch.cuda.synchronize(torch.device(backend))
+            started = time.perf_counter()
+            predicted, _, record = denoiser.denoise_frames(raws, stride=denoiser.image_size // 2, tile_batch=4,
+                                                           clip_output=False)
+            if backend.startswith("cuda"):
+                torch.cuda.synchronize(torch.device(backend))
+            timings[f"{label}_inference_s"] = time.perf_counter() - started
+            pixels, audit = prediction_uint8(predicted, denoiser.config.data.black_level, denoiser.config.data.white_level)
+            destination = output_dir / label / f"fuse{fuse_frames}.png"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(np.repeat(pixels[..., None], 3, axis=2)).save(destination)
+            outputs[label], audits[f"{label}/fuse{fuse_frames}"] = [destination], audit
+            timings[f"{label}_anchor_frame"] = record["anchor_frame"]
+            del denoiser
+            continue
         for index, source in enumerate(paths):
             raw = read_native(source)
             if raw.dtype != np.uint8:
@@ -88,7 +114,8 @@ def check_checkpoint(checkpoint: Path, paths: list[Path], output_dir: Path, *, d
             audits[f"{label}/{index}"] = audit  # Production range checks only.
         outputs[label] = saved
         del denoiser
-    for index, source in enumerate(paths):
+    compared = paths[:1] if fuse_frames > 1 else paths
+    for index, source in enumerate(compared):
         # Quantize, save, decode; never measure intermediate predictions.
         cpu = read_native(outputs["cpu"][index])
         candidate = read_native(outputs["candidate"][index])
@@ -116,11 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--cpu-threads", type=int, default=2)
     parser.add_argument("--full-frame", action="store_true")
+    parser.add_argument("--fuse-frames", type=int, default=1,
+                        help="Burst-fusion checkpoints: fuse the first N frames into one full-frame output (N <= --frames)")
     parser.add_argument("--max-dn", type=int, default=1)
     parser.add_argument("--max-changed-fraction", type=float, default=.01)
     args = parser.parse_args(argv)
     try:
-        if args.frames < 1 or args.cpu_threads < 1 or args.max_dn < 0 or not 0 <= args.max_changed_fraction <= 1:
+        if args.fuse_frames < 1 or args.frames < 1 or args.cpu_threads < 1 or args.max_dn < 0 or not 0 <= args.max_changed_fraction <= 1:
             raise ValueError("invalid frame/thread count or equivalence tolerances")
         checkpoints = checkpoints_from_suite(args.from_suite) if args.from_suite else {}
         for item in args.checkpoint:
@@ -137,13 +166,15 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir.mkdir(parents=True, exist_ok=False)
         torch.set_num_threads(args.cpu_threads)
         report = {"measurement_source": "decoded saved uint8 RGB PNGs", "device": args.device,
-                  "mode": "full_frame" if args.full_frame else "center_crop", "models": {},
+                  "mode": (f"fuse{args.fuse_frames}_full_frame" if args.fuse_frames > 1
+                           else "full_frame" if args.full_frame else "center_crop"), "models": {},
                   "max_dn": args.max_dn, "max_changed_fraction": args.max_changed_fraction}
         for name, checkpoint in checkpoints.items():
             try:
                 result = check_checkpoint(checkpoint, paths, args.output_dir / name, device=args.device,
                                           full_frame=args.full_frame, max_dn=args.max_dn,
-                                          max_changed_fraction=args.max_changed_fraction)
+                                          max_changed_fraction=args.max_changed_fraction,
+                                          fuse_frames=args.fuse_frames)
             except (ValueError, OSError, RuntimeError) as error:
                 result = {"passed": False, "error": str(error)}
             report["models"][name] = result

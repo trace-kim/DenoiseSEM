@@ -405,3 +405,116 @@ first-usable affine references, failed-fit seed preservation, native brightness
 fallback, all five training CLI paths after failed-suite restart, shared-cache
 refresh/reuse and checkpoint restoration. Real H100 training remains a remote
 check; no server artifacts were required for this local validation.
+
+## Burst diffusion on real repeats (T = 16, single-frame and m-frame inputs)
+
+Agreed 2026-09-29. `burst_diffusion`'s own trainer cannot use prepared real data:
+it refuses the cache and averages unregistered frames. Its training objective
+therefore runs here, as `objective.fusion.align: matched`
+(`edge_denoise/real_fusion.py`), with the iterative sampler dropped. The network
+outputs `E[clean | input]`, not a plausible next frame, so iterating from one frame
+adds no information. The level `t = m` is a dose label.
+
+- **Input.** The mean of `m` **consecutive** acquisitions (`m` uniform in 1..16),
+  formed in the native coordinates of the first member with usable geometry. Every
+  other member is sampled once, using the inline affine matrices, and
+  percentile-mapped to that anchor. Pixels a member cannot support average the
+  members that can.
+- **Target.** One other acquisition of the site, matched into the same crop exactly
+  like the real N2N target. The loss uses only pixels every member supports, minus
+  the usual 3-px border.
+- **Single frame.** `m = 1` is bit-identical to the matched N2N pair (regression
+  test). The recipe `sem_real_burst_t16.yml` trains **fresh** for 30k steps with the
+  teacher's backbone and effective batch 16, using a plain L2 image loss. The single
+  frame gets 1/16 of the training samples: this is a generalist-vs-specialist
+  comparison, not a matched budget at `m = 1`.
+- **Inference.** An m-frame block is registered with the same block estimator as the
+  `average{m}_registered` baseline. The fused block and the registered average
+  therefore share their geometry, and they differ in the network and in the input
+  percentile matching. Output brightness and geometry are never corrected. Pixels
+  outside the common support are saved as a mask and excluded from contours.
+  Untrained frame counts (above 16) are refused.
+
+Sites need at least 17 acquisitions. Run inside the GPU allocation. Reusing the
+suite's verified `real_matching.json` avoids re-measuring geometry; its dataset
+and affine/percentile settings are checked before reuse.
+
+```bash
+DATASET=/data/260924_prep_data/train_align_none
+SUITE=runs/edge_denoise/260922_real_suite
+RUN_DATE=260929
+RUN="runs/edge_denoise/${RUN_DATE}_real_burst_t16_affine_percentile"
+
+# 1. Timing pilot (writes nothing into the production run).
+python -m edge_denoise train --config edge_denoise/configs/sem_real_burst_t16.yml \
+  --dataset-dir "$DATASET" --real-matching-cache "$SUITE/real_matching.json" \
+  --run-dir "runs/edge_denoise/pilots/${RUN_DATE}_real_burst_t16_affine_percentile" \
+  --max-steps 100 --device cuda:0 --cpu-threads 2 --profile
+```
+
+In the pilot's `timings.json`, compare `stage_seconds.fusion_input` (building the
+registered m-frame inputs) with `forward_loss_backward`. Choose the production
+budget only after this check.
+
+```bash
+# 2. Production run: per-run log, explicit exit code, repeat the block to resume.
+(
+  set -o pipefail
+  mkdir -p "$RUN"
+  resume=()
+  if [ -f "$RUN/ckpt_latest.pt" ]; then resume=(--resume); fi
+  python -m edge_denoise train --config edge_denoise/configs/sem_real_burst_t16.yml \
+    --dataset-dir "$DATASET" --real-matching-cache "$SUITE/real_matching.json" \
+    --run-dir "$RUN" --device cuda:0 --cpu-threads 2 "${resume[@]}" \
+    2>&1 | tee -a "$RUN/training.log"
+  echo "burst_t16 training exit code: $?"
+)
+```
+
+TensorBoard shows `val/loss_m01`, `val/loss_m04` and `val/loss_m16`, plus
+input/prediction/target panels per level. These are matched-target losses, not
+metrology. `training_status.json` records completion.
+
+```bash
+# 3. CPU/GPU equivalence on decoded saved uint8 PNGs: one fused 16-frame output,
+#    then the single-frame centre crop.
+python tools/check_real_sem_equivalence.py --checkpoint burst_t16="$RUN/ckpt_latest.pt" \
+  --site-dir /data/260904_raw_data/test/260904_0947-13 --frames 16 --fuse-frames 16 \
+  --device cuda:0 --cpu-threads 2 --output-dir "output/${RUN_DATE}_burst_t16_fused_equivalence"
+python tools/check_real_sem_equivalence.py --checkpoint burst_t16="$RUN/ckpt_latest.pt" \
+  --device cuda:0 --cpu-threads 2 --output-dir "output/${RUN_DATE}_burst_t16_equivalence"
+
+# 4. Validation report: single-frame controls, the burst model at m = 1 and fused
+#    m = 2/4/8/16, and registered raw averages of the same blocks.
+VAL_SITE=/path/to/a/prepared-validation-sites-original-raw-folder
+python tools/real_sem_compare.py --only-checkpoints \
+  --checkpoint n2n=runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt \
+  --checkpoint ft_noisy=runs/edge_denoise/260922_real_ft_noisy_affine_percentile/ckpt_latest.pt \
+  --checkpoint burst_t16="$RUN/ckpt_latest.pt" \
+  --fusion-frames 2,4,8,16 --average-frames 2,4,8,16 \
+  --split val --site-dir "$VAL_SITE" \
+  --output-dir "output/${RUN_DATE}_burst_t16_validation" --device cuda:0 --metrology-device cuda:0
+```
+
+Replace the control checkpoints with your actual run folders. Add
+`--average-model ft_noisy` to include averages of m single-frame outputs.
+
+**Reading the report.** The frames-vs-precision table puts `burst_t16`
+(m = 1) and `burst_t16_fuse{2,4,8,16}` in one family, next to `raw_registered`
+(`average{m}_registered`). Every family is compared on identical contributing holes.
+Each fused row stores its anchor frame, level, geometry diagnostics and input
+brightness coefficients (`fusion_input` in `comparison.json`).
+
+**Caveats.**
+- A 128-frame site gives only 8 outputs at m = 16 (for both the fused arm and the
+  raw average), so read their 3σ values with the bootstrap intervals.
+- Training measures geometry once per site. Inference fits each block from its
+  own first usable frame. Both use the same translation-seeded affine ECC.
+- Keep the test site locked until settings are chosen on validation.
+
+Local verification (2026-09-29): 1,105 passed and 3 skipped (1,108 collected;
+the full-suite collection shows no module collisions). They ran in per-package
+and per-file processes because the development PC's commit memory was
+exhausted, and the one CUDA Otsu case ran with the GPU visible. A local CUDA vs
+CPU fused input on a 1024² frame agreed to 4×10⁻⁵ DN. No H100 timing or
+real-data quality claim is made.

@@ -73,6 +73,12 @@ class DataConfig(_StrictModel):
         return self
 
 
+# Synthetic-burst fusion fields with no meaning for prepared real SEM, whose
+# geometry, brightness and loss border come from data.real_matching.
+MATCHED_UNUSED_FIELDS = ("targets_per_sample", "warp_margin", "registration_sigma",
+                         "predenoised_sigma", "registration_radius", "debias_peak")
+
+
 class FusionConfig(_StrictModel):
     """Drift-robust burst fusion (see ``edge_denoise/fusion.py``).
 
@@ -118,6 +124,15 @@ class FusionConfig(_StrictModel):
       and averaged -- the frame target's unbiasedness with a fraction of its
       gradient noise (the complement mean resamples its frames and inherits
       the interpolation blur; this does not).
+    - ``align: matched`` is the prepared real-SEM mode (``edge_denoise/
+      real_fusion.py``): ``data.real_matching`` supplies the measured geometry
+      and percentile brightness, the subset is ``m`` CONSECUTIVE acquisitions
+      averaged in the coordinates of its first usable frame, and the target
+      is one other acquisition of the site matched into those coordinates,
+      exactly like the real Noise2Noise target.  ``frames_per_burst`` is then
+      the minimum number of acquisitions per site (the highest level plus the
+      target); the synthetic-only registration, warp and debias fields are
+      rejected rather than silently ignored.
     """
 
     frames_per_burst: int = Field(default=16, ge=2)
@@ -129,7 +144,7 @@ class FusionConfig(_StrictModel):
     # resampling a target.
     targets_per_sample: int = Field(default=4, ge=1)
     level_cap: int | None = Field(default=None, ge=1)
-    align: Literal["registered", "none", "truth"] = "registered"
+    align: Literal["registered", "none", "truth", "matched"] = "registered"
     registration: Path | None = None
     condition_on_level: bool = True
     warp_margin: int = Field(default=2, ge=0)
@@ -150,6 +165,14 @@ class FusionConfig(_StrictModel):
             raise ValueError("fusion.align 'registered' requires fusion.registration (a table path)")
         if self.align != "registered" and self.registration is not None:
             raise ValueError("fusion.registration is only used with fusion.align 'registered'")
+        if self.align == "matched":
+            # Compare values, not "fields set": saved checkpoint configs spell out every default.
+            unused = [name for name in MATCHED_UNUSED_FIELDS
+                      if getattr(self, name) != type(self).model_fields[name].default]
+            if unused:
+                raise ValueError(f"fusion.align 'matched' (prepared real SEM) does not use {', '.join(unused)}")
+            if self.target != "frame":
+                raise ValueError("fusion.align 'matched' supports target 'frame' only (one matched raw acquisition)")
         return self
 
 
@@ -411,6 +434,9 @@ class Config(_StrictModel):
             raise ValueError("image_to_hybrid initialization requires hybrid representation and init_checkpoint")
         if self.objective.fusion is not None and self.training.defect_augment is not None:
             raise ValueError("training.defect_augment is not supported with objective.fusion")
+        if (self.objective.fusion is not None and self.objective.fusion.align == "matched"
+                and self.data.real_matching is None):
+            raise ValueError("fusion.align 'matched' requires data.real_matching on a prepared real SEM dataset")
         image_size = self.data.image_size
         num_levels = len(self.model.ch_mult)
         divisor = 2 ** (num_levels - 1)

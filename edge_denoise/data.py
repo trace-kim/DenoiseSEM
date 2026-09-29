@@ -102,6 +102,7 @@ class PairBatch:
     second_matrices: torch.Tensor | None = None  # Output A crop -> native second crop, pixel coordinates.
     second_brightness: torch.Tensor | None = None  # Second prediction -> A, gain/offset in model units.
     second_valid: torch.Tensor | None = None
+    levels: torch.Tensor | None = None  # [B] real burst fusion: frames averaged into the input (t = m).
 
 
 @dataclass
@@ -117,6 +118,7 @@ class ValPairBatch:
     second_matrices: torch.Tensor | None = None
     second_brightness: torch.Tensor | None = None
     second_valid: torch.Tensor | None = None
+    levels: torch.Tensor | None = None
 
 
 def _to_model_chw(crop: np.ndarray) -> np.ndarray:

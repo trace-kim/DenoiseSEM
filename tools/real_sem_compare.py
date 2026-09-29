@@ -66,6 +66,9 @@ class ComparisonSettings(BaseModel):
     refine_estimator: Literal["gradient_peak", "threshold", "erf"] | None = None
     average_frames: list[int] = Field(default_factory=lambda: [8])
     average_model: str | None = None
+    # Frame counts for burst-fusion checkpoints: {model}_fuse{m} over the same
+    # consecutive blocks as the averages; empty = single-frame outputs only.
+    fusion_frames: list[int] = Field(default_factory=list)
     template_limit: bool = False
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
@@ -86,6 +89,13 @@ class ComparisonSettings(BaseModel):
     def _average_counts(cls, values: list[int]) -> list[int]:
         if not values or any(v < 2 or v > 64 for v in values) or len(set(values)) != len(values):
             raise ValueError("average_frames requires unique counts from 2 through 64")
+        return sorted(values)
+
+    @field_validator("fusion_frames")
+    @classmethod
+    def _fusion_counts(cls, values: list[int]) -> list[int]:
+        if any(v < 2 or v > 64 for v in values) or len(set(values)) != len(values):
+            raise ValueError("fusion_frames requires unique counts from 2 through 64")
         return sorted(values)
 
 
@@ -135,9 +145,9 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
         for name in names:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
                 raise ValueError(f"Use letters, digits, underscores or hyphens for names: {name}")
-    if any(name.casefold() == "raw" or re.fullmatch(r"average\d+(?:_registered)?|.*_average\d+", name.casefold())
+    if any(name.casefold() == "raw" or re.fullmatch(r"average\d+(?:_registered)?|.*_average\d+|.*_fuse\d+", name.casefold())
            for name in config.checkpoints):
-        raise ValueError("raw, average8 and average128 are reserved series names")
+        raise ValueError("raw, average8, average128 and *_fuse<m> are reserved series names")
     if config.average_model is not None and config.average_model not in config.checkpoints:
         raise ValueError("--average-model must name an included validation-selected model")
     if config.template_limit and config.contour_method == "otsu":
@@ -187,8 +197,8 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
     from sem_noise.io import file_hash
 
     config = denoiser.config
-    if config.objective.fusion is not None:
-        raise ValueError("This comparison requires single-frame denoisers; burst fusion needs a burst-input comparison")
+    if config.objective.fusion is not None and config.objective.fusion.align != "matched":
+        raise ValueError("Synthetic burst fusion checkpoints are not real-SEM comparison arms")
     manifest_path = arm.prepared_manifest
     if manifest_path is None:
         try:
@@ -238,6 +248,14 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
             "block_averaging": manifest.get("block_averaging"),
             "inline_matching": matching.model_dump(mode="json") if matching else None,
             "warnings": [] if checkpoint_digest else ["Older checkpoint has no dataset fingerprint; manifest linkage cannot be verified."]}
+
+
+def checkpoint_is_fusion(path: Path) -> bool:
+    """Read only the stored config (memory-mapped), before hours of analysis."""
+    import torch
+
+    payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    return bool((payload.get("config") or {}).get("objective", {}).get("fusion"))
 
 
 def validate_comparable_arm(metadata: dict, model_config: dict, previous: dict[str, dict]) -> None:
@@ -778,6 +796,8 @@ def run(config: ComparisonSettings) -> dict:
 
     save()
     try:
+        if config.fusion_frames and not any(checkpoint_is_fusion(arm.checkpoint) for arm in config.checkpoints.values()):
+            raise ValueError("--fusion-frames requires at least one real burst-fusion checkpoint")
         for name, files in files_by_site.items():
             from tools.real_sem_averages import load_block_manifest
 
@@ -877,6 +897,12 @@ def run(config: ComparisonSettings) -> dict:
                             "margin": denoiser.default_margin,
                             "stride": min(48, denoiser.image_size) if denoiser.image_size <= 64 else denoiser.image_size // 2}
             model_record["stride"] = max(1, min(model_record["stride"], denoiser.image_size - 2 * denoiser.default_margin))
+            if denoiser.config.objective.fusion is not None:
+                fusion = denoiser.config.objective.fusion
+                for count in config.fusion_frames:
+                    denoiser.level_for(count)  # Refuse untrained frame counts before any inference.
+                model_record["fusion"] = {"levels": fusion.levels, "fusion_frames": config.fusion_frames,
+                                          "single_frame_level": denoiser.level_for(1)}
             record["models"][model_name] = model_record
             for site in record["sites"]:
                 series = {"frames": [], "step": denoiser.checkpoint_step}
@@ -916,6 +942,24 @@ def run(config: ComparisonSettings) -> dict:
                                                         site["match_gate_px"], segment, **contour_options, **execution_options)
                 site["observations"].extend(observations)
                 site["contours"].extend(contours)
+                if denoiser.config.objective.fusion is not None and config.fusion_frames:
+                    from tools.real_sem_averages import add_fused_series
+
+                    added = add_fused_series(root, site, model_name, denoiser, config.fusion_frames,
+                                             stride=model_record["stride"], tile_batch=config.tile_batch,
+                                             prediction_ranges=record["prediction_ranges"])
+                    for name in added:
+                        fused = site["series"][name]
+                        started_registration = time.perf_counter()
+                        for frame, track in zip(fused["frames"], registration_tracks(reference,
+                                [root / f["path"] for f in fused["frames"]], noise.registration_sigma)):
+                            frame.update(track)
+                        fused.setdefault("timings_s", {})["translation_diagnostics"] = time.perf_counter() - started_registration
+                        analyze_series(root, name, fused, noise, **native_options)
+                        observations, contours = measure_series(root, name, fused, np.array(site["template_centroids"]),
+                            site["match_gate_px"], segment, **contour_options, **execution_options)
+                        site["observations"].extend(observations)
+                        site["contours"].extend(contours)
                 save()
             with Progress(f"{model_name}: releasing denoiser"):
                 del denoiser
@@ -1214,7 +1258,7 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
             setattr(config, field, (ROOT / value.expanduser()).resolve())
     for field in ("metrology_device", "device", "tile_batch", "difference_limit_dn", "contour_method",
                   "analysis_batch", "analysis_memory_mb", "io_workers", "tensorboard", "evaluation_split", "refine_estimator",
-                  "average_frames", "average_model", "template_limit"):
+                  "average_frames", "average_model", "fusion_frames", "template_limit"):
         value = getattr(args, field)
         if value is not None:
             setattr(config, field, value)
@@ -1254,6 +1298,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--average-frames", type=lambda value: [int(v) for v in value.split(",")],
                         help="Nonoverlapping average counts, e.g. 2,4,8 (default 8); incomplete trailing groups are omitted")
     parser.add_argument("--average-model", help="Validation-selected model name for registered AI averages; never selected using test SD")
+    parser.add_argument("--fusion-frames", type=lambda value: [int(v) for v in value.split(",")],
+                        help="Frame counts for burst-fusion checkpoints, e.g. 2,4,8,16: one fused output per consecutive block")
     parser.add_argument("--template-limit", action=argparse.BooleanOptionalAction, default=None,
                         help="Add the model-free single-frame template diagnostic; uses this site's own average, not deployable")
     parser.add_argument("--metrology-device", help="Otsu/native analysis or current-method refinement device: cpu, cuda, or cuda:N")

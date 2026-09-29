@@ -1,0 +1,60 @@
+# Burst diffusion's training objective on prepared real SEM repeats, T = 16,
+# without its iterative sampler (edge_denoise/real_fusion.py).
+#
+# Each sample averages m CONSECUTIVE acquisitions (m uniform in 1..16) in the
+# native coordinates of their first usable frame, with inline affine geometry
+# and percentile brightness mapping each member to that anchor. The network
+# is told t = m; the target is one other acquisition of the site matched into
+# the same crop (the real N2N target). Its optimum is E[clean | m-frame mean],
+# so one model serves single frames (m = 1: exactly the matched N2N pair) and
+# m-frame registered means. Plain L2 image loss, the burst-diffusion loss.
+#
+# Trained FRESH for 30k steps: the same backbone, effective batch and budget
+# as the real N2N teacher, so the m = 1 row is a generalist-vs-specialist
+# comparison. Needs a prepare-real --align none dataset with >= 17 frames per
+# site (frames_per_burst = highest level + one target). Override paths on the
+# command line; see edge_denoise/docs/real_sem_next_phase.md.
+data:
+  dataset_dir: data/SEM-real-none
+  image_size: 512
+  channels: 1
+  real_matching:
+    registration: affine
+    brightness: percentile
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 0.0
+  lambda_consistency: 0.0
+  consistency_domain: image
+  loss: l2
+  fusion:
+    align: matched
+    frames_per_burst: 17
+    levels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    condition_on_level: true
+model:
+  ch: 64
+  ch_mult: [1, 1, 2, 2, 4, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_real_burst_t16_affine_percentile
+  batch_size: 4
+  accumulation_steps: 4
+  precision: fp32
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: cuda:0
+  log_every: 50
+  val_every: 1000
+  val_images: 4
+  checkpoint_every: 1000

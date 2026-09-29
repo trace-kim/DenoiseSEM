@@ -403,11 +403,14 @@ def fixed_windows(bounds: list[int], size: int) -> list[tuple[int, int]]:
 class RealPairFactory(PairFactory):
     """Use native raw inputs, registered targets, and aligned consistency."""
 
+    #: Only the matched real-fusion subclass accepts ``objective.fusion``.
+    supports_fusion = False
+
     def __init__(self, cache: BurstCache, config: Config, *, seed: int):
         assert cache.real_metadata is not None
         objective = config.objective
         if (objective.target not in ("noisy", "noisy_mean")
-                or objective.gradient_target != "target" or objective.fusion is not None
+                or objective.gradient_target != "target" or (objective.fusion is not None and not self.supports_fusion)
                 or objective.target_debias_peak is not None or config.training.defect_augment is not None):
             raise ValueError("Real SEM supports noisy/noisy_mean targets, gradient_target=target, and optional image-output consistency; synthetic oracle/debias/augmentation/fusion settings are unsupported")
         if objective.representation == "gradient" and objective.lambda_consistency > 0:

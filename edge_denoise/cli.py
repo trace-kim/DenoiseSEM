@@ -276,8 +276,12 @@ def distill_targets(
 def denoise(
     checkpoint: Path = typer.Option(..., help="Checkpoint (.pt) to denoise with."),
     out: Path = typer.Option(..., help="Output directory; real uint8 measurements use the saved PNG, TIFF is diagnostic only."),
-    input: Optional[Path] = typer.Option(
-        None, help="A noisy measurement image of any size >= the training crop."
+    input: Optional[list[Path]] = typer.Option(
+        None,
+        help=(
+            "A noisy measurement image of any size >= the training crop. Repeat it with a "
+            "real burst-fusion checkpoint to fuse consecutive acquisitions into ONE output."
+        ),
     ),
     dataset: Optional[Path] = typer.Option(None, help="Burst dataset to pull a frame from."),
     source_index: int = typer.Option(0, min=0, help="Dataset source to denoise."),
@@ -324,11 +328,15 @@ def denoise(
 
     from .infer import Denoiser, load_measurement01
 
-    if (input is None) == (dataset is None):
+    if (not input) == (dataset is None):
         raise typer.BadParameter("provide exactly one of --input or --dataset")
     denoiser = Denoiser.from_checkpoint(checkpoint, device=device, use_ema=ema)
     image_size = denoiser.image_size
     stride = stride if stride is not None else (min(48, image_size) if image_size <= 64 else image_size // 2)
+    if input and len(input) > 1:
+        _denoise_fused(denoiser, input, out, stride=stride, tile_batch=tile_batch, margin=margin, full=full)
+        return
+    input = input[0] if input else None
 
     clean_path: Path | None = None
     frame01 = None
@@ -416,6 +424,41 @@ def denoise(
         for label, tensor in (("input", measurement_chw), ("denoised", denoised_chw)):
             value01 = ((tensor.clamp(-1, 1) + 1) / 2).numpy().transpose(1, 2, 0)
             typer.echo(f"PSNR vs clean [{label}]: {psnr(clean01, value01):.2f} dB")
+
+
+def _denoise_fused(denoiser, inputs: list[Path], out: Path, *, stride: int, tile_batch: int,
+                   margin: Optional[int], full: bool) -> None:
+    """Fuse consecutive native uint8 acquisitions with a real burst-fusion checkpoint."""
+    import numpy as np
+    from PIL import Image
+
+    from .real_data import read_native
+    from .uint8_output import prediction_uint8
+
+    if not denoiser.is_fusion or denoiser.config.data.white_level is None:
+        raise typer.BadParameter("several --input frames need a real burst-fusion checkpoint (objective.fusion)")
+    if not full:
+        raise typer.BadParameter("multi-frame fusion denoises the full frame; omit --center-crop")
+    frames = [read_native(path) for path in inputs]
+    if any(frame.dtype != np.uint8 or frame.shape != frames[0].shape for frame in frames):
+        raise typer.BadParameter("fused inputs must be uint8 acquisitions of one size")
+    try:
+        prediction, valid, record = denoiser.denoise_frames(np.stack(frames), stride=stride, tile_batch=tile_batch,
+                                                            margin=margin, clip_output=False)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    pixels, audit = prediction_uint8(prediction, denoiser.config.data.black_level, denoiser.config.data.white_level)
+    stem = f"{inputs[0].stem}_fuse{len(inputs)}"
+    anchor = frames[record["anchor_frame"] - 1]
+    out.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.repeat(anchor[..., None], 3, axis=2)).save(out / f"{stem}_anchor_input.png")
+    Image.fromarray(np.repeat(pixels[..., None], 3, axis=2)).save(out / f"{stem}_denoised.png")
+    Image.fromarray(valid.astype(np.uint8) * 255).save(out / f"{stem}_support.png")
+    record.update(inputs=[str(path) for path in inputs], prediction_range=audit)
+    (out / f"{stem}_fusion.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    typer.echo(f"fused {len(inputs)} acquisitions at level {record['level']:g} (anchor frame "
+               f"{record['anchor_frame']}, {100 * record['common_valid_fraction']:.1f}% common support) into {out}; "
+               "measure the saved PNG inside the support mask")
 
 
 @app.command()

@@ -96,6 +96,21 @@ def percentile_mapping(input_quantiles: np.ndarray, target_quantiles: np.ndarray
     return gain, offset
 
 
+def brightness_to_anchor(anchor_quantiles: np.ndarray, frame_quantiles: np.ndarray,
+                         black: float, white: float) -> tuple[float, float]:
+    """Map a frame's normalized pixels to the anchor's: ``gain * unit + offset``.
+
+    The full-frame percentile OLS in DN, restated for the fixed dataset
+    normalization. Flat percentiles on either side cannot determine a gain,
+    so the pair keeps native brightness (1, 0).
+    """
+    if np.ptp(anchor_quantiles) == 0 or np.ptp(frame_quantiles) == 0:
+        return 1.0, 0.0
+    gain, offset_dn = percentile_mapping(anchor_quantiles, frame_quantiles)
+    # Fixed dataset normalization: g*((B-black)/range) + offset_unit.
+    return gain, (offset_dn + (gain - 1) * black) / (white - black)
+
+
 def compose_pair(matrices: np.ndarray, a: int, b: int) -> np.ndarray:
     """Map A's native coordinates directly to B's sampling coordinates."""
     return (matrices[b] @ np.linalg.inv(matrices[a]))[:2]
@@ -341,9 +356,7 @@ class MatchedRealPairFactory(RealPairFactory):
         available = self.brightness_available[index]
         if not (available[a] and available[b]):
             return 1.0, 0.0
-        gain, offset_dn = percentile_mapping(self.quantiles[index][a], self.quantiles[index][b])
-        # Fixed dataset normalization: g*((B-black)/range) + offset_unit.
-        return gain, (offset_dn + (gain - 1) * self.black) / (self.white - self.black)
+        return brightness_to_anchor(self.quantiles[index][a], self.quantiles[index][b], self.black, self.white)
 
     def _pair_matrix(self, index: int, a: int, b: int) -> np.ndarray:
         """An unavailable estimate disables geometry for the pair, never the frame."""

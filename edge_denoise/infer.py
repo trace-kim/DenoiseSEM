@@ -99,17 +99,44 @@ class Denoiser:
         return load_measurement01(path, black_level=self.config.data.black_level,
                                   white_level=self.config.data.white_level)
 
-    def denoise(self, frames: torch.Tensor, *, clip_output: bool = True) -> torch.Tensor:
+    @property
+    def is_fusion(self) -> bool:
+        """A burst-fusion checkpoint: one network for 1..max(levels) frame means."""
+        return self.config.objective.fusion is not None
+
+    def level_for(self, count: int) -> float:
+        """Backbone conditioning for a ``count``-frame input (1.0 for single-frame models)."""
+        fusion = self.config.objective.fusion
+        if fusion is None:
+            if count != 1:
+                raise ValueError("a single-frame checkpoint cannot denoise a multi-frame mean")
+            return 1.0
+        if count < 1:
+            raise ValueError("frame count must be positive")
+        if fusion.level_cap is not None:
+            count = min(count, fusion.level_cap)
+        elif count > max(fusion.levels):
+            raise ValueError(f"{count}-frame input exceeds the trained levels (max {max(fusion.levels)}); "
+                             "set fusion.level_cap only for a deliberate extrapolation")
+        return float(count) if fusion.condition_on_level else 1.0
+
+    def denoise(self, frames: torch.Tensor, *, clip_output: bool = True, level: float | None = None) -> torch.Tensor:
         """``[B, 1, S, S]`` noisy frames in [-1, 1] -> images on CPU.
 
         S must equal the training resolution. Clipping defaults to on; disable
         it to inspect the model's actual output range before quantization.
+        ``level`` conditions a fusion model on its input's frame count
+        (:meth:`level_for`); ``None`` is the single-frame constant.
         """
         if frames.dim() != 4:
             raise ValueError(f"frames must be [B, C, H, W], got shape {tuple(frames.shape)}")
         with torch.no_grad():
             batch = frames.to(device=self.device, dtype=torch.float32)
-            denoised = self.model.predict_image(batch)
+            if level is None:
+                denoised = self.model.predict_image(batch)
+            else:
+                denoised = self.model.predict_image(
+                    batch, t=torch.full((batch.shape[0],), float(level), device=self.device))
         return (denoised.clamp(-1.0, 1.0) if clip_output else denoised).cpu()
 
     @property
@@ -132,6 +159,7 @@ class Denoiser:
         tile_batch: int = 64,
         margin: int | None = None,
         clip_output: bool = True,
+        level: float | None = None,
     ) -> np.ndarray:
         """Denoise a full ``[H, W]`` float frame in [0, 1] of any size >= the
         training resolution; returns the same format.
@@ -148,13 +176,51 @@ class Denoiser:
         """
         margin = self.default_margin if margin is None else margin
         return denoise_full_frame(
-            lambda frames: self.denoise(frames, clip_output=clip_output),
+            lambda frames: self.denoise(frames, clip_output=clip_output, level=level),
             np.asarray(frame01, dtype=np.float64),
             tile=self.image_size,
             stride=max(1, min(stride, self.image_size - 2 * margin)),
             tile_batch=tile_batch,
             margin=margin,
         )
+
+    def denoise_frames(
+        self,
+        frames: np.ndarray,
+        *,
+        stride: int = 48,
+        tile_batch: int = 64,
+        margin: int | None = None,
+        clip_output: bool = True,
+        device: str | torch.device | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Denoise ``[m, H, W]`` native acquisitions of one site as ONE output.
+
+        A fusion checkpoint averages them with its training treatment
+        (:func:`~edge_denoise.real_fusion.fused_input`) and denoises the mean
+        at level ``m``; ``m = 1`` is the ordinary single-frame path. Returns
+        the normalized prediction in the anchor's coordinates, the mask of
+        pixels every member supports, and the input record.
+        """
+        from .real_fusion import fused_input
+
+        frames = np.asarray(frames)
+        data = self.config.data
+        if data.white_level is None:
+            raise ValueError("multi-frame inference requires a prepared real-SEM checkpoint")
+        level = self.level_for(len(frames))
+        matching = data.real_matching
+        if len(frames) > 1 and matching is None:
+            raise ValueError("multi-frame inference requires the checkpoint's inline real matching treatment")
+        mean01, valid, record = fused_input(
+            frames, black=data.black_level, white=data.white_level,
+            registration=matching.registration if matching is not None else "none",
+            brightness=matching.brightness if matching is not None else "none",
+            device=self.device if device is None else device)
+        prediction = self.denoise_full(mean01, stride=stride, tile_batch=tile_batch, margin=margin,
+                                       clip_output=clip_output, level=level)
+        record["level"] = level
+        return prediction, valid, record
 
     def denoise01(self, frames01: list[np.ndarray], *, max_batch: int = 10) -> list[np.ndarray]:
         """Denoise a list of ``[H, W, C]`` float arrays in [0, 1] (the exchange

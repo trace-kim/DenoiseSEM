@@ -265,7 +265,7 @@ def test_registration_uses_first_structured_anchor_and_preserves_seed_on_failure
         matrix[0, 2] = index
         return matrix, 1.
 
-    monkeypatch.setattr(averages, "estimate_geometry", estimate)
+    monkeypatch.setattr("sem_noise.pair_matching.estimate_geometry", estimate)
     matrices, diagnostics, reference = averages.block_geometry(frames)
     assert reference == 1 and diagnostics[0]["status"] == "skipped_low_contrast"
     assert diagnostics[3]["status"] == "skipped_failed_registration"

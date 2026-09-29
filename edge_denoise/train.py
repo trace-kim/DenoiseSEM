@@ -271,7 +271,19 @@ class Trainer:
         if self.cache.real_metadata is not None:
             from .real_data import RealPairFactory
 
-            if config.data.real_matching is None:
+            if objective.fusion is not None:
+                if objective.fusion.align != "matched":
+                    raise ValueError("burst fusion on prepared real SEM requires objective.fusion.align 'matched'")
+                from .real_fusion import MatchedRealFusionFactory
+
+                measurements = None if resume_payload is None else resume_payload["factory"].get("matching_measurements")
+                self.factory = MatchedRealFusionFactory(self.cache, config, seed=factory_seed,
+                                                        measurements=measurements, device=self.device,
+                                                        timings=self.timings)
+                logger.info("real burst fusion: levels %s, consecutive acquisitions, geometry=%s, brightness=%s",
+                            objective.fusion.levels, config.data.real_matching.registration,
+                            config.data.real_matching.brightness)
+            elif config.data.real_matching is None:
                 self.factory = RealPairFactory(self.cache, config, seed=factory_seed)
             else:
                 from .real_matching import MatchedRealPairFactory
@@ -481,6 +493,8 @@ class Trainer:
             if second is not None:
                 # One DDP forward per backward, also for the two-view loss.
                 prediction, prediction_second = self.train_model(torch.cat([inputs, second])).chunk(2)
+            elif batch.levels is not None:
+                prediction, prediction_second = self.train_model(inputs, batch.levels.to(self.device)), None
             else:
                 prediction, prediction_second = self.train_model(inputs), None
         terms = self._loss_terms(
@@ -681,6 +695,31 @@ class Trainer:
             writer.add_scalar("val/psnr", float(np.mean(psnr_values)), self.step)
         self.model.train()
 
+    def _validate_real_fusion(self, writer: SummaryWriter) -> None:
+        """Clean-free validation of real burst fusion at the lowest, 4-frame
+        and highest trained levels: matched-target losses and a panel of
+        input / prediction / target per level."""
+        levels = self.factory.levels
+        shown_levels = sorted({min(levels), max(levels)} | ({4} & set(levels)))
+        count = self.config.training.val_images
+        self.model.eval()
+        with ema_parameters(self.model, self.ema), torch.no_grad():
+            for level in shown_levels:
+                batch = self.factory.val_batch(count=count, level=level)
+                inputs = batch.inputs.to(self.device)
+                prediction = self.model(inputs, t=batch.levels.to(self.device))
+                terms = self._loss_terms(prediction, batch.targets.to(self.device), None,
+                                         margin=batch.loss_margin, **self._matching_arguments(batch))
+                writer.add_scalar(f"val/loss_m{level:02d}", float(self._combine(terms).item()), self.step)
+                for name, term in terms.items():
+                    writer.add_scalar(f"val/loss_{name}_m{level:02d}", float(term.item()), self.step)
+                shown = min(4, inputs.shape[0])
+                panels = [((tensor[:shown].clamp(-1.0, 1.0) + 1.0) / 2.0).cpu().numpy()
+                          for tensor in (inputs, prediction, batch.targets)]
+                rows = [np.concatenate([panel[i] for panel in panels], axis=-1) for i in range(shown)]
+                writer.add_image(f"val/input_pred_target_m{level:02d}", np.concatenate(rows, axis=-2), self.step)
+        self.model.train()
+
     def _validate(self, writer: SummaryWriter) -> None:
         if self.real_comparison_examples:
             from .real_comparison import log_examples
@@ -691,8 +730,11 @@ class Trainer:
                              white=self.config.data.white_level)
         if not self.cache.val_sources:
             return
-        if self.is_fusion:
+        if isinstance(self.factory, FusionFactory):
             self._validate_fusion(writer)
+            return
+        if self.is_fusion:
+            self._validate_real_fusion(writer)
             return
         count = self.config.training.val_images
         self.model.eval()
