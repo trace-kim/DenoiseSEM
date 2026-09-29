@@ -125,6 +125,7 @@ def load_settings(path: Path, *, root: Path = ROOT) -> ComparisonSettings:
 
 def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
     from sem_noise.io import natural_key
+    from tools.real_sem_averages import load_block_manifest
 
     if not config.checkpoints or not config.sites:
         raise ValueError("At least one named checkpoint and site are required")
@@ -157,12 +158,14 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
             raise ValueError(f"Site must be a flat directory: {source}")
         files = sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS),
                        key=lambda p: natural_key(p.name))
-        if len(files) != 128:
-            raise ValueError(f"{name}: expected exactly 128 frames, found {len(files)}")
+        blocks = load_block_manifest(source, files)
+        expected = 128 if blocks is None else blocks["source_frame_count"] // blocks["frames_per_output"]
+        if len(files) != expected or len(files) < 2:
+            raise ValueError(f"{name}: expected exactly {expected} frames, found {len(files)}")
         if settings.timestamps_s is not None:
             stamps = np.asarray(settings.timestamps_s)
-            if stamps.shape != (128,) or not np.isfinite(stamps).all() or not (np.diff(stamps) > 0).all():
-                raise ValueError(f"{name}: need 128 finite, strictly increasing timestamps_s")
+            if stamps.shape != (len(files),) or not np.isfinite(stamps).all() or not (np.diff(stamps) > 0).all():
+                raise ValueError(f"{name}: need {len(files)} finite, strictly increasing timestamps_s")
         shape = None
         for file in files:
             frame = read_uint8(file)
@@ -218,20 +221,21 @@ def checkpoint_arm_metadata(arm: ComparisonArm, denoiser: Denoiser) -> dict:
                          f"{source}: {registration}+{brightness}")
     # Registered/unaligned manifests have different hashes even when they use
     # the exact same native acquisitions and held-out sites. Compare raw content.
-    splits = {split: sorted(sorted(f["sha256"] for f in site["frames"])
+    splits = {split: sorted(sorted(h for f in site["frames"] for h in f.get("source_sha256", [f["sha256"]]))
                             for site in manifest["sites"] if site["split"] == split)
               for split in ("train", "val", "test")}
     content_split_hash = hashlib.sha256(json.dumps(splits, sort_keys=True).encode()).hexdigest()
-    excluded = sorted({f["sha256"] for site in manifest["sites"] if site["split"] in ("train", "val")
-                       for f in site["frames"]})
-    validation = sorted({f["sha256"] for site in manifest["sites"] if site["split"] == "val"
-                         for f in site["frames"]})
+    excluded = sorted({h for site in manifest["sites"] if site["split"] in ("train", "val")
+                       for f in site["frames"] for h in [f["sha256"], *f.get("source_sha256", [])]})
+    validation = sorted({h for site in manifest["sites"] if site["split"] == "val"
+                         for f in site["frames"] for h in [f["sha256"], *f.get("source_sha256", [])]})
     return {"registration": registration, "brightness": brightness, "settings_source": source,
             "prepared_manifest": str(manifest_path), "prepared_manifest_sha256": digest,
             "checkpoint_dataset_fingerprint": checkpoint_digest, "raw_content_split_sha256": content_split_hash,
             "split_site_counts": {split: len(sites) for split, sites in splits.items()},
             "train_val_content_hashes": excluded, "validation_content_hashes": validation,
             "prepared_registration": prepared,
+            "block_averaging": manifest.get("block_averaging"),
             "inline_matching": matching.model_dump(mode="json") if matching else None,
             "warnings": [] if checkpoint_digest else ["Older checkpoint has no dataset fingerprint; manifest linkage cannot be verified."]}
 
@@ -596,10 +600,13 @@ def prepare_reference(root: Path, site: dict, segment: SegmentConfig, *,
                         ["Hole correspondence unavailable: no complete holes detected in the full average. Local contours remain inspectable."])
     raw = site["series"]["raw"]["frames"]
     stamps = [f["timestamp_s"] for f in raw]
-    site["series"]["average128"] = {"step": 0, "frames": [{
-        "index": 1, "order": 64.5, "first_acquisition": 1, "last_acquisition": 128,
+    # Keep the legacy series key for saved-report/template compatibility.
+    # Its metadata and viewer label describe the actual input count.
+    site["series"]["average128"] = {"step": 0, "input_count": len(raw), "frames": [{
+        "index": 1, "order": (len(raw) + 1) / 2, "first_acquisition": 1, "last_acquisition": len(raw),
         "timestamp_s": float(np.mean(stamps)) if all(t is not None for t in stamps) else None,
-        "path": site["full_average"], "clipped": False}]}
+        "path": site["full_average"], "clipped": False,
+        **({"common_support_path": site["full_average_support"]} if site.get("full_average_support") else {})}]}
     return reference, template
 
 
@@ -735,13 +742,21 @@ def run(config: ComparisonSettings) -> dict:
     save()
     try:
         for name, files in files_by_site.items():
-            print(f"Preparing {name}: 128 raw frames and 16 averages", flush=True)
+            from tools.real_sem_averages import load_block_manifest
+
+            blocks = load_block_manifest(config.sites[name].source_dir, files)
+            print(f"Preparing {name}: {len(files)} input frames and block averages", flush=True)
             site = {"name": name, "series": {}, "warnings": [], "observations": [], "contours": []}
+            if blocks is not None:
+                site["input_block_averaging"] = {k: blocks[k] for k in
+                    ("frames_per_output", "registration", "brightness", "source_frame_count")}
             record["sites"].append(site)
             timestamps = config.sites[name].timestamps_s
             if timestamps is None and noise.frame_interval_s is not None:
-                timestamps = (np.arange(128) * noise.frame_interval_s).tolist()
-            raw_frames, total = [], None
+                centers = (np.arange(len(files)) if blocks is None else
+                           np.array([(f["first_acquisition"] + f["last_acquisition"]) / 2 - 1 for f in blocks["frames"]]))
+                timestamps = (centers * noise.frame_interval_s).tolist()
+            raw_frames, total, common_support = [], None, None
             with Progress(f"{name}: saving raw images and averages", total=len(files),
                           timings=site.setdefault("timings_s", {}), key="prepare_saved_images") as progress:
                 for i, source in enumerate(files):
@@ -754,10 +769,28 @@ def run(config: ComparisonSettings) -> dict:
                     raw_frames.append({"index": i + 1, "order": i + 1, "timestamp_s": timestamps[i] if timestamps else None,
                                        "path": path.as_posix(), "source": str(source), "source_sha256": file_hash(source),
                                        "pixel_sha256": pixel_hash(pixels), "content_sha256": content_key(pixels), "clipped": False})
+                    if blocks is not None:
+                        original = blocks["frames"][i]
+                        raw_frames[-1].update(source_content_hashes=original["source_sha256"],
+                            source_first_acquisition=original["first_acquisition"], source_last_acquisition=original["last_acquisition"])
+                        if original.get("support"):
+                            with np.load(source.parent / original["support"], allow_pickle=False) as saved:
+                                support = saved["valid"]
+                            if support.dtype != bool or support.shape != pixels.shape:
+                                raise ValueError("block support dimensions/type differ from the saved image")
+                            support_path = Path(name) / "support" / f"frame_{i + 1:03d}.png"
+                            (root / support_path).parent.mkdir(parents=True, exist_ok=True)
+                            Image.fromarray(support.astype(np.uint8) * 255).save(root / support_path)
+                            raw_frames[-1]["common_support_path"] = support_path.as_posix()
+                            common_support = support.copy() if common_support is None else common_support & support
                     progress.update(i + 1, source.name)
             full = Path(name) / "visual_reference_only" / "full_average.png"
-            save_rgb(root / full, np.rint(total / 128).astype(np.uint8))
+            save_rgb(root / full, np.rint(total / len(files)).astype(np.uint8))
             site["full_average"] = full.as_posix()
+            if common_support is not None:
+                support_path = full.with_name("full_average_support.png")
+                Image.fromarray(common_support.astype(np.uint8) * 255).save(root / support_path)
+                site["full_average_support"] = support_path.as_posix()
             site["series"] = {"raw": {"frames": raw_frames, "step": 0}, **site["series"]}
             from tools.real_sem_averages import add_average_series
 
@@ -789,7 +822,8 @@ def run(config: ComparisonSettings) -> dict:
                 metadata = checkpoint_arm_metadata(arm, denoiser)
                 model_config = denoiser.config.model_dump(mode="json")
                 validate_comparable_arm(metadata, model_config, record["models"])
-                content_hashes = {f["content_sha256"] for site in record["sites"] for f in site["series"]["raw"]["frames"]}
+                content_hashes = {h for site in record["sites"] for f in site["series"]["raw"]["frames"]
+                                  for h in f.get("source_content_hashes", [f["content_sha256"]])}
                 validate_evaluation_content(metadata, content_hashes, config.evaluation_split)
                 metadata.pop("train_val_content_hashes")
                 metadata.pop("validation_content_hashes", None)
@@ -810,7 +844,7 @@ def run(config: ComparisonSettings) -> dict:
             for site in record["sites"]:
                 series = {"frames": [], "step": denoiser.checkpoint_step}
                 site["series"][model_name] = series
-                with Progress(f"{site['name']}/{model_name}: inference and saved PNG export", total=128,
+                with Progress(f"{site['name']}/{model_name}: inference and saved PNG export", total=len(site['series']['raw']['frames']),
                               timings=series.setdefault("timings_s", {}), key="inference_and_pngs") as progress:
                     for raw in site["series"]["raw"]["frames"]:
                         path = Path(site["name"]) / model_name / Path(raw["path"]).name
@@ -833,6 +867,8 @@ def run(config: ComparisonSettings) -> dict:
                         frame = {k: raw[k] for k in ("index", "order", "timestamp_s", "dy_px", "dx_px", "registration_status",
                                                      "registration_score", "registration_error")}
                         frame.update(path=path.as_posix(), **stats)
+                        if raw.get("common_support_path"):
+                            frame["common_support_path"] = raw["common_support_path"]
                         series["frames"].append(frame)
                         progress.update(len(series["frames"]), path.as_posix())
                 reference = read_uint8(root / site["full_average"])

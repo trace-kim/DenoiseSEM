@@ -229,6 +229,7 @@ def render_comparison(root: Path, record: dict) -> Path:
                   "contour_status": site["contour_status"], "warnings": site["warnings"],
                   "repeatability": site["repeatability"], "per_hole": site.get("per_hole", []),
                   "frames_vs_precision": site.get("frames_vs_precision", []),
+                  "input_block_averaging": site.get("input_block_averaging"),
                   "template_precision": ({k: v for k, v in site["template_precision"].items() if k != "fits"}
                                          if site.get("template_precision") else None),
                   "hole_count": len(site["template_centroids"])}
@@ -299,7 +300,7 @@ def write_tensorboard(root: Path, record: dict, *, writer_factory=None) -> None:
         writer = writer_factory(log_dir=str(root / "tensorboard_comparison"))
     try:
         writer.add_text("comparison/protocol", "All analysis measures saved uint8 images. Acquisition image steps are acquisition numbers; "
-                        "average8 uses each block's first acquisition. Average128 is a static reference, not ground truth. "
+                        "Block averages use each block's first input. The full average is a static reference, not ground truth. "
                         "Start TensorBoard with --samples_per_plugin images=128 to retain every acquisition per tag. "
                         "Open index.html for linked sliders, wipe, measurement areas and complete contour status.", 0)
         for arm in record["arms"]:

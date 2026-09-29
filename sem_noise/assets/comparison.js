@@ -21,7 +21,8 @@
   const series = p => site().series[state.names[p]];
   const frame = p => series(p).frames[state.indices[p]];
   const fmt = (v, digits = 3) => Number.isFinite(v) ? Number(v).toFixed(digits) : "Unavailable";
-  const label = name => ({raw: "Raw input", average8: "Average of 8", average128: "Average of 128",
+  const label = (name, selected = site()) => ({raw: selected.input_block_averaging ? `Block-averaged input (K=${selected.input_block_averaging.frames_per_output})` : "Raw input",
+    average8: "Average of 8 inputs", average128: `Full average (${selected.series.raw.frames.length} inputs)`,
     single_frame_template_limit: "Single-frame template limit (diagnostic, not deployable)"}[name]
     || name.replaceAll("_", " + "));
   const svg = (tag, attrs = {}, text) => {
@@ -40,7 +41,7 @@
   const timeTitle = () => site().series.raw.frames[0].timestamp_s == null ? "Acquisition / block center" : "Acquisition time (s)";
   function frameLabel(p) {
     const f = frame(p), name = state.names[p];
-    if (name === "average128") return "Reference · acquisitions 1–128";
+    if (name === "average128") return `Reference · inputs 1–${site().series.raw.frames.length}`;
     if (f.first_acquisition != null) return `Block ${f.index}/${series(p).frames.length} · acquisitions ${f.first_acquisition}–${f.last_acquisition}`;
     return `Acquisition ${f.index}/${series(p).frames.length}`;
   }
@@ -580,7 +581,7 @@
     stop(); wanted.indices = [0, 0]; wanted.acquisition = 1;
     const names = Object.keys(report.sites[wanted.site].series);
     wanted.names = ["raw", names.find(n => report.arms.some(a => a.arm === n)) || "average8"];
-    letters.forEach((l, p) => {$("source-" + l).replaceChildren(...names.map(n => option(n, label(n)))); $("source-" + l).value = wanted.names[p];});
+    letters.forEach((l, p) => {$("source-" + l).replaceChildren(...names.map(n => option(n, label(n, report.sites[wanted.site])))); $("source-" + l).value = wanted.names[p];});
     render();
   }
   letters.forEach((l, p) => {

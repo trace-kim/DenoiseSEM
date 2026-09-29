@@ -1,5 +1,9 @@
 # Train and evaluate denoisers on real SEM repeats
 
+To train on averages of two or four acquisitions, use
+[the block-dataset command](real_sem_block_datasets.md). It creates ordinary and
+affine-registered variants plus their prepared training caches, preserving site splits.
+
 This guide covers real noisy SEM data: approximately 15–30 sites, 128 repeats
 per site, 1024×1024 frames, and native 512×512 training patches. No clean
 images or simulator manifest are required. Every model in this guide takes

@@ -1,5 +1,9 @@
 # Visual comparison of real SEM denoisers
 
+For precomputed average2/average4 inputs (64/32 images per site), use
+[the block-dataset command and directory overrides](real_sem_block_datasets.md).
+The comparison reads their provenance automatically and uses the actual input count.
+
 Run on the remote server containing the data and checkpoints. The base config is
 `edge_denoise/configs/sem_real_compare.yml`. Directory changes belong in CLI flags;
 the default test site is `/data/260904_raw_data/test/260904_0947-13`.

@@ -21,7 +21,9 @@ from tools.real_sem_compare import read_uint8, save_rgb
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from-comparison", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-comparison", type=Path)
+    source.add_argument("--site-dir", type=Path, help="Check the first block directly from raw acquisitions")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source", default="raw")
     parser.add_argument("--average-frames", type=int, default=8)
@@ -34,8 +36,17 @@ def main() -> int:
     import cv2
 
     cv2.setNumThreads(args.cpu_threads)
-    root = args.from_comparison.resolve().parent
-    record = json.loads(args.from_comparison.read_text())
+    if args.site_dir is not None:
+        from tools.prepare_real_sem_blocks import image_files
+
+        if args.source != "raw":
+            parser.error("--site-dir supports --source raw only")
+        root = args.site_dir.resolve()
+        record = {"sites": [{"name": root.name, "series": {"raw": {"frames": [
+            {"path": p.name} for p in image_files(root)]}}}]}
+    else:
+        root = args.from_comparison.resolve().parent
+        record = json.loads(args.from_comparison.read_text())
     args.output_dir.mkdir(parents=True, exist_ok=False)
     rows = []
     for site in record["sites"]:

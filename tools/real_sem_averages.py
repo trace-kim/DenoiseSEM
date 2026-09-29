@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 import time
 
 import numpy as np
@@ -14,6 +16,41 @@ from edge_denoise.real_data import registration_contrast
 from edge_denoise.uint8_output import average_uint8
 from sem_noise.pair_matching import GeometryEstimationError, check_geometry_reference, estimate_geometry
 from sem_noise.registration import clip_mask
+
+
+BLOCK_MANIFEST = "block_average.json"
+
+
+def load_block_manifest(folder: Path, files: list[Path]) -> dict | None:
+    """Verify optional block provenance before using a derived image folder."""
+    from burst_diffusion.real_data import file_digest
+
+    path = folder / BLOCK_MANIFEST
+    if not path.is_file():
+        return None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    frames = record.get("frames", [])
+    count = record.get("frames_per_output")
+    if (record.get("format") != 1 or count not in (2, 4)
+            or not frames or record.get("source_frame_count") != len(frames) * count
+            or type(record.get("registered")) is not bool
+            or record.get("registration") != ("affine" if record["registered"] else "none")
+            or [f["name"] for f in frames] != [p.name for p in files]):
+        raise ValueError(f"invalid block manifest or changed image list: {path}")
+    for index, (frame, file) in enumerate(zip(frames, files)):
+        if file_digest(file) != frame["file_sha256"]:
+            raise ValueError(f"block image changed: {file}")
+        hashes = frame.get("source_sha256", [])
+        if (len(hashes) != count or any(not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)
+                or frame.get("first_acquisition") != index * count + 1
+                or frame.get("last_acquisition") != (index + 1) * count
+                or bool(frame.get("support")) != record["registered"]):
+            raise ValueError(f"invalid block source hashes: {file}")
+        if frame.get("support"):
+            support = (folder / frame["support"]).resolve()
+            if support.parent != folder.resolve() or file_digest(support) != frame["support_sha256"]:
+                raise ValueError(f"block support changed or escapes site: {support}")
+    return record
 
 
 def block_geometry(frames: np.ndarray) -> tuple[np.ndarray, list[dict], int | None]:
@@ -51,7 +88,8 @@ def block_geometry(frames: np.ndarray) -> tuple[np.ndarray, list[dict], int | No
 
 
 @torch.no_grad()
-def registered_average(frames: np.ndarray, *, device: str = "cpu") -> tuple[np.ndarray, np.ndarray, dict]:
+def registered_average(frames: np.ndarray, *, device: str = "cpu",
+                       input_supports: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
     """Affine-align saved uint8 frames and round their float64 mean once.
 
     Unmeasurable acquisitions contribute natively. Outside the common cubic
@@ -60,6 +98,16 @@ def registered_average(frames: np.ndarray, *, device: str = "cpu") -> tuple[np.n
     """
     if frames.dtype != np.uint8 or frames.ndim != 3 or len(frames) < 2:
         raise ValueError("registered averaging requires at least two saved uint8 images")
+    supports = None
+    if input_supports is not None:
+        import cv2
+
+        if input_supports.dtype != bool or input_supports.shape != frames.shape:
+            raise ValueError("input supports must be boolean masks matching the frames")
+        # A nearest sample in this eroded mask requires the whole cubic
+        # footprint to lie inside the previous production stage's support.
+        supports = np.array([cv2.erode(m.astype(np.uint8), np.ones((5, 5), np.uint8),
+                                      borderType=cv2.BORDER_CONSTANT, borderValue=0) for m in input_supports])
     started = time.perf_counter()
     matrices, diagnostics, reference = block_geometry(frames)
     geometry_s = time.perf_counter() - started
@@ -78,6 +126,10 @@ def registered_average(frames: np.ndarray, *, device: str = "cpu") -> tuple[np.n
                                                       normalize=False, require_overlap=False):
                 total += crops[:, 0].sum(0, dtype=torch.float64)
                 valid &= masks[:, 0].all(0)
+            if supports is not None:
+                for _, crops, masks in sample_native_crops(supports, local, size, 0, 1, device,
+                        normalize=False, require_overlap=False, interpolation="nearest"):
+                    valid &= (crops[:, 0] == 1).all(0) & masks[:, 0].all(0)
             h, w = min(size, height - y), min(size, width - x)
             mask = valid[:h, :w].cpu().numpy()
             values = (total[:h, :w] / count).cpu().numpy()
@@ -121,6 +173,19 @@ def add_average_series(root: Path, site: dict, counts: list[int], *, device: str
                 for block in range(blocks):
                     inputs = source["frames"][block * count:(block + 1) * count]
                     pixels = np.stack([read_uint8(root / f["path"]) for f in inputs])
+                    source_supports = None
+                    if any(f.get("common_support_path") for f in inputs):
+                        masks = []
+                        for frame, pixel in zip(inputs, pixels):
+                            if frame.get("common_support_path"):
+                                with Image.open(root / frame["common_support_path"]) as saved:
+                                    mask = np.asarray(saved) > 0
+                                if mask.shape != pixel.shape:
+                                    raise ValueError("source support dimensions differ from the saved image")
+                            else:
+                                mask = np.ones(pixel.shape, dtype=bool)
+                            masks.append(mask)
+                        source_supports = np.stack(masks)
                     first, last = inputs[0]["index"], inputs[-1]["index"]
                     relative = Path(site["name"]) / name / f"block_{block + 1:03d}_{first:03d}-{last:03d}.png"
                     row = {"index": block + 1, "order": float(np.mean([f["order"] for f in inputs])),
@@ -128,14 +193,16 @@ def add_average_series(root: Path, site: dict, counts: list[int], *, device: str
                            "timestamp_s": (float(np.mean([f["timestamp_s"] for f in inputs]))
                                            if all(f["timestamp_s"] is not None for f in inputs) else None), "clipped": False}
                     if registered:
-                        values, valid, record = registered_average(pixels, device=device)
+                        values, valid, record = registered_average(pixels, device=device, input_supports=source_supports)
                         row["averaging_registration"] = record
+                    else:
+                        values = average_uint8(pixels)
+                        valid = None if source_supports is None else source_supports.all(0)
+                    if valid is not None:
                         support_path = relative.with_name(relative.stem + "_support.png")
                         (root / support_path).parent.mkdir(parents=True, exist_ok=True)
                         Image.fromarray(valid.astype(np.uint8) * 255).save(root / support_path)
                         row["common_support_path"] = support_path.as_posix()
-                    else:
-                        values = average_uint8(pixels)
                     save_rgb(root / relative, values)
                     series["frames"].append(row)
                 created.append(name)

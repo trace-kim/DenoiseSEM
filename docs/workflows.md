@@ -1,5 +1,10 @@
 # Running every workflow from this repository root
 
+For average2/average4 datasets with or without affine registration, see
+[block-averaged training and test datasets](../edge_denoise/docs/real_sem_block_datasets.md).
+One command mirrors the raw `all/train/test` tree and builds compatible training
+caches with the existing site splits; training and comparison use directory overrides.
+
 For a visual audit of the six real-N2N registration/brightness treatments, see
 [the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md): full-image
 frame sliders, overlapping wipe, inspectable contours, and direct output/raw

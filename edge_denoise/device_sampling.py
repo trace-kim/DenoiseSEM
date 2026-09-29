@@ -13,7 +13,7 @@ import torch.nn.functional as F
 def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size: int,
                         black: float, white: float, device: str | torch.device,
                         *, memory_bytes: int = 256 * 1024**2, normalize: bool = True,
-                        require_overlap: bool = True
+                        require_overlap: bool = True, interpolation: str = "bicubic"
                         ) -> Iterator[tuple[np.ndarray, torch.Tensor, torch.Tensor]]:
     """Yield indices, normalized crops and cubic-support masks on ``device``.
 
@@ -24,6 +24,8 @@ def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size
     The byte bound includes conservative grid/normalization scratch space.
     """
     device = torch.device(device)
+    if interpolation not in ("bicubic", "nearest"):
+        raise ValueError("sampling interpolation must be bicubic or nearest")
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(f"CUDA sampling requested but unavailable: {device}")
     matrices = np.asarray(matrices, dtype=np.float64)
@@ -121,5 +123,5 @@ def sample_native_crops(frames: Sequence[np.ndarray], matrices: np.ndarray, size
                     for k, (_, _, _, height, width) in enumerate(chunk):
                         patches[k, :, height:, :] = 0
                         patches[k, :, :, width:] = 0
-                sampled = F.grid_sample(patches, torch.stack((gx, gy), dim=-1), mode="bicubic", align_corners=True).float()
+                sampled = F.grid_sample(patches, torch.stack((gx, gy), dim=-1), mode=interpolation, align_corners=True).float()
             yield indices, sampled, valid[:, None]

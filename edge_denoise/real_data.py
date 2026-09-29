@@ -68,10 +68,10 @@ def _assign_splits(
     owners: dict[str, int] = {}
     for index, site in enumerate(sites):
         for frame in site["frames"]:
-            digest = frame["sha256"]
-            if digest in owners:
-                parent[root(index)] = root(owners[digest])
-            owners[digest] = index
+            for digest in frame.get("source_sha256", [frame["sha256"]]):
+                if digest in owners:
+                    parent[root(index)] = root(owners[digest])
+                owners[digest] = index
     groups: dict[int, list[int]] = {}
     for index in range(len(sites)):
         groups.setdefault(root(index), []).append(index)
@@ -206,12 +206,16 @@ def prepare_real_dataset(
     registration_failure: str = "error",
     frame_start: int = 0, frame_stop: int | None = None,
     device: str = "cpu", progress: Callable[[str], None] | None = None,
+    frame_sources: dict[str, list[str]] | None = None,
 ) -> Path:
     """Build a new immutable cache from ``source_dir/site_name/frame.tif``.
 
     Original inputs are preserved in native integer stacks. Registered copies
     and sums are float32, memory-mapped, and used only for targets/references.
     The output must not exist; a failed preparation never publishes a dataset.
+    For derived images, frame_sources records each image's original decoded
+    content hashes. Splits use those ancestors, and distinct blocks may round
+    to identical uint8 pixels (including entirely blank blocks).
     """
     source_root, destination = Path(source_dir).resolve(), Path(output_dir).resolve()
     if not source_root.is_dir():
@@ -234,6 +238,7 @@ def prepare_real_dataset(
     assignments = None if split_file is None else json.loads(Path(split_file).read_text(encoding="utf-8"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     sites, qc_rows = [], []
+    used_sources: set[str] = set()
     dtype = None
     white = white_level
     # The temporary directory is created directly under the resolved output
@@ -263,11 +268,19 @@ def prepare_real_dataset(
                 if array.shape != first.shape or array.dtype != dtype:
                     raise ValueError(f"all frames must have matching site dimensions and dataset bit depth: {file}")
                 digest = content_key(array)
-                if digest in frame_hashes:
+                relative = file.relative_to(source_root).as_posix()
+                ancestors = None if frame_sources is None else frame_sources.get(relative)
+                if frame_sources is not None:
+                    if (not isinstance(ancestors, list) or not ancestors
+                            or any(not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h) for h in ancestors)):
+                        raise ValueError(f"missing or invalid source hashes for derived image: {relative}")
+                    used_sources.add(relative)
+                if digest in frame_hashes and frame_sources is None:
                     raise ValueError(f"duplicate frame pixels within site {folder.name}: {file.name}")
                 frame_hashes.add(digest)
                 raw[index] = array
-                frames.append({"name": file.relative_to(source_root).as_posix(), "sha256": digest})
+                frames.append({"name": relative, "sha256": digest,
+                               **({"source_sha256": ancestors} if ancestors is not None else {})})
             raw.flush()
             if progress:
                 progress(f"{folder.name}: {len(files)} native {first.shape[0]}x{first.shape[1]} {dtype} frames; registering")
@@ -329,6 +342,8 @@ def prepare_real_dataset(
                 relative = f"{base}_{name}.npy"
                 site[name] = {"path": relative, "sha256": file_digest(staging / relative)}
             sites.append(site)
+        if frame_sources is not None and used_sources != set(frame_sources):
+            raise ValueError("source hashes must describe exactly the selected derived images")
         duplicates = _assign_splits(sites, val_fraction, test_fraction, split_seed, assignments)
         metadata = {
             "format": REAL_FORMAT, "kind": "real_sem", "sites": sites,
