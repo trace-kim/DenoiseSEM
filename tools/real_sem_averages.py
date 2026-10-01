@@ -112,7 +112,7 @@ def registered_average(frames: np.ndarray, *, device: str = "cpu",
 def add_average_series(root: Path, site: dict, counts: list[int], *, device: str,
                        model: str | None = None) -> list[str]:
     """Add missing saved baselines; retain old average8 bytes and all model frames."""
-    from tools.real_sem_compare import read_uint8, save_rgb
+    from tools.real_sem_comparison import read_uint8, save_rgb
 
     created = []
     for source_name in ("raw", model) if model is not None else ("raw",):
@@ -185,7 +185,7 @@ def add_fused_series(root: Path, site: dict, model: str, denoiser, counts: list[
     some member does not support are saved as a support mask and excluded from
     contours. The series joins the model's single-frame series in one family.
     """
-    from tools.real_sem_compare import read_uint8, save_rgb
+    from tools.real_sem_comparison import read_uint8, save_rgb
     from edge_denoise.uint8_output import prediction_uint8
 
     raw = site["series"]["raw"]

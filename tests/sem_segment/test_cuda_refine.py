@@ -243,7 +243,7 @@ def test_server_benchmark_measures_pipeline_and_detects_changed_results(fake_cud
 
 
 def test_comparison_series_reuses_gpu_on_saved_uint8_files(fake_cuda, tmp_path, monkeypatch):
-    from tools import real_sem_compare as compare
+    from tools import real_sem_comparison as compare
     from sem_segment import pipeline
     from sem_segment.image_io import read_native
 
@@ -295,7 +295,7 @@ def test_comparison_series_reuses_gpu_on_saved_uint8_files(fake_cuda, tmp_path, 
 
 
 def test_comparison_resolves_one_gpu_and_respects_segmentation_config(tmp_path):
-    from tools.real_sem_compare import ComparisonSettings, resolve_segmentation_settings
+    from tools.real_sem_comparison import ComparisonSettings, resolve_segmentation_settings
 
     yaml_path = tmp_path / "segment.yml"
     yaml_path.write_text("segmentation:\n  backend: classical\nrefine:\n  device: cuda:2\n")

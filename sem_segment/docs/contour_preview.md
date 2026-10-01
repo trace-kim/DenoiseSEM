@@ -1,7 +1,7 @@
 # Saved-image contour baseline preview
 
 Gaussian + Otsu is also integrated into the main real SEM comparison workflow.
-Use `tools/real_sem_compare.py --contour-method otsu` for normal HTML,
+Use `tools/real_sem_comparison.py --contour-method otsu` for normal HTML,
 CSV/JSON and TensorBoard reports, including existing mask-area/ECD measurements
 on closed regions. See [the main comparison guide](../../edge_denoise/docs/real_sem_comparison.md)
 for the remote command. This standalone preview remains a segmentation-only
@@ -137,7 +137,7 @@ uint8 enforcement, source-byte preservation, and acquisition indexing are covere
 
 ```bash
 python -m pytest tests/sem_segment \
-  tests/edge_denoise/test_real_sem_compare.py \
+  tests/edge_denoise/test_real_sem_comparison.py \
   tests/edge_denoise/test_real_sem_viewer.py \
   tests/sem_noise/test_comparison_metrics.py -q
 ```

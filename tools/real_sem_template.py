@@ -18,7 +18,7 @@ def measure_template_limit(root: Path, site: dict, *, device: str) -> None:
     from scipy import ndimage
     from skimage.draw import polygon
     from sem_noise.io import file_hash
-    from tools.real_sem_compare import read_uint8
+    from tools.real_sem_comparison import read_uint8
 
     started = time.perf_counter()
     template = read_uint8(root / site["full_average"])

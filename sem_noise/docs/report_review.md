@@ -86,7 +86,7 @@ Run the browser check on Windows with an installed Chrome or Edge executable:
 
 ```powershell
 $env:SEM_NOISE_TEST_BROWSER = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-python -m pytest tests/sem_noise tests/edge_denoise/test_real_sem_experiment.py -q
+python -m pytest tests/sem_noise tests/edge_denoise/test_real_sem_stability.py -q
 ```
 
 On Linux, set the same environment variable to the browser executable. Without

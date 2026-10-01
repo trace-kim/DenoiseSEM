@@ -5,7 +5,7 @@ For precomputed average2/average4 inputs (64/32 images per site), use
 The comparison reads their provenance automatically and uses the actual input count.
 
 Run on the remote server containing the data and checkpoints. The base config is
-`edge_denoise/configs/sem_real_compare.yml`. Directory changes belong in CLI flags;
+`edge_denoise/configs/sem_real_comparison.yml`. Directory changes belong in CLI flags;
 the default test site is `/data/260904_raw_data/test/260904_0947-13`.
 
 The B1 leave-one-out target GPU equivalence check, timing pilot and both resumable
@@ -40,7 +40,7 @@ and brightness from each checkpoint and its verified prepared manifest; these
 are never guessed from a folder name or applied to inference outputs.
 
 ```bash
-python tools/real_sem_compare.py --only-checkpoints \
+python tools/real_sem_comparison.py --only-checkpoints \
   --checkpoint n2n=runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt \
   --checkpoint ft_noisy=runs/edge_denoise/260922_real_ft_noisy_affine_percentile/ckpt_latest.pt \
   --checkpoint ft_consist=runs/edge_denoise/260922_real_ft_consist_affine_percentile/ckpt_latest.pt \
@@ -110,7 +110,7 @@ dataset, checkpoints, or denoiser inference. Older reports need one new contour
 pass because they saved outlines for only four matched holes.
 
 ```bash
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --from-comparison output/260921_real_n2n_comparison/comparison.json \
   --output-dir output/260921_real_n2n_otsu_comparison \
   --contour-method otsu \
@@ -123,7 +123,7 @@ The result is the normal `index.html`, CSV/JSON measurements, and TensorBoard
 report. It does not launch a separate preview or require inference. Use
 `--metrology-device cpu` for a CPU installation.
 
-New runs using the shipped `sem_real_compare.yml` select `otsu_refined` by default.
+New runs using the shipped `sem_real_comparison.yml` select `otsu_refined` by default.
 Rebuilds without a method override preserve the method saved in the input;
 older reports without method metadata retain the existing method. Use
 `--contour-method current` to select the previous segmentation/refinement
@@ -139,7 +139,7 @@ old run are reported explicitly; the command does not invent them.
 After this first rebuild, changes to presentation can reuse the new measurements:
 
 ```bash
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --from-comparison output/260921_real_n2n_otsu_comparison/comparison.json \
   --output-dir output/260921_real_n2n_otsu_comparison \
   --render-only --no-tensorboard
@@ -158,7 +158,7 @@ PNGs and measurements are reused unchanged. Reload `index.html` after rebuilding
 For repeated contour experiments on a **completed** report, use:
 
 ```bash
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --from-comparison output/260921_real_n2n_comparison/comparison.json \
   --output-dir output/260921_real_n2n_otsu_fast \
   --contour-method otsu --metrology-device cuda:0 \
@@ -212,8 +212,8 @@ looks for `runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt`, 
 the analogous five folders:
 
 ```bash
-python tools/real_sem_compare.py \
-  --config edge_denoise/configs/sem_real_compare.yml \
+python tools/real_sem_comparison.py \
+  --config edge_denoise/configs/sem_real_comparison.yml \
   --experiment-prefix 260921_real_n2n \
   --site-dir /data/260904_raw_data/test/260904_0947-13 \
   --output-dir output/260921_real_n2n_comparison \
@@ -225,8 +225,8 @@ The prefix is an example, not a discovered checkpoint date. Override older
 baselines individually, without changing the YAML:
 
 ```bash
-python tools/real_sem_compare.py \
-  --config edge_denoise/configs/sem_real_compare.yml \
+python tools/real_sem_comparison.py \
+  --config edge_denoise/configs/sem_real_comparison.yml \
   --experiment-prefix 260921_real_n2n \
   --checkpoint translation_none=runs/edge_denoise/OLDER_DATE_real_n2n_translation_none/ckpt_latest.pt \
   --checkpoint none_none=runs/edge_denoise/OLDER_DATE_real_n2n_none_none/ckpt_latest.pt \
@@ -440,7 +440,7 @@ VALIDATION_REPORT=output/real_models_validation/comparison.json
 for estimator in gradient_peak threshold erf; do
   metrology=cpu
   if [ "$estimator" = gradient_peak ]; then metrology=cuda:0; fi
-  python tools/real_sem_compare.py --from-comparison "$VALIDATION_REPORT" \
+  python tools/real_sem_comparison.py --from-comparison "$VALIDATION_REPORT" \
     --output-dir "output/260928_validation_${estimator}" --contours-only \
     --contour-method otsu_refined --refine-estimator "$estimator" \
     --metrology-device "$metrology" --no-tensorboard || break
@@ -505,7 +505,7 @@ single-frame predictions; it does not implement learned burst fusion.
 
 ```bash
 REPORT=output/real_models_comparison/comparison.json
-python tools/real_sem_compare.py --from-comparison "$REPORT" \
+python tools/real_sem_comparison.py --from-comparison "$REPORT" \
   --output-dir output/260928_real_frames_precision --contours-only \
   --contour-method otsu_refined --refine-estimator gradient_peak \
   --average-frames 2,4,8 --average-model n2n \
@@ -571,7 +571,7 @@ before interpreting a model's distance from it.
 
 ```bash
 REFINED_REPORT=output/260928_real_frames_precision/comparison.json
-python tools/real_sem_compare.py --from-comparison "$REFINED_REPORT" \
+python tools/real_sem_comparison.py --from-comparison "$REFINED_REPORT" \
   --output-dir output/260928_real_template_precision --contours-only \
   --template-limit --metrology-device cuda:0 --no-tensorboard
 python tools/check_real_sem_template.py \

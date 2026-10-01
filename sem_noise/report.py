@@ -493,7 +493,7 @@ def site_report(out: Path, summary: dict, maps: dict[str, np.ndarray], frames: l
             ax.legend(fontsize=8)
     body += _figure(out, "stability.png", fig, "Allan curves use differences of adjacent block averages, never an average compared with itself. Gaps are not joined. Overlapping pairs are dependent; the CSV also reports disjoint-pair counts. Spectra use an unmasked central crop, so residual structure can contribute. Mean removal biases finite-series ACF slightly negative. No line-frequency identification is possible without scan timing.")
     body += '<section><h2>Useful follow-up measurements</h2><p>Preserve acquisition order, original bit depth, dwell time, frame time, scan direction, detector, voltage/current, pixel size, working distance, and any automatic contrast, filtering, or averaging settings. Revisit sites after longer delays and acquire dark/blank and uniform-reference images to investigate fixed-pattern response and stability beyond this sequence.</p><p>See the package guide for estimator definitions, limitations, and references.</p></section>'
-    (out / "report.html").write_text(_document(f'SEM noise analysis — {summary["site"]}', body), encoding="utf-8")
+    (out / "report.html").write_text(_document(f'Stability report — {summary["site"]}', body), encoding="utf-8")
 
 
 def index_report(out: Path, overview: dict) -> None:
@@ -516,4 +516,4 @@ def index_report(out: Path, overview: dict) -> None:
             body += f'<td>{_number(value)}</td>'
         body += f'<td>{gain}</td><td>{quantile_gain}</td><td>{len(site["warnings"])} flags / complete</td></tr>'
     body += '</tbody></table></div><p>Compare sites with matched acquisition settings. These are descriptive observed-noise estimates; the site is the unit of comparison, not millions of independent pixels. In affine mode, gain ranges describe the reported target-to-input pairs; in legacy fit mode they describe frame-to-reference fits. Open a site for the geometry, brightness measurements and difference images.</p></section>'
-    (out / "index.html").write_text(_document("Repeated SEM acquisition — noise and stability", body), encoding="utf-8")
+    (out / "index.html").write_text(_document("Stability report — repeated SEM acquisitions", body), encoding="utf-8")

@@ -8,8 +8,8 @@ unavailable. No H100 speedup has been established.
 
 ## What actually runs after that message
 
-The entry point is `tools/real_sem_compare.py`, using the ordinary Gaussian +
-Otsu detector selected by `edge_denoise/configs/sem_real_compare.yml`.
+The entry point is `tools/real_sem_comparison.py`, using the ordinary Gaussian +
+Otsu detector selected by `edge_denoise/configs/sem_real_comparison.yml`.
 
 | Location of the message | Next operations |
 | --- | --- |
@@ -187,7 +187,7 @@ set -o pipefail
 mkdir -p output
 saved_comparison="output/260921_real_n2n_comparison/comparison.json"
 render_dir="output/$(date +%y%m%d_%H%M%S)_real_n2n_render_audit"
-/usr/bin/time -v python -u tools/real_sem_compare.py \
+/usr/bin/time -v python -u tools/real_sem_comparison.py \
   --from-comparison "$saved_comparison" --render-only --tensorboard \
   --output-dir "$render_dir" \
   2>&1 | tee "${render_dir}.log"
@@ -198,8 +198,8 @@ storage path. This command is not required as an extra profiling run:
 
 ```bash
 audit_dir="output/$(date +%y%m%d_%H%M%S)_real_n2n_comparison"
-/usr/bin/time -v python -u tools/real_sem_compare.py \
-  --config edge_denoise/configs/sem_real_compare.yml \
+/usr/bin/time -v python -u tools/real_sem_comparison.py \
+  --config edge_denoise/configs/sem_real_comparison.yml \
   --experiment-prefix 260921_real_n2n \
   --site-dir /data/260904_raw_data/test/260904_0947-13 \
   --output-dir "$audit_dir" \

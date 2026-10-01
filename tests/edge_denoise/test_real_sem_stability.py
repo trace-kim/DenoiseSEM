@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from tools.real_sem_experiment import SETTINGS, png_pixels, resolve_settings, run
+from tools.real_sem_stability import SETTINGS, png_pixels, resolve_settings, run
 
 
 def test_defaults_follow_checkpoint_and_output(tmp_path):
@@ -13,7 +13,7 @@ def test_defaults_follow_checkpoint_and_output(tmp_path):
     assert resolved["source_dir"] == tmp_path / "data/SEM-test/example"
     assert resolved["png_dir"] == tmp_path / "output/example/png"
     resolved = resolve_settings({**settings, "output_dir": "output/another"}, tmp_path)
-    assert resolved["raw_report_dir"] == tmp_path / "output/another/noise-raw"
+    assert resolved["raw_report_dir"] == tmp_path / "output/another/stability-raw"
     with pytest.raises(ValueError, match="Set checkpoint"):
         resolve_settings(SETTINGS, tmp_path)
 

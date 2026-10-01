@@ -251,7 +251,7 @@ For model selection, use a raw site recorded in the prepared validation split:
 
 ```bash
 VAL_SITE=/path/to/a/prepared-validation-sites-original-raw-folder
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --config "runs/edge_denoise/${RUN_DATE}_real_suite/comparison.yml" \
   --split val --site-dir "$VAL_SITE" \
   --output-dir "output/${RUN_DATE}_real_models_validation"
@@ -264,7 +264,7 @@ content, while allowing new unseen test sites. Use the same detector/settings
 for every model. After selecting settings, produce the final test report:
 
 ```bash
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --config "runs/edge_denoise/${RUN_DATE}_real_suite/comparison.yml"
 
 python tools/benchmark_sem_analysis.py \
@@ -363,7 +363,7 @@ WP1/WP2 local full-suite verification (2026-09-28): **1,052 passed, 1 skipped**
 in 205.85 s. This includes 16/512-pixel CPU and local CUDA sampler equivalence;
 the skip is the optional offline browser test. This is not an H100 timing result.
 
-Precision report steps WP3/WP4/WP6 are implemented through `real_sem_compare.py`:
+Precision report steps WP3/WP4/WP6 are implemented through `real_sem_comparison.py`:
 `otsu_refined`, explicit estimator selection, centre-correct overlays, and the
 drift/jitter/brightness decomposition. See the validation rebuild and refined
 CPU/GPU benchmark commands in [the comparison guide](real_sem_comparison.md#precision-refined-ecd-and-variation-components-wp3wp4wp6).
@@ -487,7 +487,7 @@ python tools/check_real_sem_equivalence.py --checkpoint burst_t16="$RUN/ckpt_lat
 # 4. Validation report: single-frame controls, the burst model at m = 1 and fused
 #    m = 2/4/8/16, and registered raw averages of the same blocks.
 VAL_SITE=/path/to/a/prepared-validation-sites-original-raw-folder
-python tools/real_sem_compare.py --only-checkpoints \
+python tools/real_sem_comparison.py --only-checkpoints \
   --checkpoint n2n=runs/edge_denoise/260921_real_n2n_affine_percentile/ckpt_latest.pt \
   --checkpoint ft_noisy=runs/edge_denoise/260922_real_ft_noisy_affine_percentile/ckpt_latest.pt \
   --checkpoint burst_t16="$RUN/ckpt_latest.pt" \

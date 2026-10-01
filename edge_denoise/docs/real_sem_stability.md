@@ -1,6 +1,6 @@
-﻿# Run a complete real SEM experiment
+﻿# Stability report for a trained model
 
-Use [tools/real_sem_experiment.py](../../tools/real_sem_experiment.py) to denoise
+Use [tools/real_sem_stability.py](../../tools/real_sem_stability.py) to denoise
 all frames, prepare PNGs in the original intensity units, and analyze both
 raw and denoised images. It supports ordinary N2N, registration-aligned N2N,
 `ft_avgfull_consist`, and other `edge_denoise` checkpoints.
@@ -32,8 +32,8 @@ parent folder (`my_run` in the example).
 | `source_dir` | `data/SEM-test/<run_name>` |
 | `output_dir` | `output/<run_name>` |
 | `png_dir` | `<output_dir>/png` |
-| `raw_report_dir` | `<output_dir>/noise-raw` |
-| `png_report_dir` | `<output_dir>/noise-png` |
+| `raw_report_dir` | `<output_dir>/stability-raw` |
+| `png_report_dir` | `<output_dir>/stability-png` |
 
 The source default is a naming convention: the checkpoint cannot tell us where
 your test images live. Put the images there or set `source_dir` to their existing
@@ -50,13 +50,13 @@ From the repository root in your server environment/container:
 
 ```bash
 python -m pip install -e ".[analysis]"
-python tools/real_sem_experiment.py
+python tools/real_sem_stability.py
 ```
 
 You can also override settings on the command line without editing the file:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python tools/real_sem_experiment.py \
+CUDA_VISIBLE_DEVICES=0 python tools/real_sem_stability.py \
   --checkpoint runs/edge_denoise/my_run/ckpt_latest.pt \
   --source-dir data/SEM-test/site_01 \
   --output-dir output/my_run_site_01 \
@@ -83,8 +83,8 @@ output/<run_name>/
   inference/            Input/output preview PNGs and normalized float32 TIFFs
   raw/                  Lossless PNG copies of decoded raw pixels
   png/                  Denoised uint8 PNGs in original intensity units
-  noise-raw/index.html  Raw-image analysis
-  noise-png/index.html  Denoised-PNG analysis
+  stability-raw/index.html  Raw-image analysis
+  stability-png/index.html  Denoised-PNG analysis
 ```
 
 Compare brightness over time, temporal sigma, adjacent-frame differences, and

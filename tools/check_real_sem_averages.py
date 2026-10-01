@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from tools.real_sem_averages import registered_average
-from tools.real_sem_compare import read_uint8, save_rgb
+from tools.real_sem_comparison import read_uint8, save_rgb
 
 
 def main() -> int:

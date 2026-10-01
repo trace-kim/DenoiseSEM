@@ -8,7 +8,7 @@ from scipy.special import erf
 
 from edge_denoise.uint8_output import average_uint8
 from tools import real_sem_averages as averages
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 from test_real_sem_viewer import saved_record
 
 

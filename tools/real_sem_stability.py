@@ -1,4 +1,4 @@
-"""Edit SETTINGS below, then run: python tools/real_sem_experiment.py.
+"""Edit SETTINGS below, then run: python tools/real_sem_stability.py.
 
 One folder of repeated uint8 acquisitions of one site per experiment.
 Relative paths are resolved from the repository root, on Windows or Linux.
@@ -51,8 +51,8 @@ def resolve_settings(settings: dict, root: Path = ROOT) -> dict:
         "source_dir": root / "data" / "SEM-test" / run_name,
         "output_dir": output,
         "png_dir": output / "png",
-        "raw_report_dir": output / "noise-raw",
-        "png_report_dir": output / "noise-png",
+        "raw_report_dir": output / "stability-raw",
+        "png_report_dir": output / "stability-png",
     }
     for key, default in defaults.items():
         result[key] = path(settings[key] or default)

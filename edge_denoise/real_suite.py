@@ -229,7 +229,7 @@ def _launch(command: list[str], log_path: Path, run_dir: Path, stop: StopControl
 
 
 def _write_comparison(plan: dict) -> Path:
-    recipe = yaml.safe_load((ROOT / "edge_denoise/configs/sem_real_compare.yml").read_text(encoding="utf-8"))
+    recipe = yaml.safe_load((ROOT / "edge_denoise/configs/sem_real_comparison.yml").read_text(encoding="utf-8"))
     recipe["checkpoints"] = {"n2n": {"checkpoint": plan["teacher"]["path"],
                                      "prepared_manifest": plan["teacher"]["prepared_manifest"]}}
     for pipeline in plan["pipelines"]:
@@ -365,7 +365,7 @@ def _run_locked(plan: dict, *, resume: bool) -> int:
         print(f"Suite {manifest['status']}: {manifest_path}", flush=True)
         if complete:
             print("Compare saved uint8 outputs: " + shlex.join([
-                sys.executable, "tools/real_sem_compare.py", "--config", str(comparison_path)]), flush=True)
+                sys.executable, "tools/real_sem_comparison.py", "--config", str(comparison_path)]), flush=True)
         return 0 if complete else 130 if stop.is_requested() else 1
     finally:
         for signum, handler in handlers.items():

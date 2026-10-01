@@ -11,8 +11,8 @@ import pytest
 
 from edge_denoise.infer import Denoiser
 from sem_segment.otsu_baseline import OtsuSettings
-from tools import real_sem_compare as compare
-from test_real_sem_compare import CaptureWriter, _arm_fixture, _inputs
+from tools import real_sem_comparison as compare
+from test_real_sem_comparison import CaptureWriter, _arm_fixture, _inputs
 from test_real_sem_viewer import saved_record
 
 
@@ -172,7 +172,7 @@ def test_cli_defaults_and_saved_otsu_config_are_reusable(tmp_path, monkeypatch):
     output = tmp_path / "cli"
     forbid_legacy(monkeypatch)
     monkeypatch.setattr(comparison_report, "write_tensorboard", lambda *args: None)
-    monkeypatch.setattr(sys, "argv", ["real_sem_compare.py", "--from-comparison", str(source),
+    monkeypatch.setattr(sys, "argv", ["real_sem_comparison.py", "--from-comparison", str(source),
         "--output-dir", str(output), "--contour-method", "otsu", "--otsu-config", str(config), "--metrology-device", "cpu"])
     assert compare.main() == 0
     record = json.loads((output / "comparison.json").read_text(encoding="utf-8"))

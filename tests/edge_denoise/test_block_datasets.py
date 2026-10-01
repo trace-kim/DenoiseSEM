@@ -16,7 +16,7 @@ from edge_denoise.infer import Denoiser
 from edge_denoise.real_data import RealPairFactory, prepare_real_dataset, read_native
 from tools import prepare_real_sem_blocks as blocks
 from tools import real_sem_averages as averages
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 
 
 def fixture_dataset(tmp_path: Path, count: int = 8) -> tuple[Path, Path]:

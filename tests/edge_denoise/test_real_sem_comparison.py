@@ -12,7 +12,7 @@ import torch
 from conftest import make_config
 from edge_denoise.infer import Denoiser
 from edge_denoise.uint8_output import RANGE_WARNING, average_uint8, prediction_uint8
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 
 
 def test_range_audit_precedes_rounding_and_clipping():
@@ -471,7 +471,7 @@ def test_burst_model_cannot_silently_receive_single_frame_inputs(tmp_path):
 
 
 def test_shipped_comparison_is_the_six_preprocessing_treatments():
-    config = compare.load_settings(compare.ROOT / "edge_denoise/configs/sem_real_compare.yml")
+    config = compare.load_settings(compare.ROOT / "edge_denoise/configs/sem_real_comparison.yml")
     assert [(a.registration, a.brightness) for a in config.checkpoints.values()] == TREATMENTS
     assert all("260921_real_n2n_" in str(a.checkpoint) for a in config.checkpoints.values())
     assert config.metrology_device == "cuda:0"

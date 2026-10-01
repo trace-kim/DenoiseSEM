@@ -30,7 +30,7 @@ from sem_noise.pair_matching import measure_quantile_brightness
 from test_edge_denoise_real import prepared, real_config  # noqa: F401 -- fixture
 from test_real_matching import matching_config
 from tools import real_sem_averages as averages
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 
 
 def fusion_config(dataset, run, *, levels=(1, 2, 3), registration="none", brightness="percentile",
@@ -332,7 +332,7 @@ def test_fused_series_use_average_blocks_and_saved_uint8_outputs(fusion_checkpoi
 
 
 def test_comparison_settings_accept_matched_fusion_arms_and_reserve_fused_names(tmp_path) -> None:
-    from test_real_sem_compare import _arm_fixture
+    from test_real_sem_comparison import _arm_fixture
 
     arm, config, digest = _arm_fixture(tmp_path, "affine", "percentile")
     config.objective.fusion = FusionConfig(align="matched", frames_per_burst=4, levels=[1, 2, 3])

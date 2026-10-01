@@ -470,7 +470,7 @@ Use the saved-uint8 multi-model workflow. Point `VAL_SITE` at an original raw
 128-frame site in the prepared dataset's validation split:
 
 ```bash
-python tools/real_sem_compare.py --only-checkpoints \
+python tools/real_sem_comparison.py --only-checkpoints \
   --checkpoint n2n=runs/edge_denoise/sem_real_n2n/ckpt_latest.pt \
   --split val --site-dir "$VAL_SITE" \
   --output-dir output/sem_real_val --device cuda:0 --metrology-device cuda:0
@@ -504,7 +504,7 @@ supplies the intensity scale, and inference requires only this one raw frame.
 It does not need the prepared dataset, registration files, or additional
 acquisitions. To run this over every image in a folder and then analyze the
 noise of the results, see
-[real_sem_batch_inference.md](real_sem_batch_inference.md).
+[real_sem_stability.md](real_sem_stability.md).
 
 Outputs are:
 

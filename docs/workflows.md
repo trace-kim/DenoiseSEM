@@ -1,5 +1,15 @@
 # Running every workflow from this repository root
 
+Real SEM results come in two report types:
+
+- **Stability report** — drift, brightness, noise and residual maps of one folder
+  of repeated images. Raw acquisitions: `python -m sem_noise analyze` (section 1b).
+  A trained model's output next to its raw input: `tools/real_sem_stability.py`
+  ([guide](../edge_denoise/docs/real_sem_stability.md)).
+- **Comparison report** — several models on one test site: contours, ECD and
+  registration 3σ, averages, brightness relative to raw.
+  `tools/real_sem_comparison.py` ([guide](../edge_denoise/docs/real_sem_comparison.md)).
+
 For average2/average4 datasets with or without affine registration, see
 [block-averaged training and test datasets](../edge_denoise/docs/real_sem_block_datasets.md).
 One command mirrors the raw `all/train/test` tree and builds compatible training
@@ -9,12 +19,12 @@ To run burst diffusion's training objective on real repeats (T = 16; one model f
 registered m-frame means, compared against registered raw averages), see
 [burst diffusion on real repeats](../edge_denoise/docs/real_sem_next_phase.md#burst-diffusion-on-real-repeats-t--16-single-frame-and-m-frame-inputs).
 
-For a visual audit of the six real-N2N registration/brightness treatments, see
+For the **comparison report** (several models side by side on one test site), see
 [the uint8 comparison guide](../edge_denoise/docs/real_sem_comparison.md): full-image
 frame sliders, overlapping wipe, inspectable contours, and direct output/raw
 brightness comparisons. Existing saved reports can be rebuilt without inference.
-Start with `edge_denoise/configs/sem_real_compare.yml` and pilot one test site
-with `python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --experiment-prefix 260921_real_n2n`.
+Start with `edge_denoise/configs/sem_real_comparison.yml` and pilot one test site
+with `python tools/real_sem_comparison.py --config edge_denoise/configs/sem_real_comparison.yml --experiment-prefix 260921_real_n2n`.
 Replace that example prefix with your experiment date/model; the base config
 uses `/data/260904_raw_data/test/260904_0947-13`.
 
@@ -22,7 +32,7 @@ The base recipe now uses Gaussian + Otsu contours in the main report. To test it
 on an existing report without inference, run on the server:
 
 ```bash
-python tools/real_sem_compare.py \
+python tools/real_sem_comparison.py \
   --from-comparison output/260921_real_n2n_comparison/comparison.json \
   --output-dir output/260921_real_n2n_otsu_comparison \
   --contour-method otsu --metrology-device cuda:0
@@ -125,7 +135,7 @@ Install a CUDA-enabled PyTorch build matching the target machine's driver
 
 ---
 
-## 1b. Characterize real SEM acquisitions before training
+## 1b. Stability report: characterize real SEM acquisitions
 
 Real repeated SEM data can be characterized before training with the independent
 `sem_noise` package. Install `python -m pip install -e ".[analysis]"`, then:
@@ -254,7 +264,7 @@ N2N/mean-target experiments. All real measurements use decoded saved uint8 PNGs.
 To denoise a whole folder of real
 noisy frames with an existing checkpoint and characterize the noise before and
 after, see the
-[batch inference runbook](../edge_denoise/docs/real_sem_batch_inference.md) —
+[stability report guide](../edge_denoise/docs/real_sem_stability.md) —
 it needs no data preparation.
 
 Deterministic single-pass denoisers aimed at metrology *precision* (CD and

@@ -42,7 +42,7 @@ def test_repeatability_is_within_hole_sample_sd_on_common_holes():
 def test_native_saved_holes_known_diameter_variation_and_translation(tmp_path):
     from scipy.special import erf
     from sem_segment.config import Config
-    from tools.real_sem_compare import save_rgb, measure_series, registration_tracks
+    from tools.real_sem_comparison import save_rgb, measure_series, registration_tracks
 
     yy, xx = np.mgrid[:96, :96]
     frames = []
@@ -65,7 +65,7 @@ def test_native_saved_holes_known_diameter_variation_and_translation(tmp_path):
     assert refined["median_cd_3sigma"] == pytest.approx(6, abs=.45)
     assert len(contours) == 3 and valid[1]["clipped"]
     # Estimate translation using the existing estimator on saved pixels.
-    from tools.real_sem_compare import read_uint8
+    from tools.real_sem_comparison import read_uint8
     shifted = 220 - 170 * .5 * (1 + erf((11 - np.hypot(yy - 50, xx - 47)) / 1.4))
     save_rgb(tmp_path / "translated.png", np.rint(shifted).astype(np.uint8))
     tracks = registration_tracks(read_uint8(tmp_path / "0.png"), [tmp_path / "translated.png"], 1.)

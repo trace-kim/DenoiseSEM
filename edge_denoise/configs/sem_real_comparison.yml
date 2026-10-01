@@ -1,5 +1,5 @@
 # Run on the server from the repository root:
-# python tools/real_sem_compare.py --config edge_denoise/configs/sem_real_compare.yml --experiment-prefix 260921_real_n2n
+# python tools/real_sem_comparison.py --config edge_denoise/configs/sem_real_comparison.yml --experiment-prefix 260921_real_n2n
 # Six treatments of the SAME real N2N recipe (sem_real_n2n.yml), in experiment order.
 # Override directories with --experiment-prefix, --checkpoint NAME=PATH,
 # --site-dir and --output-dir. No retraining.

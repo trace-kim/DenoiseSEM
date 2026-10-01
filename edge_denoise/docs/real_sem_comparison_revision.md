@@ -21,18 +21,18 @@ explanations for those particular segmentation failures.
 
 | Finding | Evidence | Consequence |
 |---|---|---|
-| Model outputs enter the acquisition-correction workflow. | `tools/real_sem_compare.py:348` calls `analyze_dataset` for every series; `AnalysisConfig.registration` defaults to `affine`; `sem_noise/pipeline.py:181` invokes pair and acquisition brightness diagnostics. | The report asks how one output can be corrected to another output/reference, instead of whether that output preserves its corresponding raw input. |
-| The diagnostic brightness corrections are real calculations, but do not overwrite the model PNGs. | `sem_noise/pair_diagnostics.py:61` and `:71` create `gain * frame + offset` arrays, plot their means, and save example diagnostic NPZs. The main noise moments use translation-only copies (`sem_noise/pipeline.py:249`); comparison metrology reads saved PNGs (`tools/real_sem_compare.py:283`). | Remove these calculations from the comparison path, not merely their captions. It would be inaccurate to claim that every stored prediction or every metric has been gain-corrected. |
-| Predictions are already quantized before comparison measurements. | `edge_denoise/uint8_output.py:18` restores checkpoint intensity units, audits range, then rounds/clips to uint8 at `:30`. `tools/real_sem_compare.py:550` computes brightness from that exported image. | Preserve this required contract: analysis measures delivered uint8 pixels. Intermediate floating-point predictions must never supply metrology. Range flags describe image production only. |
+| Model outputs enter the acquisition-correction workflow. | `tools/real_sem_comparison.py:348` calls `analyze_dataset` for every series; `AnalysisConfig.registration` defaults to `affine`; `sem_noise/pipeline.py:181` invokes pair and acquisition brightness diagnostics. | The report asks how one output can be corrected to another output/reference, instead of whether that output preserves its corresponding raw input. |
+| The diagnostic brightness corrections are real calculations, but do not overwrite the model PNGs. | `sem_noise/pair_diagnostics.py:61` and `:71` create `gain * frame + offset` arrays, plot their means, and save example diagnostic NPZs. The main noise moments use translation-only copies (`sem_noise/pipeline.py:249`); comparison metrology reads saved PNGs (`tools/real_sem_comparison.py:283`). | Remove these calculations from the comparison path, not merely their captions. It would be inaccurate to claim that every stored prediction or every metric has been gain-corrected. |
+| Predictions are already quantized before comparison measurements. | `edge_denoise/uint8_output.py:18` restores checkpoint intensity units, audits range, then rounds/clips to uint8 at `:30`. `tools/real_sem_comparison.py:550` computes brightness from that exported image. | Preserve this required contract: analysis measures delivered uint8 pixels. Intermediate floating-point predictions must never supply metrology. Range flags describe image production only. |
 | Segmentation has another contrast transformation. | `sem_segment/config.py:110` defaults to a 1st–99th percentile stretch; `sem_segment/pipeline.py:238` passes that copy to segmentation. Refinement samples the unstretched measurement image. | Saved pixels are preserved, but mask detection sees an adjusted copy. The comparison should disable this automatic stretch under the requested no-correction contract. |
 | The report prints internal metrics rather than selecting meaningful questions. | `sem_noise/comparison_report.py:26` collects every numerical mode statistic; `:216` renders the resulting list. Different series independently choose low-gradient masks (`sem_noise/metrics.py:227`). | Large tables are difficult to interpret, and identical settings do not guarantee identical measurement support between models. |
 | Most acquisitions cannot be inspected through the comparison figures. | `sem_noise/comparison_report.py:191` shows only the first acquisition of each eight-frame block and its predictions. | The other 112 predictions per model are saved, but lack a usable sequence viewer. |
-| Full-image contour evidence is discarded. | `tools/real_sem_compare.py:330` retains outlines only for matched holes 1–4. The renderer combines all their frames on the first image and caps crop radius at 32 pixels (`sem_noise/comparison_report.py:234`). | Large holes are cut off. Unmatched/border detections and failures cannot be inspected. A displayed outline is not necessarily from the displayed acquisition. |
-| A noisy correspondence template can disable all later comparisons. | `tools/real_sem_compare.py:474` segments the first eight-frame mean; only non-border regions become template holes. Empty templates produce no observation rows. | Good model segmentations can still have no matched CD results. Missing measurements need an explicit unavailable state, not empty plots or misleading zero counts. |
+| Full-image contour evidence is discarded. | `tools/real_sem_comparison.py:330` retains outlines only for matched holes 1–4. The renderer combines all their frames on the first image and caps crop radius at 32 pixels (`sem_noise/comparison_report.py:234`). | Large holes are cut off. Unmatched/border detections and failures cannot be inspected. A displayed outline is not necessarily from the displayed acquisition. |
+| A noisy correspondence template can disable all later comparisons. | `tools/real_sem_comparison.py:474` segments the first eight-frame mean; only non-border regions become template holes. Empty templates produce no observation rows. | Good model segmentations can still have no matched CD results. Missing measurements need an explicit unavailable state, not empty plots or misleading zero counts. |
 | Raw segmentation failure can suppress valid model summaries. | `sem_segment/repeatability.py:85` intersects usable holes across raw, average8, and every model. | One unreliable series can empty the common set for all models. Coverage and model-to-model comparisons should remain inspectable independently. |
 | Warning prose overstates evidence and lacks a visual location. | `sem_segment/pipeline.py:345` calls a decrease of more than 2% in sampled gradient strength degraded; `:374` asserts those contours are worse. The coordinator saves warning strings, not per-region edge-strength changes. | A weaker sampled gradient is a reason to inspect, not proof of an incorrect physical boundary. Changing numbers make many warning strings unique, defeating the renderer's text deduplication. |
 | ECD and refined ECD lack measurement evidence. | `sem_segment/metrology.py:201` measures polygon area; `:219` computes diameter. `RefinedContour.polygon` retains coarse vertices wherever refinement failed (`sem_segment/refine.py:126`). Comparison exports omit those validity flags and interior rings. | The reader cannot see which area produced ECD or which boundary sections were actually refined. The comparison also hardcodes ECD despite the general metrology module supporting other CD definitions. |
-| “Complete” describes execution, not usable contours. | `tools/real_sem_compare.py:572` sets overall completion from noise-analysis status alone. | Successful execution can coexist with no usable CD evidence. Both states must be visible without a warning wall. |
+| “Complete” describes execution, not usable contours. | `tools/real_sem_comparison.py:572` sets overall completion from noise-analysis status alone. | Successful execution can coexist with no usable CD evidence. Both states must be visible without a warning wall. |
 | TensorBoard repeats the same presentation problems. | `sem_noise/comparison_report.py:284` exports every scalar; `:294` duplicates shared figures under multiple model tags. | It reproduces the table dump and static panels rather than offering acquisition browsing. |
 
 The default comparison segmenter is global Otsu thresholding with dark polarity,
@@ -126,7 +126,7 @@ success from contour availability.
 
 1. **Remove the wrong analysis path and fix the pixel contract.** Stop invoking
    the complete `sem_noise.pipeline.analyze_dataset` workflow from
-   `tools/real_sem_compare.py`. Reuse the existing mean/range/translation data
+   `tools/real_sem_comparison.py`. Reuse the existing mean/range/translation data
    and add only the small native-pixel difference and temporal-variation
    calculations the report displays. Place reusable numerical helpers in
    `sem_noise`, with no training imports. Remove correction-report links and
@@ -236,11 +236,11 @@ Targeted regression checks should cover:
   continue to apply if shared numerical code changes.
 
 **Historical audit verification:**
-`python -m pytest tests/edge_denoise/test_real_sem_compare.py tests/sem_segment/test_repeatability.py -q`
+`python -m pytest tests/edge_denoise/test_real_sem_comparison.py tests/sem_segment/test_repeatability.py -q`
 passed **25 tests**. These establish current contracts, not real-data contour
 quality or usable UI. In particular, the six-model workflow test mocks noise,
 registration, and segmentation, and explicitly requires affine analysis for
-every series (`tests/edge_denoise/test_real_sem_compare.py:170`). That expectation
+every series (`tests/edge_denoise/test_real_sem_comparison.py:170`). That expectation
 must be replaced, not preserved, when implementing this plan. No production
 code or remote artifacts were changed during the audit.
 

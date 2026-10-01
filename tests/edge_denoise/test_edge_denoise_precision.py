@@ -10,7 +10,7 @@ from sem_segment.config import RefineConfig
 from sem_segment.otsu_baseline import OtsuSettings
 from sem_segment.otsu_measurement import measure_saved_otsu
 from sem_segment.repeatability import summarize_observations
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 from test_real_sem_viewer import saved_record
 
 

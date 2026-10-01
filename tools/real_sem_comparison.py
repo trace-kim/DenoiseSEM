@@ -1,7 +1,7 @@
-"""Compare saved uint8 outputs: python tools/real_sem_compare.py --config PATH.
+"""Compare saved uint8 outputs: python tools/real_sem_comparison.py --config PATH.
 
 This coordinator is the only layer coupling training, noise and segmentation.
-Paths in YAML are relative to the repository root, as in real_sem_experiment.
+Paths in YAML are relative to the repository root, as in real_sem_stability.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.real_sem_experiment import EXTENSIONS
+from tools.real_sem_stability import EXTENSIONS
 from edge_denoise.uint8_output import RANGE_WARNING, average_uint8, prediction_uint8
 from sem_noise.progress import Progress
 from sem_segment.otsu_baseline import OtsuSettings
@@ -1213,7 +1213,7 @@ def load_otsu_settings(path: Path) -> OtsuSettings:
 
 
 def configure_run(args: argparse.Namespace) -> ComparisonSettings:
-    config = load_settings(args.config or ROOT / "edge_denoise/configs/sem_real_compare.yml")
+    config = load_settings(args.config or ROOT / "edge_denoise/configs/sem_real_comparison.yml")
     if args.site_dir:
         name = args.site or args.site_dir.name
         config.sites = {name: SiteSettings(source_dir=(ROOT / args.site_dir.expanduser()).resolve())}
@@ -1272,7 +1272,7 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group()
-    source.add_argument("--config", type=Path, help="Base YAML; defaults to edge_denoise/configs/sem_real_compare.yml")
+    source.add_argument("--config", type=Path, help="Base YAML; defaults to edge_denoise/configs/sem_real_comparison.yml")
     source.add_argument("--from-comparison", type=Path, help="Rebuild from comparison.json and saved uint8 images; no inference")
     parser.add_argument("--render-only", action="store_true", help="Reuse v3 measurements instead of remeasuring contours")
     parser.add_argument("--contours-only", action="store_true", help="Remeasure contours; reuse saved brightness/noise/drift analysis")

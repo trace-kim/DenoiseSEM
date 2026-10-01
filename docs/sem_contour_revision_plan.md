@@ -10,7 +10,7 @@
 
 > Follow-up scope, 2026-09-22: the user requested integration into the actual
 > remote analysis workflow. Gaussian + Otsu now runs through
-> `tools/real_sem_compare.py` for both new runs and saved-report rebuilds, and
+> `tools/real_sem_comparison.py` for both new runs and saved-report rebuilds, and
 > is the default in the real comparison recipe. Closed masks feed the existing
 > area/ECD calculation; open border paths remain unmeasured. The original
 > preview-only scope below is retained as history. See the
@@ -42,8 +42,8 @@ The committed baseline is `29e3a106f0b2d3e321eadbc2f6d6c391753ce6a3`.
 
 After checking for newer user edits, withdraw the screenshot-driven drafts in:
 
-- `tools/real_sem_compare.py`
-- `edge_denoise/configs/sem_real_compare.yml`
+- `tools/real_sem_comparison.py`
+- `edge_denoise/configs/sem_real_comparison.yml`
 - `sem_noise/assets/comparison.html`, `comparison.css`, and `comparison.js`
 
 Preserve the `AGENTS.md` memory update against ad hoc fixes and the unrelated

@@ -86,8 +86,8 @@ example training run above:
 
 ```bash
 VARIANT=average2
-python tools/real_sem_compare.py \
-  --config edge_denoise/configs/sem_real_compare.yml \
+python tools/real_sem_comparison.py \
+  --config edge_denoise/configs/sem_real_comparison.yml \
   --only-checkpoints \
   --checkpoint "n2n=runs/edge_denoise/260929_real_n2n_${VARIANT}_affine_percentile/ckpt_latest.pt" \
   --site-dir "/data/260929_block_data/$VARIANT/raw/test/260904_0947-13" \

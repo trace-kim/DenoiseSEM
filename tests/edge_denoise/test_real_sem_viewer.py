@@ -14,7 +14,7 @@ from sem_noise.pipeline import write_json
 from sem_segment.config import Config
 from sem_segment.contours import polygon_area
 from sem_segment.repeatability import summarize_observations
-from tools import real_sem_compare as compare
+from tools import real_sem_comparison as compare
 
 
 def saved_record(root: Path, count: int = 8, *, models: tuple[str, ...] = ("model",)) -> Path:
