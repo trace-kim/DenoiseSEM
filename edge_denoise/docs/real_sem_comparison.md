@@ -242,6 +242,7 @@ GPU settings come from the base config. Other useful flags:
 | `--checkpoint-name ckpt_best.pt` | Checkpoint filename inside each prefixed folder. |
 | `--model affine_percentile` | Compare only this configured arm; repeat for several. |
 | `--prepared-manifest NAME=PATH` | Supply the original manifest when a checkpoint's dataset moved. |
+| `--outputs NAME=DIR` | Add saved native-size uint8 outputs of another pipeline (`<source stem>.png`, e.g. `tools/ddim_denoise_from_t.py --native-size`). No inference and no training-split check. |
 | `--site NAME` | Select one named site from a multi-site config; with `--site-dir`, name the overridden site. |
 | `--segmentation-config PATH` | Crop, physical scale and metrology settings; also detector/refinement settings for `current`. |
 | `--contour-method otsu` | Use Gaussian + Otsu in the main report; `current` selects the previous method. |

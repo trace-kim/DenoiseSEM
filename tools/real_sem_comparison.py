@@ -69,6 +69,9 @@ class ComparisonSettings(BaseModel):
     # Frame counts for burst-fusion checkpoints: {model}_fuse{m} over the same
     # consecutive blocks as the averages; empty = single-frame outputs only.
     fusion_frames: list[int] = Field(default_factory=list)
+    # Saved uint8 outputs from another pipeline (e.g. naive DDIM), one PNG per
+    # source frame named <source stem>.png; analysed like a model, no inference.
+    outputs: dict[str, Path] = Field(default_factory=dict)
     template_limit: bool = False
     otsu: OtsuSettings = Field(default_factory=OtsuSettings)
     metrology_device: str | None = Field(default=None, pattern=r"^(cpu|cuda|cuda:[0-9]+)$")
@@ -124,6 +127,7 @@ def load_settings(path: Path, *, root: Path = ROOT) -> ComparisonSettings:
     config.output_dir = resolve(config.output_dir)
     config.analysis_config = resolve(config.analysis_config)
     config.segmentation_config = resolve(config.segmentation_config)
+    config.outputs = {name: resolve(path) for name, path in config.outputs.items()}
     config.checkpoints = {name: arm.model_copy(update={"checkpoint": resolve(arm.checkpoint),
                                                     "prepared_manifest": resolve(arm.prepared_manifest)})
                           for name, arm in config.checkpoints.items()}
@@ -145,8 +149,13 @@ def validate_inputs(config: ComparisonSettings) -> dict[str, list[Path]]:
         for name in names:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
                 raise ValueError(f"Use letters, digits, underscores or hyphens for names: {name}")
+    if {n.casefold() for n in config.checkpoints} & {n.casefold() for n in config.outputs}:
+        raise ValueError("--outputs names must differ from checkpoint names")
+    for name, folder in config.outputs.items():
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) or not folder.is_dir():
+            raise ValueError(f"--outputs {name}: need a simple name and an existing folder: {folder}")
     if any(name.casefold() == "raw" or re.fullmatch(r"average\d+(?:_registered)?|.*_average\d+|.*_fuse\d+", name.casefold())
-           for name in config.checkpoints):
+           for name in [*config.checkpoints, *config.outputs]):
         raise ValueError("raw, average8, average128 and *_fuse<m> are reserved series names")
     if config.average_model is not None and config.average_model not in config.checkpoints:
         raise ValueError("--average-model must name an included validation-selected model")
@@ -963,6 +972,41 @@ def run(config: ComparisonSettings) -> dict:
                 save()
             with Progress(f"{model_name}: releasing denoiser"):
                 del denoiser
+        for model_name, folder in config.outputs.items():
+            # No checkpoint, so no training-split verification: the caller vouches
+            # that these outputs come from a model that never saw the test site.
+            record["models"][model_name] = {
+                "checkpoint": str(folder), "sha256": None, "step": None, "black_level": 0.0, "white_level": 255.0,
+                "config": {}, "ema": None, "precomputed_outputs": str(folder),
+                "arm": {"registration": "none", "brightness": "none", "settings_source": "precomputed outputs (unverified split)",
+                        "evaluation_split": config.evaluation_split}}
+            record["warnings"].append(f"{model_name}: precomputed outputs from {folder}; training split not verified.")
+            for site in record["sites"]:
+                series = {"frames": [], "step": None}
+                site["series"][model_name] = series
+                for raw in site["series"]["raw"]["frames"]:
+                    path = Path(site["name"]) / model_name / Path(raw["path"]).name
+                    saved = folder / f"{Path(raw['source']).stem}.png"
+                    if not saved.is_file():
+                        raise ValueError(f"{model_name}: missing output {saved}")
+                    pixels = read_uint8(saved)
+                    if pixels.shape != read_uint8(root / raw["path"]).shape:
+                        raise ValueError(f"{model_name}: {saved.name} differs in size from its source; save at native size")
+                    save_rgb(root / path, pixels)
+                    frame = {k: raw[k] for k in ("index", "order", "timestamp_s", "dy_px", "dx_px", "registration_status",
+                                                 "registration_score", "registration_error")}
+                    frame.update(path=path.as_posix(), minimum_dn=float(pixels.min()), maximum_dn=float(pixels.max()),
+                                 clipped=False, warning="")
+                    series["frames"].append(frame)
+                reference = read_uint8(root / site["full_average"])
+                output_registration_diagnostics(root, reference, series, noise.registration_sigma)
+                analyze_series(root, model_name, series, noise, raw_frames=site["series"]["raw"]["frames"],
+                               difference_limit=config.difference_limit_dn, **native_options)
+                observations, contours = measure_series(root, model_name, series, np.array(site["template_centroids"]),
+                                                        site["match_gate_px"], segment, **contour_options, **execution_options)
+                site["observations"].extend(observations)
+                site["contours"].extend(contours)
+                save()
         if config.average_model is not None:
             for site in record["sites"]:
                 added = add_average_series(root, site, config.average_frames, device=segment.refine.device,
@@ -1243,6 +1287,7 @@ def configure_run(args: argparse.Namespace) -> ComparisonSettings:
             # New model names inherit their actual treatment from the checkpoint
             # and verified prepared manifest, rather than a guessed default.
             config.checkpoints[name] = ComparisonArm(checkpoint=path)
+    config.outputs.update(_assignments(args.outputs))
     for name, path in _assignments(args.prepared_manifest).items():
         if name not in config.checkpoints:
             raise ValueError(f"Unknown model override: {name}")
@@ -1288,6 +1333,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", action="append", metavar="NAME=PATH", help="Add a named model or override a checkpoint; new names read their training treatment from checkpoint metadata")
     parser.add_argument("--only-checkpoints", action="store_true", help="Compare only the named --checkpoint entries, omitting other base-config arms")
     parser.add_argument("--prepared-manifest", action="append", metavar="NAME=PATH")
+    parser.add_argument("--outputs", action="append", metavar="NAME=DIR",
+                        help="Add saved native-size uint8 outputs (<source stem>.png) of another pipeline as a model, e.g. naive DDIM")
     parser.add_argument("--segmentation-config", type=Path)
     parser.add_argument("--contour-method", choices=("otsu", "current", "otsu_refined"),
                         help="Use Gaussian + Otsu masks, or the existing segmentation/refinement method")
@@ -1323,7 +1370,7 @@ def main() -> int:
             if not args.output_dir:
                 raise ValueError("--from-comparison requires --output-dir (may be the original directory with --render-only)")
             if any((args.site_dir, args.site, args.model, args.experiment_prefix, args.checkpoint, args.only_checkpoints,
-                    args.prepared_manifest, args.device, args.tile_batch, args.difference_limit_dn, args.evaluation_split)):
+                    args.prepared_manifest, args.outputs, args.device, args.tile_batch, args.difference_limit_dn, args.evaluation_split)):
                 raise ValueError("Rebuild uses saved images and settings; omit inference/site overrides")
             record = rebuild(args.from_comparison, args.output_dir, metrology_device=args.metrology_device,
                              segmentation_config=args.segmentation_config, contour_method=args.contour_method,

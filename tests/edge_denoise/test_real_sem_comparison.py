@@ -549,3 +549,38 @@ def test_live_panels_preserve_actual_training_samples_and_weights(tmp_path):
         assert torch.equal(states[0]["model"][key], states[1]["model"][key]), key
     assert states[0]["factory"] == states[1]["factory"]
     assert torch.equal(states[0]["torch_rng"], states[1]["torch_rng"])
+
+
+def test_precomputed_outputs_are_analysed_like_a_model(tmp_path, monkeypatch):
+    from sem_noise.comparison_report import comparison_arms
+
+    source, _ = _inputs(tmp_path)
+    arm, training_config, digest = _arm_fixture(tmp_path)
+    denoiser = SimpleNamespace(config=training_config, dataset_fingerprint=digest, image_size=16,
+                               checkpoint_step=5, default_margin=0, denoise_full=lambda frame, **kwargs: frame)
+    monkeypatch.setattr(Denoiser, "from_checkpoint", lambda *args, **kwargs: denoiser)
+    track = {"dy_px": 0., "dx_px": 0., "registration_status": "registered", "registration_score": 1.,
+             "registration_error": "", "mean_dn": 0.}
+    monkeypatch.setattr(compare, "registration_tracks", lambda reference, paths, sigma: [dict(track) for _ in paths])
+    monkeypatch.setattr(compare, "prepare_reference", lambda root, site, *a, **k: (
+        site.update(template_centroids=[], match_gate_px=1.) or (None, None)))
+    monkeypatch.setattr(compare, "analyze_series", lambda *args, **kwargs: None)
+    monkeypatch.setattr(compare, "measure_series", lambda *args, **kwargs: ([], []))
+    monkeypatch.setattr(compare, "finish_comparison", lambda root, record: record.update(status="complete"))
+    outputs = tmp_path / "ddim"
+    outputs.mkdir()
+    for i in range(128):
+        Image.fromarray(np.full((16, 16), 255 - i, dtype=np.uint8)).save(outputs / f"frame_{i+1}.png")
+    config = compare.ComparisonSettings(checkpoints={"n2n": arm}, outputs={"naive_ddim": outputs},
+                                        sites={"site": compare.SiteSettings(source_dir=source)}, output_dir=tmp_path / "output")
+    result = compare.run(config)
+    frames = result["sites"][0]["series"]["naive_ddim"]["frames"]
+    assert len(frames) == 128 and frames[9]["path"] == "site/naive_ddim/frame_010.png"
+    assert np.all(compare.read_uint8(config.output_dir / frames[9]["path"]) == 246)
+    assert frames[0]["output_minus_raw_dy_px"] == 0
+    assert [row["arm"] for row in comparison_arms(result)] == ["n2n", "naive_ddim"]
+    assert any("naive_ddim: precomputed outputs" in warning for warning in result["warnings"])
+
+    Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(outputs / "frame_5.png")
+    with pytest.raises(ValueError, match="native size"):
+        compare.run(config.model_copy(update={"output_dir": tmp_path / "other"}))

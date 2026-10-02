@@ -64,6 +64,11 @@ def main():
         help="multiply the image by sqrt(alpha_bar_t) before inserting (x_t = sqrt(a)x0 + sqrt(1-a)eps)",
     )
     parser.add_argument("--save-trajectory", action="store_true", help="also save x0 prediction at every step")
+    parser.add_argument(
+        "--native-size",
+        action="store_true",
+        help="resize the result back to the input's size (bilinear) and save it as uint8 grayscale",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -115,6 +120,7 @@ def main():
 
     for path in paths:
         with Image.open(path) as image:
+            native_hw = (image.height, image.width)
             x = transform(image.convert("L" if config.data.channels == 1 else "RGB"))
         x = data_transform(config, x[None].to(device))
         if args.scale_input:
@@ -122,7 +128,13 @@ def main():
         xs, x0_preds = generalized_steps(x, seq, model, betas, eta=args.eta)
 
         stem = os.path.splitext(os.path.basename(path))[0]
-        tvu.save_image(inverse_data_transform(config, xs[-1].to(device)), os.path.join(args.out, f"{stem}.png"))
+        result = inverse_data_transform(config, xs[-1].to(device))
+        if args.native_size:
+            result = torch.nn.functional.interpolate(result, size=native_hw, mode="bilinear", align_corners=False)
+            pixels = (result[0].mean(dim=0).clamp(0, 1) * 255).round().byte().cpu().numpy()
+            Image.fromarray(pixels).save(os.path.join(args.out, f"{stem}.png"))
+        else:
+            tvu.save_image(result, os.path.join(args.out, f"{stem}.png"))
         if args.save_trajectory:
             for i, x0 in enumerate(x0_preds):
                 tvu.save_image(
