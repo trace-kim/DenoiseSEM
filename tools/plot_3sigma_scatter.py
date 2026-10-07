@@ -111,11 +111,24 @@ def draw(ax, column, title):
     ax.set_title(title, loc="left", color=INK, fontsize=FONT_SIZE + 1, fontweight="bold", pad=6)
 
 
+def last_point(model, column):
+    """(value, slot) at the model's own last frame count; the file's last one may not include it."""
+    for i in range(last, -1, -1):
+        y = value(model, column, frames[i])
+        if not math.isnan(y):
+            return y, i
+    return math.nan, last
+
+
 def names(ax, column):
-    """Name every model (and POR) beside its marker at the last frame count, pushed apart to not overlap."""
-    entries = [(m, value(m, column, frames[-1]), last + offset(m, column, frames[-1])) for m in models]
+    """Name every model (and POR) beside its last marker, pushed apart to not overlap."""
+    entries = []
+    for m in models:
+        y, i = last_point(m, column)
+        entries.append((m, y, i + offset(m, column, frames[i])))
     if has_por:
-        entries.append((POR_MODEL, value(POR_MODEL, column, frames[-1]), last + POR_BAR / 2))
+        y, i = last_point(POR_MODEL, column)
+        entries.append((POR_MODEL, y, i + POR_BAR / 2))
     entries = sorted((e for e in entries if not math.isnan(e[1])), key=lambda e: e[1])
     bottom, top = ax.get_ylim()
     height_pt = ax.get_window_extent().height * 72 / ax.figure.dpi
