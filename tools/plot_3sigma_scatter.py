@@ -7,7 +7,8 @@ Output: PNG (300 dpi) + SVG sized for a 12.7 x 12.7 cm slide box.
 At each frame count POR is a short black bar and the models are markers next to it,
 ordered by value (highest on the left), so "below the bar" reads as "better than POR".
 HIGHLIGHT is drawn in the deck blue; the other models keep their own light colour.
-Each model is named beside its marker at the last frame count (no legend).
+Each model is named once, right beside one of its own markers, at the first spot
+(latest frame count first) where the name overlaps no marker, bar or other name.
 """
 
 import math
@@ -43,11 +44,10 @@ POR_BAR = 0.76                             # bar length, fraction of one frame s
 BANDS = False                              # light block behind each frame count
 SPREAD = 0.7                               # width the markers of one frame count spread over (fraction of slot)
 HIGHLIGHT_SIZE, OTHER_SIZE = 6.5, 4.5      # marker sizes in points
-LABEL_SIZE = 6.5                           # model names next to the last frame count
+LABEL_SIZE = 6.5                           # model names beside their markers
 FONT = ["Arial", "DejaVu Sans"]            # matplotlib renders the variable Noto Sans KR as Thin
 FONT_SIZE = 9
 INK, SECONDARY, BASELINE, GRID, BAND = "#1A1A1A", "#4A4A4A", "#BDBCB6", "#E9E8E3", "#F4F3EF"
-LEADER = "#C8C7C2"                         # thin line from a name to its marker
 # --------------------------------------------------------------------------
 
 plt.rcParams.update({
@@ -111,40 +111,71 @@ def draw(ax, column, title):
     ax.set_title(title, loc="left", color=INK, fontsize=FONT_SIZE + 1, fontweight="bold", pad=6)
 
 
-def last_point(model, column):
-    """(value, slot) at the model's own last frame count; the file's last one may not include it."""
-    for i in range(last, -1, -1):
-        y = value(model, column, frames[i])
-        if not math.isnan(y):
-            return y, i
-    return math.nan, last
+def anchors(model, column):
+    """Every drawn mark of a model as (slot, centre x, centre y, half width, half height) in pixels."""
+    pt = plt.gcf().dpi / 72
+    out = []
+    for i, f in enumerate(frames):
+        v = value(model, column, f)
+        if math.isnan(v):
+            continue
+        if model == POR_MODEL:
+            (x0, y), (x1, _) = AX.transData.transform([(i - POR_BAR / 2, v), (i + POR_BAR / 2, v)])
+            out.append((i, (x0 + x1) / 2, y, (x1 - x0) / 2, 1.2 * pt))
+        else:
+            x, y = AX.transData.transform((i + offset(model, column, f), v))
+            half = style(model)["ms"] / 2 * pt
+            out.append((i, x, y, half, half))
+    return out
+
+
+def overlap(a, b):
+    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
 
 
 def names(ax, column):
-    """Name every model (and POR) beside its last marker, pushed apart to not overlap."""
-    entries = []
-    for m in models:
-        y, i = last_point(m, column)
-        entries.append((m, y, i + offset(m, column, frames[i])))
-    if has_por:
-        y, i = last_point(POR_MODEL, column)
-        entries.append((POR_MODEL, y, i + POR_BAR / 2))
-    entries = sorted((e for e in entries if not math.isnan(e[1])), key=lambda e: e[1])
-    bottom, top = ax.get_ylim()
-    height_pt = ax.get_window_extent().height * 72 / ax.figure.dpi
-    gap = LABEL_SIZE * 1.25 / height_pt * (top - bottom)
-    ys = [e[1] for e in entries]
-    for i in range(1, len(ys)):                                    # push up past the one below
-        ys[i] = max(ys[i], ys[i - 1] + gap)
-    for i in range(len(ys) - 1, -1, -1):                           # then back down under the top
-        ys[i] = min(ys[i], (ys[i + 1] if i + 1 < len(ys) else top) - gap)
-    x_text = last + 0.5 + 0.3
-    for (model, y, x), y_text in zip(entries, ys):
+    """Name each model once, beside one of its own markers, where the name hits nothing else."""
+    global AX
+    AX = ax
+    renderer = ax.figure.canvas.get_renderer()
+    pad = 1.2 * ax.figure.dpi / 72
+    frame = ax.get_window_extent()
+    marks = {m: anchors(m, column) for m in ([POR_MODEL] if has_por else []) + models}
+    clear = 3.5 * pad                                              # empty space between a name and other models' marks
+    taken = [(x - w - clear, y - h - clear, x + w + clear, y + h + clear)
+             for a in marks.values() for _, x, y, w, h in a]
+    for model in [m for m in (POR_MODEL, HIGHLIGHT) if m in marks] + [m for m in models if m != HIGHLIGHT]:
         bold = model in (HIGHLIGHT, POR_MODEL)
-        ax.plot([x + 0.06, x_text - 0.05], [y, y_text], color=LEADER, lw=0.5, zorder=2, clip_on=False)
-        ax.text(x_text, y_text, model, va="center", ha="left", fontsize=LABEL_SIZE, clip_on=False,
-                color=HIGHLIGHT_COLOR if model == HIGHLIGHT else INK if bold else SECONDARY,
-                fontweight="bold" if bold else "normal")
+        text = ax.text(0, 0, model, fontsize=LABEL_SIZE, ha="left", va="baseline", zorder=6,
+                       color=HIGHLIGHT_COLOR if model == HIGHLIGHT else INK if bold else SECONDARY,
+                       fontweight="bold" if bold else "normal")
+        box = text.get_window_extent(renderer)
+        origin = AX.transData.transform((0, 0))
+        dx0, dy0, tw, th = box.x0 - origin[0], box.y0 - origin[1], box.width, box.height
+        best = None
+        def covered(a):                                            # a marker partly hidden by another model's
+            box = (a[1] - a[3], a[2] - a[4], a[1] + a[3], a[2] + a[4])
+            return sum(overlap(box, (x - w, y - h, x + w, y + h))
+                       for m, other in marks.items() if m != model for _, x, y, w, h in other) > 0
+        for _, x, y, w, h in sorted(marks[model], key=lambda a: (covered(a), -a[0])):
+            spots = [(x + w + pad, y - th / 2), (x - w - pad - tw, y - th / 2),   # right, left
+                     (x - tw / 2, y + h + pad), (x - tw / 2, y - h - pad - th)]   # above, below
+            for x0, y0 in spots:
+                rect = (x0, y0, x0 + tw, y0 + th)
+                if x0 < frame.x0 or rect[2] > frame.x1 or y0 < frame.y0 or rect[3] > frame.y1:
+                    continue
+                own = [(ox - ow - clear, oy - oh - clear, ox + ow + clear, oy + oh + clear)
+                       for _, ox, oy, ow, oh in marks[model]]
+                cost = sum(overlap(rect, t) for t in taken if t not in own)
+                if best is None or cost < best[0]:
+                    best = (cost, rect)
+                if cost == 0:
+                    break
+            if best and best[0] == 0:
+                break
+        rect = best[1] if best else (frame.x1 - tw, frame.y1 - th, frame.x1, frame.y1)
+        text.set_position(AX.transData.inverted().transform((rect[0] - dx0, rect[1] - dy0)))
+        taken.append((rect[0] - pad / 2, rect[1] - pad / 2, rect[2] + pad / 2, rect[3] + pad / 2))
 
 
 fig, axes = plt.subplots(1, len(PANELS), figsize=(SIZE_CM[0] / 2.54, SIZE_CM[1] / 2.54),
@@ -152,7 +183,8 @@ fig, axes = plt.subplots(1, len(PANELS), figsize=(SIZE_CM[0] / 2.54, SIZE_CM[1] 
 for ax, (column, title) in zip(axes, PANELS):
     draw(ax, column, title)
 fig.supxlabel(X_LABEL, color=SECONDARY, fontsize=FONT_SIZE)
-fig.canvas.draw()                                                  # lays out the panels, so name spacing is in real points
+fig.canvas.draw()                                                  # lays out the panels, so names are placed in real points
+fig.set_layout_engine("none")
 for ax, (column, title) in zip(axes, PANELS):
     names(ax, column)
 for suffix, extra in ((".png", {"dpi": 300}), (".svg", {})):
