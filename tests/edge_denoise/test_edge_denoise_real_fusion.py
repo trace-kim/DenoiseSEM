@@ -214,6 +214,19 @@ def test_shipped_recipe_is_fresh_t16_l2_on_the_real_n2n_backbone() -> None:
     assert cfg.training.batch_size * cfg.training.accumulation_steps == 16
 
 
+def test_eight_frame_continuation_matches_the_t16_run_except_burst_length() -> None:
+    root = Path(__file__).resolve().parents[2]
+    cfg = load_config(root / "edge_denoise/configs/sem_real_burst_ft8.yml")
+    base = load_config(root / "edge_denoise/configs/sem_real_burst_t16.yml")
+    assert cfg.objective.fusion.levels == list(range(1, 8)) and cfg.min_replicas == 8
+    assert cfg.training.init_checkpoint == Path(base.training.run_dir) / "ckpt_latest.pt"
+    # Same backbone and level conditioning, so the warm start loads strictly.
+    assert cfg.model == base.model and cfg.data == base.data
+    assert cfg.objective.model_copy(update={"fusion": None}) == base.objective.model_copy(update={"fusion": None})
+    assert cfg.objective.fusion.condition_on_level and cfg.objective.fusion.align == base.objective.fusion.align
+    assert cfg.training.batch_size * cfg.training.accumulation_steps == 16
+
+
 class CaptureWriter:
     def __init__(self, **kwargs):
         self.scalars, self.images = {}, {}

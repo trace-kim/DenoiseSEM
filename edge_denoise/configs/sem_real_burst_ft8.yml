@@ -1,0 +1,53 @@
+# Continue the real burst model (sem_real_burst_t16.yml) on sites with only 8
+# acquisitions each. Same objective, backbone and effective batch; warm start
+# from the T = 16 run's EMA weights with fresh optimizer/EMA state.
+#
+# frames_per_burst = 8 (7 averaged inputs at most + one target), so levels are
+# 1..7: frame counts 8..16 receive no further training on this data. Override
+# the dataset, the init checkpoint and the run dir on the command line.
+data:
+  dataset_dir: data/SEM-real-none
+  image_size: 512
+  channels: 1
+  real_matching:
+    registration: affine
+    brightness: percentile
+objective:
+  representation: image
+  target: noisy
+  gradient_target: target
+  lambda_image: 1.0
+  lambda_gradient: 0.0
+  lambda_consistency: 0.0
+  consistency_domain: image
+  loss: l2
+  fusion:
+    align: matched
+    frames_per_burst: 8
+    levels: [1, 2, 3, 4, 5, 6, 7]
+    condition_on_level: true
+model:
+  ch: 64
+  ch_mult: [1, 1, 2, 2, 4, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/edge_denoise/sem_real_burst_ft8_affine_percentile
+  init_checkpoint: runs/edge_denoise/sem_real_burst_t16_affine_percentile/ckpt_latest.pt
+  init_mode: strict
+  batch_size: 4
+  accumulation_steps: 4
+  precision: fp32
+  max_steps: 10000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  seed: 0
+  device: cuda:0
+  log_every: 50
+  val_every: 1000
+  val_images: 4
+  checkpoint_every: 1000

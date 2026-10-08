@@ -2,7 +2,11 @@
 
 Only images directly in --source are used (subfolders are ignored), in natural
 filename order; every `--frames-per-site` consecutive files are one site.
-No registration.
+No registration. Averages are saved as lossless grayscale PNG.
+
+`sites/site001/ ...` receives byte-identical copies of each site's original
+files: the one-folder-per-site layout `python -m edge_denoise prepare-real`
+expects for training.
 
     python tools/average_site_groups.py --source /data/20261002_162547 \
         --output /data/20261002_162547_averages
@@ -13,6 +17,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import re
+import shutil
 
 import numpy as np
 from PIL import Image
@@ -63,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
         (output / f"average{k}").mkdir(parents=True)
     for s in range(len(files) // n):
         site = files[s * n:(s + 1) * n]
+        site_dir = output / "sites" / f"site{s + 1:03d}"
+        site_dir.mkdir(parents=True)
+        for path in site:
+            shutil.copy2(path, site_dir / path.name)
         frames = [read_gray(p) for p in site]
         if len({f.shape for f in frames}) != 1:
             raise SystemExit(f"Different image sizes within site: {site[0]} .. {site[-1]}")
