@@ -19,17 +19,28 @@ def _write_sites(folder, count, seed=0):
 
 
 def test_consecutive_groups_in_natural_order_are_averaged_from_originals(tmp_path):
-    frames = _write_sites(tmp_path / "src" / "a", 16)
+    frames = _write_sites(tmp_path / "src", 16)
     assert groups.main(["--source", str(tmp_path / "src"), "--output", str(tmp_path / "out")]) == 0
     out = tmp_path / "out"
-    assert len(list((out / "average2" / "a").iterdir())) == 8
-    assert len(list((out / "average4" / "a").iterdir())) == 4
-    assert len(list((out / "average8" / "a").iterdir())) == 2
+    assert len(list((out / "average2").iterdir())) == 8
+    assert len(list((out / "average4").iterdir())) == 4
+    assert len(list((out / "average8").iterdir())) == 2
     # img_9..img_16 is site 2; natural order keeps img_10 after img_9.
-    saved = np.asarray(Image.open(out / "average8" / "a" / "site002_avg8_1_img_9-img_16.png"))
+    saved = np.asarray(Image.open(out / "average8" / "site002_avg8_1_img_9-img_16.png"))
     np.testing.assert_array_equal(saved, np.rint(frames[8:16].mean(axis=0)).astype(np.uint8))
-    saved = np.asarray(Image.open(out / "average4" / "a" / "site001_avg4_2_img_5-img_8.png"))
+    saved = np.asarray(Image.open(out / "average4" / "site001_avg4_2_img_5-img_8.png"))
     np.testing.assert_array_equal(saved, np.rint(frames[4:8].mean(axis=0)).astype(np.uint8))
+
+
+def test_subfolders_are_ignored(tmp_path):
+    frames = _write_sites(tmp_path / "src", 8)
+    # Unrelated images in a subfolder, in a count that would break the grouping if read.
+    _write_sites(tmp_path / "src" / "other", 3, seed=1)
+    assert groups.main(["--source", str(tmp_path / "src"), "--output", str(tmp_path / "out")]) == 0
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["average2", "average4", "average8"]
+    assert all(p.is_file() for p in (tmp_path / "out" / "average8").iterdir())
+    saved = np.asarray(Image.open(tmp_path / "out" / "average8" / "site001_avg8_1_img_1-img_8.png"))
+    np.testing.assert_array_equal(saved, np.rint(frames.mean(axis=0)).astype(np.uint8))
 
 
 def test_partial_site_is_rejected_before_writing(tmp_path):
