@@ -52,9 +52,16 @@ DATA=/data/20261002_prep_data/train_align_none
 FT=runs/edge_denoise/<your_ft_consist_run>
 CUDA_VISIBLE_DEVICES=0 python -m edge_denoise train --config "$FT/config.yml" \
   --dataset-dir "$DATA" --init-checkpoint "$FT/ckpt_latest.pt" \
+  --real-matching-cache runs/edge_denoise/261008_ft_consist_newdata_matching.json \
   --run-dir runs/edge_denoise/261008_ft_consist_newdata \
   --max-steps 10000 --device cuda:0 --cpu-threads 2
 ```
+
+`--real-matching-cache` is required here. A suite-trained run's `config.yml`
+points `data.real_matching_cache` at the suite's `real_matching.json`, which
+holds registration measurements of the *old* dataset; reusing it fails with
+`real matching cache identity differs`. Give the new dataset a path that does
+not exist yet: the first run measures and writes it, and a `--resume` reuses it.
 
 ft_consist needs 3 frames per site (input, target, consistency frame), so 8 is
 enough.
